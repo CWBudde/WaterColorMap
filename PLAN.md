@@ -647,6 +647,137 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 
 ---
 
+## Phase 7: Repository Quality & Hardening 🔴 NEW — from full-repo quality review (2026-08)
+
+A detailed, multi-area review (code quality, testing, CI/build, docs, security) found that
+several things advertised as working are in fact **broken or non-functional**, giving a false
+sense of safety. This phase tracks fixing what can be fixed. Items are ordered by priority;
+`[P0]` = broken/red today, `[P1]` = high impact, `[P2]` = should-fix, `[P3]` = polish.
+
+### 7.1 Make the build & test suite green again (P0 — currently RED)
+
+- [ ] **[P0]** `internal/geojson` test suite does not compile — `converter_test.go:116,165,192`
+  reference removed field `Civic`; renamed to `Urban` in `types/feature.go:39`. Fix the field
+  names so the package builds.
+- [ ] **[P0]** `internal/watercolor` **panics (SIGSEGV)** — `TestPaintLayerAppliesMaskTintAndEdge`
+  hits a nil-pointer deref at `mask/processor.go:290` because a per-layer style
+  `MaskNoiseStrength: 0.18` overrides the test's `NoiseStrength = 0` and enters the noise branch
+  with a nil `PerlinNoise`. Add a nil-guard in production code AND fix the test's invalid
+  determinism assumption.
+- [ ] **[P0]** `docker/Dockerfile` **does not build** — `RUN` blocks at lines 22, 55, 71 end in a
+  dangling `&&` with no trailing `\` (verified via `cat -A`). Likely caused by shfmt reformatting
+  the Dockerfile (see 7.4). Fix the line continuations.
+- [ ] **[P0]** CI `test-unit.yaml` installs no Mapnik, so renderer/pipeline/server/cmd never
+  compile in CI and geojson (above) fails regardless — the unit job cannot have been green.
+  Install `libmapnik-dev` (as `test-can-build` does) or split pure-Go tests behind a build tag.
+
+### 7.2 Security & robustness of the tile server (P0/P1 — not internet-safe)
+
+- [ ] **[P0]** Validate tile coordinates at parse time (`tile/coords.go:106` `ParseCoords`): enforce
+  `z ≤ 22` and `x,y < 2^z`, reject with 400. Without this, `serveTile` (`server/ondemand_tiles.go`)
+  will fetch+render+cache for **any** coordinate → trivial DoS that also gets the server IP-banned
+  by the public Overpass endpoint, and fills disk unbounded.
+- [ ] **[P0]** Add `recover()` to background workers — `fetch_queue.go:190`, `ondemand_tiles.go:158,522`
+  run in bare goroutines with no panic recovery; one malformed Overpass response crashes the whole
+  process (net/http only recovers handler goroutines).
+- [ ] **[P1]** Add per-IP rate limiting + bounded request-admission queue on `/tiles/`; return 503
+  when the render backlog is deep (backpressure — nothing bounds queued goroutines today).
+- [ ] **[P1]** Use `QueryContext(ctx, query)` in `datasource/overpass.go:154` — the threaded `ctx` is
+  currently ignored, so request timeouts/cancellation cannot abort an in-flight Overpass fetch and
+  hung upstreams pin the (only 2) fetch workers.
+- [ ] **[P1]** Set `ReadTimeout`, `IdleTimeout`, and a per-route write timeout on the `http.Server`
+  (`cmd/serve.go:178`, currently only `ReadHeaderTimeout`); keep the SSE route on a separate handler.
+  Add graceful shutdown that calls `od.Stop()` on SIGINT/SIGTERM (`serve.go` never does; `generate.go`
+  does — fix the inconsistency).
+- [ ] **[P2]** Bound Overpass response reads with `io.LimitReader`/`MaxBytesReader` (unbounded
+  `io.ReadAll` today → OOM risk).
+- [ ] **[P2]** Stop leaking raw internal error strings (incl. backend server names) to HTTP clients
+  (`ondemand_tiles.go:304,367,378,406,413`); log detail, return generic messages.
+- [ ] **[P2]** Evict from the per-tile `locks sync.Map` (`ondemand_tiles.go:444`) — it stores one
+  mutex per distinct tile forever → unbounded memory on a long-running server.
+
+### 7.3 Code quality & correctness (P1/P2)
+
+- [ ] **[P1]** Shared, non-unique GeoJSON temp path (`renderer/multipass.go:175`) — base (256px) and
+  `@2x` (512px) renders of the same coords write/delete the identical temp file concurrently and race.
+  Include tile size + a random token (or use the per-call temp dir).
+- [ ] **[P1]** Replace `debugCtx interface{}` + unchecked type assertion (`pipeline/generator.go:140,151`)
+  with the concrete `*DebugContext` — removes a panic path and cleans the `worker.Generator` interface.
+- [ ] **[P2]** Buffer-pooling infrastructure (`ProcessorContext`, `DistanceContext`) is built but
+  bypassed — `paintFromFinalMask` allocates a fresh context per call (~8×/tile). Either thread a
+  per-worker context through the pipeline or delete the pooling façade.
+- [ ] **[P2]** Fix `worker/pool.go:96` — `break` inside `select` doesn't exit the feed loop, so
+  `ctx.Done()` cancellation is dead logic (only harmless because `taskCh` is fully buffered).
+- [ ] **[P2]** Consolidate duplicated Web-Mercator math (`tile/coords.go:76`, `renderer/mapnik.go:115`,
+  `raster/raster.go:342`; `mapnik.go:119` even hardcodes `3.14159265359` next to `math.Pi`).
+- [ ] **[P2]** Single source of truth for layer compositing order (`composite.DefaultOrder` is unused
+  and disagrees with the hard-coded slice in `pipeline/generator.go:597`).
+- [ ] **[P2]** Replace 12–18 positional-arg functions (`cmd/generate.go:146,213`) with a
+  `GenerateOptions` struct.
+- [ ] **[P3]** De-duplicate near-identical threshold/noise funcs (`mask/processor.go:396/429`, `286/334`)
+  and the repetitive Overpass query builders (`overpass.go:249-448`, table-driven by zoom).
+- [ ] **[P3]** MBTiles gzips PNG payloads (`mbtiles/writer.go:178`) — non-standard; external tools
+  (QGIS, tileserver-gl) expect raw PNG. Store PNG raw if interop matters.
+- [ ] **[P3]** Check `Close()` errors on files being written (`pipeline/generator.go:651`,
+  `texture/generator.go:135`) to avoid silent truncation.
+
+### 7.4 CI / build / tooling (P1/P2)
+
+- [ ] **[P1]** Make `build-release.yaml` actually produce binaries: it cross-compiles `CGO_ENABLED=1`
+  for arm64/windows/darwin-amd64 with no cross toolchain or cross-built Mapnik (3 of 5 targets fail);
+  the tag-push trigger has an empty `upload_url`; `actions/upload-release-asset@v1` is deprecated.
+  Drop unbuildable targets or add proper cross containers; replace the upload action.
+- [ ] **[P1]** Repair fake checks: `check-tidy` never runs `go mod tidy` before diffing (always passes);
+  `check-generated` is a stub that echoes success; `test-format` installs none of treefmt's formatters
+  so it verifies nothing. Make them real or delete them.
+- [ ] **[P1]** Collapse the three overlapping lint/format stacks (golangci-lint + trunk + treefmt) and
+  fix the gci prefix casing bug (`treefmt.toml:47` `WaterColorMap` → `watercolormap`, so local-import
+  grouping silently does nothing). Align golangci-lint versions (CI v2.2.1 vs trunk 2.7.2) and the
+  trunk Go runtime (1.21) with the project's Go 1.25.
+- [ ] **[P2]** Stop shfmt from formatting the Dockerfile (`treefmt.toml:70` — root cause of 7.1's
+  broken `&&`); add a `.dockerignore`; verify the downloaded Go tarball checksum; digest-pin base
+  images.
+- [ ] **[P2]** Fix the cache-dependency glob `*/*.sum` → `go.sum` (root lockfile) in
+  `test-unit/test-lint/test-can-build.yaml`; SHA-pin third-party actions.
+- [ ] **[P3]** Pin the core dependency `MeKo-Christian/go-overpass` (untagged pseudo-version on a
+  personal fork) or bring it in-org; emit `vX.Y.Z` release tags (release-please currently produces
+  bare `0.2.0`, which Go module tooling won't resolve).
+
+### 7.5 Documentation & repo hygiene (P1/P2)
+
+- [ ] **[P1]** Fix the README quick-start commands — `--tile z13_x4297_y2754` (no such flag; use
+  `--zoom N --x N --y N`) at `README.md:39,56,66`, and `--min-zoom/--max-zoom/--bounds` →
+  `--zoom-min/--zoom-max/--bbox` at `README.md:78`. The first command every user runs currently errors.
+- [ ] **[P1]** Remove the committed 20 MB `docs/wasm-playground/wasm.wasm` (and `wasm_exec.js`) from
+  git — pure build artifacts, ~95% of repo bloat; build them in CI for Pages and gitignore `*.wasm`.
+- [ ] **[P1]** Rewrite `config.example.yaml` to match the code — the `tile:`, `rendering:`,
+  `test-area:` and `overpass.timeout/rate-limit/retry` blocks are read by nothing (silently ignored),
+  texture filenames (`park.png`/`forest.png`) don't exist, and `protomaps/openmaptiles` data-sources
+  aren't implemented.
+- [ ] **[P2]** Resolve the MeKo-Tech vs MeKo-Christian identity split (module/README say `MeKo-Tech`;
+  all CHANGELOG links and both demo links say `MeKo-Christian` → likely 404s). Pick one, fix links.
+- [ ] **[P2]** Prune/consolidate `docs/` status reports (`PHASE-2-COMPLETE.md`, three overlapping
+  `WASM-PLAYGROUND-*.md`, reconcile `PLAN.md` vs `docs/goal.md`); fix the `--port` (→ `--addr`) and
+  MBTiles usage examples in this file (lines ~699). Update the stale Phase 3 "IN PROGRESS" / 4.10
+  "BLOCKER" markers to reflect actual state.
+- [ ] **[P3]** Improve commit hygiene (the CHANGELOG inherits "more progress"/"recent work"/7× identical
+  "playground issues fixed"); add `CONTRIBUTING.md`, package-level godoc, and an architecture overview.
+
+### 7.6 Testing improvements (P2/P3)
+
+- [ ] **[P2]** Separate pure-Go logic from CGO via build tags so genuinely good tests
+  (`parseTilePath`, synthetic pipeline path, raster, mask/composite) run in a Mapnik-less env / CI.
+- [ ] **[P2]** Add `internal/raster` tests (353 LOC, pure Go, zero tests) and mocked-HTTP
+  (`httptest`) Overpass tests for caching/retry/error paths (current datasource "unit" tests are
+  tautological — only assert non-nil constructors).
+- [ ] **[P2]** Delete the ~7.2 MB orphaned goldens under `testdata/golden/watercolor-stages*/`
+  (referenced by no test) and fix the `update-goldens` Justfile recipe (matches no test → no-op).
+- [ ] **[P3]** Replace timing-based assertions (`worker/pool_test.go:90,174`) with deterministic
+  synchronization; switch file-producing tests to `t.TempDir()` (currently write shared
+  `testdata/output/...`); adopt `t.Parallel()` where safe (0 uses today).
+
+---
+
 ## Success Criteria
 
 Each phase is considered complete when:
