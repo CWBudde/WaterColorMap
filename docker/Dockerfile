@@ -50,7 +50,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install only runtime dependencies (not dev packages)
 RUN apt-get update && apt-get install -y \
-	libmapnik3.1 \
+	libmapnik3.1t64 \
 	mapnik-utils \
 	ca-certificates && \
 	rm -rf /var/lib/apt/lists/*
