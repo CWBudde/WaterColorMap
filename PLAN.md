@@ -656,20 +656,23 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
 
 ### 7.1 Make the build & test suite green again (P0 — currently RED)
 
-- [ ] **[P0]** `internal/geojson` test suite does not compile — `converter_test.go:116,165,192`
-  reference removed field `Civic`; renamed to `Urban` in `types/feature.go:39`. Fix the field
-  names so the package builds.
-- [ ] **[P0]** `internal/watercolor` **panics (SIGSEGV)** — `TestPaintLayerAppliesMaskTintAndEdge`
-  hits a nil-pointer deref at `mask/processor.go:290` because a per-layer style
-  `MaskNoiseStrength: 0.18` overrides the test's `NoiseStrength = 0` and enters the noise branch
-  with a nil `PerlinNoise`. Add a nil-guard in production code AND fix the test's invalid
-  determinism assumption.
-- [ ] **[P0]** `docker/Dockerfile` **does not build** — `RUN` blocks at lines 22, 55, 71 end in a
+- [x] **[P0]** `internal/geojson` test suite does not compile — `converter_test.go` referenced the
+  removed field `Civic`; renamed to `Urban` in `types/feature.go:39`. Fixed the field names (and the
+  stale log label) so the package builds and tests pass.
+- [x] **[P0]** `internal/watercolor` **panics (SIGSEGV)** — `TestPaintLayerAppliesMaskTintAndEdge`
+  hit a nil-pointer deref at `mask/processor.go:290` because a per-layer style
+  `MaskNoiseStrength: 0.18` overrode the test's `NoiseStrength = 0` and entered the noise branch
+  with a nil `PerlinNoise`. Added a nil-guard in `processMask` (skip noise when `PerlinNoise == nil`;
+  production always sets it) and made the test's no-noise intent explicit via `style.MaskNoiseStrength = 0`.
+  Fixing the panic also unmasked two pre-existing failures in `quality_test.go` (blur/threshold tests
+  varied global params that per-layer style overrides) — fixed those too. Package is now green.
+- [x] **[P0]** `docker/Dockerfile` **does not build** — `RUN` blocks at lines 22, 55, 71 ended in a
   dangling `&&` with no trailing `\` (verified via `cat -A`). Likely caused by shfmt reformatting
-  the Dockerfile (see 7.4). Fix the line continuations.
-- [ ] **[P0]** CI `test-unit.yaml` installs no Mapnik, so renderer/pipeline/server/cmd never
-  compile in CI and geojson (above) fails regardless — the unit job cannot have been green.
-  Install `libmapnik-dev` (as `test-can-build` does) or split pure-Go tests behind a build tag.
+  the Dockerfile (see 7.4). Restored the line continuations. (Still TODO in 7.4: stop shfmt touching it.)
+- [x] **[P0]** CI `test-unit.yaml` installed no Mapnik, so renderer/pipeline/server/cmd never
+  compiled in CI and geojson (above) failed regardless — the unit job cannot have been green.
+  Added the `libmapnik-dev` install step (mirroring `test-can-build`). (Follow-up in 7.6: split pure-Go
+  tests behind a build tag so they can run without Mapnik.)
 
 ### 7.2 Security & robustness of the tile server (P0/P1 — not internet-safe)
 

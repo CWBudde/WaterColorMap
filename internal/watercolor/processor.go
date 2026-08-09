@@ -242,7 +242,10 @@ func processMask(baseMask *image.Gray, layer geojson.LayerType, params Params) (
 
 	blurred := mask.BoxBlurSigma(baseMask, layerBlur)
 	noisy := blurred
-	if layerNoiseStrength != 0 {
+	// Skip the noise stage when no noise texture is available. Production always sets
+	// params.PerlinNoise (pipeline and WASM paths), so this only guards against a missing
+	// texture instead of dereferencing nil inside the noise application.
+	if layerNoiseStrength != 0 && params.PerlinNoise != nil {
 		if style.AdaptiveNoise && style.NoiseMaxDist > 0 {
 			// Compute distance transform of thresholded mask to measure feature thickness
 			// Use NoiseMaxDist as the max distance since we only need to distinguish up to that point

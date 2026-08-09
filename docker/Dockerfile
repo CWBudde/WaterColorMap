@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y \
 	python3-mapnik \
 	libpng-dev \
 	libjpeg-dev \
-	libfreetype6-dev &&
+	libfreetype6-dev && \
 	rm -rf /var/lib/apt/lists/*
 
 # Install Go 1.25
@@ -52,7 +52,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
 	libmapnik3.1 \
 	mapnik-utils \
-	ca-certificates &&
+	ca-certificates && \
 	rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -68,7 +68,7 @@ COPY --from=builder /app/assets /app/assets
 COPY --from=builder /app/config.example.yaml /app/config.yaml
 
 # Create directories for tiles and cache
-RUN mkdir -p /app/tiles /app/cache &&
+RUN mkdir -p /app/tiles /app/cache && \
 	chown -R mapuser:mapuser /app
 
 USER mapuser

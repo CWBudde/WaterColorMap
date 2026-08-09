@@ -39,6 +39,7 @@ func TestPaintLayerAppliesMaskTintAndEdge(t *testing.T) {
 	style.EdgeStrength = 0.6 // Increased from 0.5 for stronger darkening
 	style.EdgeSigma = 3.5    // Increased for box blur visibility
 	style.EdgeGamma = 1.0
+	style.MaskNoiseStrength = 0.0 // keep deterministic: per-layer noise would otherwise override params.NoiseStrength
 	params.Styles[layer] = style
 
 	// Build a simple square feature mask (centered, larger)
