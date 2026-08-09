@@ -55,9 +55,11 @@ func TestVisualQualityBlurImpactsCoverage(t *testing.T) {
 	baseParams.AntialiasSigma = 0
 	baseParams.Threshold = 128
 
-	// small blur
+	// small blur. Clear the per-layer MaskBlurSigma so the global params.BlurSigma
+	// under test actually takes effect (otherwise the style override wins).
 	paramsA := baseParams
 	styleA := paramsA.Styles[geojson.LayerWater]
+	styleA.MaskBlurSigma = 0
 	paramsA.BlurSigma = 1.0
 	paramsA.Styles[geojson.LayerWater] = styleA
 
@@ -69,6 +71,7 @@ func TestVisualQualityBlurImpactsCoverage(t *testing.T) {
 	// larger blur should grow coverage after thresholding
 	paramsB := baseParams
 	styleB := paramsB.Styles[geojson.LayerWater]
+	styleB.MaskBlurSigma = 0
 	paramsB.BlurSigma = 4.0
 	paramsB.Styles[geojson.LayerWater] = styleB
 
@@ -92,7 +95,12 @@ func TestVisualQualityThresholdImpactsCoverage(t *testing.T) {
 	baseParams.AntialiasSigma = 0
 	baseParams.BlurSigma = 2.0
 
+	// Clear the per-layer MaskThreshold so the global params.Threshold under test
+	// actually takes effect (otherwise the style override wins).
 	paramsLow := baseParams
+	styleLow := paramsLow.Styles[geojson.LayerWater]
+	styleLow.MaskThreshold = nil
+	paramsLow.Styles[geojson.LayerWater] = styleLow
 	paramsLow.Threshold = 100
 	imgLow, err := PaintLayer(layerImg, geojson.LayerWater, paramsLow)
 	if err != nil {
@@ -100,6 +108,9 @@ func TestVisualQualityThresholdImpactsCoverage(t *testing.T) {
 	}
 
 	paramsHigh := baseParams
+	styleHigh := paramsHigh.Styles[geojson.LayerWater]
+	styleHigh.MaskThreshold = nil
+	paramsHigh.Styles[geojson.LayerWater] = styleHigh
 	paramsHigh.Threshold = 180
 	imgHigh, err := PaintLayer(layerImg, geojson.LayerWater, paramsHigh)
 	if err != nil {

@@ -113,7 +113,7 @@ func TestGetLayerFeatures(t *testing.T) {
 			{ID: "building1", Type: types.FeatureTypeBuilding},
 			{ID: "building2", Type: types.FeatureTypeBuilding},
 		},
-		Civic: []types.Feature{
+		Urban: []types.Feature{
 			{ID: "civic1", Type: types.FeatureTypeUrban},
 		},
 		Roads: []types.Feature{
@@ -153,7 +153,7 @@ func TestGetLayerFeatures(t *testing.T) {
 		t.Errorf("Expected 3 road features, got %d", len(roadFeatures))
 	}
 
-	t.Logf("Layer extraction: Water=%d, Parks=%d, Civic=%d, Buildings=%d, Roads=%d",
+	t.Logf("Layer extraction: Water=%d, Parks=%d, Urban=%d, Buildings=%d, Roads=%d",
 		len(waterFeatures), len(parkFeatures), len(urbanFeatures), len(buildingFeatures), len(roadFeatures))
 }
 
@@ -162,7 +162,7 @@ func TestLayerCount(t *testing.T) {
 		Water:     make([]types.Feature, 5),
 		Parks:     make([]types.Feature, 3),
 		Buildings: make([]types.Feature, 10),
-		Civic:     make([]types.Feature, 2),
+		Urban:     make([]types.Feature, 2),
 		Roads:     make([]types.Feature, 7),
 	}
 
@@ -189,7 +189,7 @@ func TestLayerSummary(t *testing.T) {
 		Water:     make([]types.Feature, 5),
 		Parks:     make([]types.Feature, 3),
 		Buildings: make([]types.Feature, 10),
-		Civic:     make([]types.Feature, 2),
+		Urban:     make([]types.Feature, 2),
 		Roads:     make([]types.Feature, 7),
 	}
 
