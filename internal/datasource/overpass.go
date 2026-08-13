@@ -243,23 +243,12 @@ func (ds *OverpassDataSource) buildTileQuery(bounds types.BoundingBox, zoom int)
 		outputMode = "out geom qt;"
 	}
 
-	// Build zoom-dependent query parts
+	// Build zoom-dependent query parts. The layer order is part of the emitted
+	// query text, so it is fixed here rather than derived from a map.
 	var queryParts []string
-
-	// Water features (blues)
-	queryParts = append(queryParts, ds.buildWaterQuery(bbox, zoom)...)
-
-	// Parks/greens features
-	queryParts = append(queryParts, ds.buildParksQuery(bbox, zoom)...)
-
-	// Roads features
-	queryParts = append(queryParts, ds.buildRoadsQuery(bbox, zoom)...)
-
-	// Railroads features
-	queryParts = append(queryParts, ds.buildRailroadsQuery(bbox, zoom)...)
-
-	// Buildings and urban (only at higher zooms)
-	queryParts = append(queryParts, ds.buildBuildingsQuery(bbox, zoom)...)
+	for _, layer := range featureLayers {
+		queryParts = append(queryParts, renderRules(layer.rules, bbox, zoom)...)
+	}
 
 	// Build final query
 	query := "[out:json][timeout:60];\n(\n"
@@ -271,256 +260,191 @@ func (ds *OverpassDataSource) buildTileQuery(bounds types.BoundingBox, zoom int)
 	return query
 }
 
-// buildWaterQuery returns water-related query parts based on zoom level.
+// featureRule describes one Overpass element filter and the zoom window in
+// which it applies. The rule renders one query line per entry in elems, in
+// order, so `way` before `relation` stays byte-stable.
+//
+// Fields are ordered for struct alignment, not for reading order.
+type featureRule struct {
+	// filter is the tag selector appended to the element, e.g. `["highway"]`.
+	filter string
+	// elems lists the Overpass element types to emit, e.g. "way", "relation".
+	elems []string
+	// minZoom is the lowest zoom at which the rule applies (0 == from z0).
+	minZoom int
+	// maxZoom is the highest zoom at which the rule applies (0 == unbounded).
+	maxZoom int
+}
+
+// appliesAt reports whether the rule is active at the given zoom level.
+func (r featureRule) appliesAt(zoom int) bool {
+	if zoom < r.minZoom {
+		return false
+	}
+	return r.maxZoom == 0 || zoom <= r.maxZoom
+}
+
+// featureLayer groups the rules of one thematic layer. Layers are concatenated
+// in declaration order, which determines the order of the emitted query lines.
+type featureLayer struct {
+	name  string
+	rules []featureRule
+}
+
+// renderRules turns the rules that apply at zoom into Overpass query lines.
+func renderRules(rules []featureRule, bbox string, zoom int) []string {
+	var parts []string
+	for _, rule := range rules {
+		if !rule.appliesAt(zoom) {
+			continue
+		}
+		for _, elem := range rule.elems {
+			parts = append(parts, fmt.Sprintf("%s%s(%s);", elem, rule.filter, bbox))
+		}
+	}
+	return parts
+}
+
+var (
+	wayOnly     = []string{"way"}
+	wayRelation = []string{"way", "relation"}
+)
+
+// featureLayers is the ordered set of layers assembled into every tile query.
+var featureLayers = []featureLayer{
+	{name: "water", rules: waterRules},
+	{name: "parks", rules: parksRules},
+	{name: "roads", rules: roadsRules},
+	{name: "railroads", rules: railroadsRules},
+	{name: "buildings", rules: buildingsRules},
+}
+
+// waterRules covers water bodies and waterways.
 // Zoom-based filtering:
 //   - All zooms: Coastlines + large water bodies
 //   - z10-11: + major rivers
-//   - z12-13: + rivers/streams/canals
-//   - z14+: All waterways
-func (ds *OverpassDataSource) buildWaterQuery(bbox string, zoom int) []string {
-	var parts []string
+//   - z12-15: + rivers/canals (streams excluded, they render too narrow)
+//   - z16+: All waterways
+//
+// NOTE: OSM does NOT include ocean polygons in raw data. Ocean is represented
+// as "absence of land". This causes ocean tiles to render as land (tan background).
+// See PLAN.md section 4.10 for ocean rendering solutions (water polygons or synthesis).
+var waterRules = []featureRule{
+	{elems: wayOnly, filter: `["natural"="water"]`},
+	{elems: wayOnly, filter: `["natural"="coastline"]`},
+	{elems: []string{"relation"}, filter: `["natural"="water"]`},
 
-	// Coastlines and water bodies - always include at all zoom levels
-	// NOTE: OSM does NOT include ocean polygons in raw data. Ocean is represented
-	// as "absence of land". This causes ocean tiles to render as land (tan background).
-	// See PLAN.md section 4.10 for ocean rendering solutions (water polygons or synthesis).
-	parts = append(parts,
-		fmt.Sprintf(`way["natural"="water"](%s);`, bbox),
-		fmt.Sprintf(`way["natural"="coastline"](%s);`, bbox),
-		fmt.Sprintf(`relation["natural"="water"](%s);`, bbox),
-	)
-
-	// Rivers and waterways - progressively add detail
-	// Streams excluded at zoom ≤15 as they render too narrow to be useful
-	if zoom >= 10 {
-		switch {
-		case zoom >= 16:
-			// z16+: All waterways including streams
-			parts = append(parts,
-				fmt.Sprintf(`way["waterway"](%s);`, bbox),
-				fmt.Sprintf(`relation["waterway"](%s);`, bbox),
-			)
-		case zoom >= 12:
-			// z12-15: Rivers and canals only (no streams - too narrow)
-			parts = append(parts,
-				fmt.Sprintf(`way["waterway"~"river|canal"](%s);`, bbox),
-				fmt.Sprintf(`relation["waterway"~"river|canal"](%s);`, bbox),
-			)
-		default:
-			// z10-11: Major rivers only
-			parts = append(parts,
-				fmt.Sprintf(`way["waterway"="river"](%s);`, bbox),
-				fmt.Sprintf(`relation["waterway"="river"](%s);`, bbox),
-			)
-		}
-	}
-
-	return parts
+	{elems: wayRelation, filter: `["waterway"="river"]`, minZoom: 10, maxZoom: 11},
+	{elems: wayRelation, filter: `["waterway"~"river|canal"]`, minZoom: 12, maxZoom: 15},
+	{elems: wayRelation, filter: `["waterway"]`, minZoom: 16},
 }
 
-// buildParksQuery returns parks/green space query parts based on zoom level.
+// parksRules covers parks and other green spaces.
 // Zoom-based filtering:
 //   - All zooms: Large forests and woods (major geographic features)
-//   - z8-9: + parks
-//   - z10-11: + meadows and grass
-//   - z14-15: + gardens
-//   - z16+: + playgrounds
-func (ds *OverpassDataSource) buildParksQuery(bbox string, zoom int) []string {
-	var parts []string
+//   - z8+: + parks, nature reserves, heath
+//   - z10+: + grass
+//   - z14+: + gardens, orchards, vineyards
+//   - z16+: + playgrounds, allotments
+var parksRules = []featureRule{
+	// Forests and woods - always included (major geographic features like water).
+	// Relations too, for complete coverage of large forest areas.
+	{elems: wayRelation, filter: `["landuse"="forest"]`},
+	{elems: wayRelation, filter: `["natural"="wood"]`},
 
-	// Forests and woods - always include at all zoom levels (major geographic features like water)
-	// Include both ways and relations for complete coverage of large forest areas
-	parts = append(parts,
-		fmt.Sprintf(`way["landuse"="forest"](%s);`, bbox),
-		fmt.Sprintf(`relation["landuse"="forest"](%s);`, bbox),
-		fmt.Sprintf(`way["natural"="wood"](%s);`, bbox),
-		fmt.Sprintf(`relation["natural"="wood"](%s);`, bbox),
-	)
+	{elems: wayRelation, filter: `["leisure"="park"]`, minZoom: 8},
+	{elems: wayRelation, filter: `["leisure"="nature_reserve"]`, minZoom: 8},
+	{elems: wayRelation, filter: `["natural"="heath"]`, minZoom: 8},
 
-	if zoom >= 8 {
-		// z8+: Add parks, nature reserves, and heath (like Lüneburger Heide)
-		parts = append(parts,
-			fmt.Sprintf(`way["leisure"="park"](%s);`, bbox),
-			fmt.Sprintf(`relation["leisure"="park"](%s);`, bbox),
-			fmt.Sprintf(`way["leisure"="nature_reserve"](%s);`, bbox),
-			fmt.Sprintf(`relation["leisure"="nature_reserve"](%s);`, bbox),
-			fmt.Sprintf(`way["natural"="heath"](%s);`, bbox),
-			fmt.Sprintf(`relation["natural"="heath"](%s);`, bbox),
-		)
-	}
+	// landuse=grass only, not natural=grassland or meadow/farmland.
+	{elems: wayOnly, filter: `["landuse"="grass"]`, minZoom: 10},
+	// NOTE: natural=heath is emitted a second time here (way only), duplicating
+	// the z8+ rule above. Preserved verbatim; see the follow-up in the PR.
+	{elems: wayOnly, filter: `["natural"="heath"]`, minZoom: 10},
 
-	if zoom >= 10 {
-		// z10+: Add grass (landuse=grass only, not natural=grassland or meadow/farmland)
-		parts = append(parts,
-			fmt.Sprintf(`way["landuse"="grass"](%s);`, bbox),
-			fmt.Sprintf(`way["natural"="heath"](%s);`, bbox),
-		)
-	}
+	{elems: wayOnly, filter: `["leisure"="garden"]`, minZoom: 14},
+	{elems: wayOnly, filter: `["landuse"="orchard"]`, minZoom: 14},
+	{elems: wayOnly, filter: `["landuse"="vineyard"]`, minZoom: 14},
 
-	if zoom >= 14 {
-		// z14+: Add gardens and orchards
-		parts = append(parts,
-			fmt.Sprintf(`way["leisure"="garden"](%s);`, bbox),
-			fmt.Sprintf(`way["landuse"="orchard"](%s);`, bbox),
-			fmt.Sprintf(`way["landuse"="vineyard"](%s);`, bbox),
-		)
-	}
-
-	if zoom >= 16 {
-		// z16+: Add playgrounds and allotments
-		parts = append(parts,
-			fmt.Sprintf(`way["leisure"="playground"](%s);`, bbox),
-			fmt.Sprintf(`way["landuse"="allotments"](%s);`, bbox),
-		)
-	}
-
-	return parts
+	{elems: wayOnly, filter: `["leisure"="playground"]`, minZoom: 16},
+	{elems: wayOnly, filter: `["landuse"="allotments"]`, minZoom: 16},
 }
 
-// buildRoadsQuery returns road query parts based on zoom level.
+// roadsRules covers the highway network. The zoom windows are exclusive: each
+// zoom level matches exactly one rule, and each regex is a superset of the
+// previous one.
 // Zoom-based filtering:
 //   - z<5: No roads
 //   - z5-7: Motorway only
-//   - z8-9: Motorway + trunk
-//   - z10-11: + primary
+//   - z8-11: + trunk, primary
 //   - z12-13: + secondary, tertiary
-//   - z14-15: + residential, unclassified
+//   - z14-15: + residential, unclassified, living_street
 //   - z16+: All roads
-func (ds *OverpassDataSource) buildRoadsQuery(bbox string, zoom int) []string {
-	if zoom < 5 {
-		// No roads at very low zooms
-		return nil
-	}
-
-	if zoom < 8 {
-		// z5-7: Motorway only for overview
-		return []string{
-			fmt.Sprintf(`way["highway"~"motorway|motorway_link"](%s);`, bbox),
-		}
-	}
-
-	if zoom < 10 {
-		// z8-9: Motorway + trunk + primary for visibility at low zoom
-		return []string{
-			fmt.Sprintf(`way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link"](%s);`, bbox),
-		}
-	}
-
-	var parts []string
-
-	switch {
-	case zoom >= 16:
-		// z16+: All roads
-		parts = append(parts, fmt.Sprintf(`way["highway"](%s);`, bbox))
-	case zoom >= 14:
-		// z14-15: Major + residential (no service, track, path, footway, etc.)
-		parts = append(parts,
-			fmt.Sprintf(`way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|residential|unclassified|living_street"](%s);`, bbox),
-		)
-	case zoom >= 12:
-		// z12-13: Major roads + secondary/tertiary
-		parts = append(parts,
-			fmt.Sprintf(`way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link"](%s);`, bbox),
-		)
-	default:
-		// z10-11: Major roads only
-		parts = append(parts,
-			fmt.Sprintf(`way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link"](%s);`, bbox),
-		)
-	}
-
-	return parts
+var roadsRules = []featureRule{
+	{elems: wayOnly, filter: `["highway"~"motorway|motorway_link"]`, minZoom: 5, maxZoom: 7},
+	// NOTE: the historical z8-9 comment said "motorway + trunk", but the regex
+	// has always matched primary too, and z10-11 used the identical regex.
+	// Preserved verbatim; see the follow-up in the PR.
+	{
+		elems:   wayOnly,
+		filter:  `["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link"]`,
+		minZoom: 8,
+		maxZoom: 11,
+	},
+	{
+		elems: wayOnly,
+		filter: `["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|` +
+			`secondary|secondary_link|tertiary|tertiary_link"]`,
+		minZoom: 12,
+		maxZoom: 13,
+	},
+	// z14-15: Major + residential (no service, track, path, footway, etc.)
+	{
+		elems: wayOnly,
+		filter: `["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|` +
+			`secondary|secondary_link|tertiary|tertiary_link|residential|unclassified|living_street"]`,
+		minZoom: 14,
+		maxZoom: 15,
+	},
+	{elems: wayOnly, filter: `["highway"]`, minZoom: 16},
 }
 
-// buildRailroadsQuery returns railroad query parts based on zoom level.
+// railroadsRules covers railway lines. The zoom windows are exclusive.
 // Zoom-based filtering:
 //   - z<9: No railroads
 //   - z9-15: Main rail lines only (major railway tracks)
 //   - z16: + light_rail
 //   - z17+: + subway, tram
-func (ds *OverpassDataSource) buildRailroadsQuery(bbox string, zoom int) []string {
-	if zoom < 9 {
-		// No railroads at very low zooms
-		return nil
-	}
-
-	if zoom <= 15 {
-		// z9-15: Main rail lines only (major railway tracks)
-		return []string{
-			fmt.Sprintf(`way["railway"="rail"](%s);`, bbox),
-		}
-	}
-
-	if zoom == 16 {
-		// z16: Main rail + light rail
-		return []string{
-			fmt.Sprintf(`way["railway"~"rail|light_rail"](%s);`, bbox),
-		}
-	}
-
-	// z17+: All major railway types including subway and tram
-	return []string{
-		fmt.Sprintf(`way["railway"~"rail|light_rail|subway|tram"](%s);`, bbox),
-	}
+var railroadsRules = []featureRule{
+	{elems: wayOnly, filter: `["railway"="rail"]`, minZoom: 9, maxZoom: 15},
+	{elems: wayOnly, filter: `["railway"~"rail|light_rail"]`, minZoom: 16, maxZoom: 16},
+	{elems: wayOnly, filter: `["railway"~"rail|light_rail|subway|tram"]`, minZoom: 17},
 }
 
-// buildBuildingsQuery returns building and urban area query parts based on zoom level.
+// buildingsRules covers buildings and urban areas.
 // Zoom-based filtering:
 //   - z<11: Nothing
-//   - z11-13: Urban landuse areas (residential, commercial, industrial, retail)
-//   - z14-15: Urban landuse areas + civic amenities (schools, hospitals, universities)
-//   - z16+: Individual building footprints + civic amenities (replaces urban areas)
-func (ds *OverpassDataSource) buildBuildingsQuery(bbox string, zoom int) []string {
-	if zoom < 11 {
-		// No buildings or urban areas at very low zooms
-		return nil
-	}
+//   - z11-15: Urban landuse areas (residential, commercial, industrial, retail)
+//   - z14-15: + civic amenities (schools, hospitals, universities, ...)
+//   - z16+: Individual building footprints + civic amenities (landuse areas drop out)
+//
+// Campuses (schools, hospitals, universities) are frequently mapped as
+// multipolygon relations, so relations are queried alongside ways.
+var buildingsRules = []featureRule{
+	{elems: wayRelation, filter: `["landuse"="residential"]`, minZoom: 11, maxZoom: 15},
+	{elems: wayRelation, filter: `["landuse"="commercial"]`, minZoom: 11, maxZoom: 15},
+	{elems: wayRelation, filter: `["landuse"="industrial"]`, minZoom: 11, maxZoom: 15},
+	{elems: wayRelation, filter: `["landuse"="retail"]`, minZoom: 11, maxZoom: 15},
 
-	var parts []string
+	{elems: wayRelation, filter: `["amenity"="school"]`, minZoom: 14},
+	{elems: wayRelation, filter: `["amenity"="hospital"]`, minZoom: 14},
+	{elems: wayRelation, filter: `["amenity"="university"]`, minZoom: 14},
+	{elems: wayRelation, filter: `["amenity"="college"]`, minZoom: 14},
+	{elems: wayRelation, filter: `["amenity"="library"]`, minZoom: 14},
+	{elems: wayRelation, filter: `["amenity"="town_hall"]`, minZoom: 14},
+	{elems: wayRelation, filter: `["leisure"="stadium"]`, minZoom: 14},
 
-	// Urban landuse areas - z11 through z15 only
-	// At z16+, individual buildings replace landuse areas
-	if zoom >= 11 && zoom <= 15 {
-		parts = append(parts,
-			fmt.Sprintf(`way["landuse"="residential"](%s);`, bbox),
-			fmt.Sprintf(`relation["landuse"="residential"](%s);`, bbox),
-			fmt.Sprintf(`way["landuse"="commercial"](%s);`, bbox),
-			fmt.Sprintf(`relation["landuse"="commercial"](%s);`, bbox),
-			fmt.Sprintf(`way["landuse"="industrial"](%s);`, bbox),
-			fmt.Sprintf(`relation["landuse"="industrial"](%s);`, bbox),
-			fmt.Sprintf(`way["landuse"="retail"](%s);`, bbox),
-			fmt.Sprintf(`relation["landuse"="retail"](%s);`, bbox),
-		)
-	}
-
-	// Civic buildings - z14+ (as areas at z14-15, as buildings at z16+)
-	// Campuses (schools, hospitals, universities) are frequently mapped as
-	// multipolygon relations, so query relations alongside ways.
-	if zoom >= 14 {
-		parts = append(parts,
-			fmt.Sprintf(`way["amenity"="school"](%s);`, bbox),
-			fmt.Sprintf(`relation["amenity"="school"](%s);`, bbox),
-			fmt.Sprintf(`way["amenity"="hospital"](%s);`, bbox),
-			fmt.Sprintf(`relation["amenity"="hospital"](%s);`, bbox),
-			fmt.Sprintf(`way["amenity"="university"](%s);`, bbox),
-			fmt.Sprintf(`relation["amenity"="university"](%s);`, bbox),
-			fmt.Sprintf(`way["amenity"="college"](%s);`, bbox),
-			fmt.Sprintf(`relation["amenity"="college"](%s);`, bbox),
-			fmt.Sprintf(`way["amenity"="library"](%s);`, bbox),
-			fmt.Sprintf(`relation["amenity"="library"](%s);`, bbox),
-			fmt.Sprintf(`way["amenity"="town_hall"](%s);`, bbox),
-			fmt.Sprintf(`relation["amenity"="town_hall"](%s);`, bbox),
-			fmt.Sprintf(`way["leisure"="stadium"](%s);`, bbox),
-			fmt.Sprintf(`relation["leisure"="stadium"](%s);`, bbox),
-		)
-	}
-
-	// Individual buildings - from z16+ (replaces landuse areas)
-	if zoom >= 16 {
-		parts = append(parts, fmt.Sprintf(`way["building"](%s);`, bbox))
-	}
-
-	return parts
+	{elems: wayOnly, filter: `["building"]`, minZoom: 16},
 }
 
 // Close cleans up resources (no-op for current version)
