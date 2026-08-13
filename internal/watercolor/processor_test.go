@@ -97,3 +97,48 @@ func TestPaintLayerMissingStyle(t *testing.T) {
 		t.Fatal("expected error for missing style")
 	}
 }
+
+// TestPaintFromFinalMaskNoStaleDataFromPool guards the pooled ProcessorContext against
+// leaking pixels from a previous paint. The *Into helpers only write the final mask's
+// bounds, so a mask smaller than the tile leaves the rest of the recycled buffer
+// untouched and the edge pass would otherwise propagate the previous tile's pixels.
+func TestPaintFromFinalMaskNoStaleDataFromPool(t *testing.T) {
+	const tileSize = 16
+	layer := geojson.LayerWater
+
+	textures := map[geojson.LayerType]image.Image{
+		layer: solidTexture(4, 4, color.NRGBA{R: 200, G: 40, B: 40, A: 255}),
+	}
+	params := DefaultParams(tileSize, 7, textures)
+
+	// First paint: full-tile opaque mask, filling every pooled buffer.
+	fullMask := image.NewGray(image.Rect(0, 0, tileSize, tileSize))
+	for i := range fullMask.Pix {
+		fullMask.Pix[i] = 255
+	}
+	if _, err := paintFromFinalMask(fullMask, layer, params); err != nil {
+		t.Fatalf("first paint failed: %v", err)
+	}
+
+	// Second paint: mask smaller than the tile. Everything outside the mask bounds
+	// must stay transparent instead of showing the previous paint.
+	smallMask := image.NewGray(image.Rect(0, 0, tileSize/2, tileSize/2))
+	for i := range smallMask.Pix {
+		smallMask.Pix[i] = 255
+	}
+	out, err := paintFromFinalMask(smallMask, layer, params)
+	if err != nil {
+		t.Fatalf("second paint failed: %v", err)
+	}
+
+	for y := 0; y < tileSize; y++ {
+		for x := 0; x < tileSize; x++ {
+			if x < tileSize/2 && y < tileSize/2 {
+				continue
+			}
+			if got := out.NRGBAAt(x, y).A; got != 0 {
+				t.Fatalf("stale pixel at (%d,%d): alpha=%d, want 0", x, y, got)
+			}
+		}
+	}
+}

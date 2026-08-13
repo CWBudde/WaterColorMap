@@ -332,6 +332,18 @@ func paintFromFinalMaskWithContext(finalMask *image.Gray, layer geojson.LayerTyp
 	// Ensure context has enough capacity
 	ctx.EnsureCapacity(params.TileSize)
 
+	// The *Into helpers below are bounded by the final mask, not by the buffer:
+	// ApplyMaskToTextureInto and InvertMaskInto iterate over the mask's bounds only.
+	// If the mask is smaller than the tile, the remainder of a recycled buffer would
+	// still hold the previous paint, and the edge pass (which runs over the full
+	// buffer) would carry those stale pixels into the result. Zero the affected
+	// buffers in that case; when the mask covers the whole tile they are fully
+	// overwritten anyway and clearing is skipped.
+	if finalMask.Bounds() != ctx.painted.Bounds() {
+		clear(ctx.painted.Pix)
+		clear(ctx.tempGray.Pix)
+	}
+
 	// Texture + mask using pooled buffers
 	texture.TileTextureInto(style.Texture, params.TileSize, params.OffsetX, params.OffsetY, ctx.tiledTex)
 	texture.ApplyMaskToTextureInto(ctx.tiledTex, finalMask, ctx.painted)
