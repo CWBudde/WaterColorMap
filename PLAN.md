@@ -790,9 +790,9 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
       `taskCh` is buffered to `len(tasks)`, so a send is always ready; once `ctx` is done both `select` arms
       are ready and Go picks at random, which means a cancelled run still drops an arbitrary subset of the
       remaining tasks and returns a nondeterministic number of `Result`s. The empty cancellation arm now
-      documents that behaviour instead of hiding it. A real fix (deciding whether a cancelled run should
-      report a cancellation `Result` per unfed task or stop feeding deterministically) is still open and is
-      tracked as its own item in 7.7 — this item covers the lint cleanup only.
+      documents that behaviour instead of hiding it. This item covers the lint cleanup only; the real fix
+      (making the `Result` count predictable) was tracked separately in 7.7 and has since landed there —
+      the feeder now feeds unconditionally, so `len(results) == len(tasks)` always.
 - [x] **[P2]** Consolidated duplicated Web-Mercator math — there were six implementations, not the three the
       review found: forward in `tile/coords.go`, `renderer/mapnik.go` and `raster/raster.go`, plus two
       different inverses (`tile.mercatorToLonLat`, and `types.mercatorToLat` via `Sinh`) and an unshared clamp
@@ -821,9 +821,10 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
       verified exhaustively over all 256 thresholds × 256 gray levels × both polarities. The Overpass builders
       became `featureRule` tables with `[minZoom,maxZoom]` windows, guarded by golden tests landed _first_
       (38 goldens: zooms 0–18 × both `clipGeomToBbox` values) and verified byte-identical across the rewrite.
-      Tabulating them exposed three latent oddities. Two are behaviour-preserving to leave alone and are now
-      tracked in 7.7 (parks emit `natural=heath` twice from z10; the roads z8-9 comment understates a regex
-      that also matches `primary`); the third — identical z8-9 and z10-11 road regexes — collapsed into a
+      Tabulating them exposed three latent oddities. Two were behaviour-preserving to leave alone here and
+      were tracked in 7.7, where both have since been closed (the duplicate `natural=heath` is gone; the
+      roads z8-9 regex was confirmed intentional and the docs aligned to it); the third — identical z8-9
+      and z10-11 road regexes — collapsed into a
       single 8-11 rule as part of the rewrite, with byte-identical output. (PRs #19 and #14)
 - [x] **[P3]** MBTiles no longer gzips PNG payloads — tiles are stored as raw PNG per the MBTiles 1.3 spec
       (gzip applies to `pbf` vector tiles, not raster), so QGIS and tileserver-gl can read them; the metadata
@@ -894,9 +895,9 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
 
 ### 7.7 Follow-ups surfaced while completing 7.3 (P2/P3)
 
-Open items that the 7.3 work uncovered but deliberately did not change, so that each 7.3 PR stayed
-scoped and behaviour-preserving. They are listed here rather than left as prose inside 7.3, so that
-nothing in this plan claims a follow-up exists without an entry to point at.
+Items the 7.3 work uncovered but deliberately did not change, so that each 7.3 PR stayed scoped and
+behaviour-preserving. They were listed here rather than left as prose inside 7.3, so that nothing in
+this plan claims a follow-up exists without an entry to point at. **All three are now closed.**
 
 - [x] **[P2]** `worker/pool.go` cancellation semantics — resolved as "one `Result` per task, always".
       The fix turned out to be a deletion rather than an addition: the worker side was already correct
