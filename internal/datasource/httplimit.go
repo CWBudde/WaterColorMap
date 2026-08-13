@@ -61,15 +61,26 @@ type limitedBody struct {
 }
 
 func (b *limitedBody) Read(p []byte) (int, error) {
-	if b.remaining <= 0 {
+	if b.remaining > 0 {
+		if int64(len(p)) > b.remaining {
+			p = p[:b.remaining]
+		}
+		n, err := b.rc.Read(p)
+		b.remaining -= int64(n)
+		return n, err
+	}
+
+	// The budget is used up, which on its own does not mean the body was too
+	// large: a body of exactly limit bytes is fine, and io.ReadAll still reads
+	// once more to discover EOF. Only a byte that actually arrives proves the
+	// response overruns the cap.
+	var probe [1]byte
+	n, err := b.rc.Read(probe[:])
+	if n > 0 {
 		return 0, fmt.Errorf("%w: over %d bytes", ErrResponseTooLarge, b.limit)
 	}
-	if int64(len(p)) > b.remaining {
-		p = p[:b.remaining]
-	}
-	n, err := b.rc.Read(p)
-	b.remaining -= int64(n)
-	return n, err
+	// (0, nil) is a legal no-op read; passing it through lets the caller retry.
+	return 0, err
 }
 
 func (b *limitedBody) Close() error { return b.rc.Close() }

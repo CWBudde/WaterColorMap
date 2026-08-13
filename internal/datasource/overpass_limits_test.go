@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/cwbudde/go-overpass"
@@ -151,6 +154,77 @@ func TestFetchRejectsOversizedResponse(t *testing.T) {
 			t.Fatalf("under-limit response was rejected as too large: %v", err)
 		}
 	})
+}
+
+// A body of exactly limit bytes is within the cap. io.ReadAll still issues one
+// more read to find EOF, so the wrapper must not mistake that read for an overrun.
+func TestLimitedBodyBoundary(t *testing.T) {
+	const limit = 32
+
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "one byte under the limit", size: limit - 1},
+		{name: "exactly at the limit", size: limit},
+		{name: "one byte over the limit", size: limit + 1, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := strings.Repeat("x", tt.size)
+			// iotest.OneByteReader mimics a chunked body: the reader never
+			// signals EOF together with the final bytes.
+			body := &limitedBody{
+				rc:        io.NopCloser(iotest.OneByteReader(strings.NewReader(payload))),
+				remaining: limit,
+				limit:     limit,
+			}
+
+			got, err := io.ReadAll(body)
+			switch {
+			case tt.wantErr && !errors.Is(err, ErrResponseTooLarge):
+				t.Fatalf("error = %v, want %v", err, ErrResponseTooLarge)
+			case !tt.wantErr && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case !tt.wantErr && string(got) != payload:
+				t.Fatalf("read %d bytes, want %d", len(got), len(payload))
+			}
+		})
+	}
+}
+
+// The multi-server path builds its OverpassConfig as a literal, so an omitted
+// cap must still be defaulted rather than leaving those endpoints unbounded.
+func TestMultiServerAppliesDefaultResponseLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Declaring more than the default cap is enough: the transport
+		// rejects the response before any body is buffered.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.FormatInt(DefaultMaxResponseBytes+1, 10))
+		fmt.Fprint(w, emptyOverpassJSON)
+	}))
+	t.Cleanup(srv.Close)
+
+	noRetry := overpass.RetryConfig{MaxRetries: 0}
+	ds := NewMultiOverpassDataSource(ServerConfig{
+		Endpoint:    srv.URL,
+		Workers:     1,
+		RetryConfig: &noRetry,
+		HTTPClient:  &http.Client{},
+		Name:        "test",
+		// MaxResponseBytes deliberately left unset.
+	})
+
+	coord, bounds := testTile()
+	_, err := ds.FetchTileDataWithBounds(context.Background(), coord, bounds)
+	if err == nil {
+		t.Fatal("expected an error for an oversized response")
+	}
+	if !strings.Contains(err.Error(), ErrResponseTooLarge.Error()) {
+		t.Fatalf("error = %v, want it to mention %v", err, ErrResponseTooLarge)
+	}
 }
 
 func TestWithResponseLimit(t *testing.T) {
