@@ -715,15 +715,46 @@ func (g *Generator) compositeAndWrite(
 
 	// Traditional file output
 	g.log().Info("Writing final tile", "coords", coords.String(), "path", finalPath)
-	outFile, err := os.Create(finalPath)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to create tile file: %w", err)
-	}
-	defer outFile.Close() // nolint:errcheck
-
-	if err := enc.Encode(outFile, final); err != nil {
-		return "", "", fmt.Errorf("failed to encode final tile: %w", err)
+	if err := encodePNGAtomic(&enc, finalPath, final); err != nil {
+		return "", "", err
 	}
 
 	return finalPath, layerDirReturn, nil
+}
+
+// encodePNGAtomic encodes img to a temporary file next to path and renames it
+// into place.
+//
+// Writing straight to the final path meant an interrupted or timed-out encode
+// left a truncated PNG behind, which the tile cache then served as a permanently
+// broken image. The rename is atomic within the directory, so a tile file either
+// does not exist or is complete.
+func encodePNGAtomic(enc *png.Encoder, path string, img image.Image) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+	if err != nil {
+		return fmt.Errorf("failed to create tile file: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	// Best effort cleanup of the failure paths; on success the file is already
+	// closed and renamed away, so both calls are no-ops.
+	defer func() {
+		tmp.Close()        // nolint:errcheck
+		os.Remove(tmpName) // nolint:errcheck
+	}()
+
+	if err := enc.Encode(tmp, img); err != nil {
+		return fmt.Errorf("failed to encode final tile: %w", err)
+	}
+	// CreateTemp uses 0600; tiles are world-readable static files.
+	if err := tmp.Chmod(0o644); err != nil {
+		return fmt.Errorf("failed to set tile file mode: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close tile file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("failed to publish tile file: %w", err)
+	}
+	return nil
 }

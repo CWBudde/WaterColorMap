@@ -249,9 +249,11 @@ func (t *OnDemandTiles) BeginShutdown() {
 // the fetch queue before the retry worker has exited would let the worker call
 // SubmitAndWait on an already-stopped queue.
 //
-// Waiting at all is what keeps a half-written PNG off disk: the retry worker
-// can be inside GenerateWithData writing a tile, and a truncated file would be
-// served from the cache as a corrupt image indefinitely.
+// Waiting lets an in-flight retry render finish instead of being abandoned
+// mid-tile. It is not what keeps a truncated PNG out of the cache -- the wait
+// is bounded, so it cannot be: tiles are encoded to a temporary file and
+// renamed into place (see pipeline.encodePNGAtomic), which is what makes a
+// cached tile either absent or complete.
 func (t *OnDemandTiles) Stop() {
 	t.stopOnce.Do(func() {
 		t.BeginShutdown()
@@ -408,7 +410,18 @@ func (t *OnDemandTiles) sendStatusEvent(w http.ResponseWriter, flusher http.Flus
 	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
 		return err
 	}
-	flusher.Flush()
+
+	// The socket error usually surfaces when net/http's buffer is flushed, not
+	// in the small Fprintf above. http.Flusher.Flush swallows it, so the loop
+	// would keep writing to a dead connection; ResponseController.Flush
+	// reports it. The plain Flusher stays as the fallback for writers that do
+	// not support the controller.
+	if err := rc.Flush(); err != nil {
+		if !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		flusher.Flush()
+	}
 	return nil
 }
 
@@ -461,10 +474,17 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 	// Generation legitimately outlives the server-wide WriteTimeout, so the
 	// socket deadline is extended for this request only. The cache-hit path
 	// above deliberately keeps the shorter default.
+	//
+	// The deadline is re-armed after every potentially long wait rather than
+	// set once: the per-tile lock and the render semaphore can each hold a
+	// request for minutes, and a deadline that already expired while queueing
+	// would let the request render a tile it can no longer send.
 	t.extendWriteDeadline(w)
 
 	unlock := t.lockTile(filename)
 	defer unlock()
+
+	t.extendWriteDeadline(w)
 
 	if !t.cfg.DisableCache {
 		if fileExists(fullPath) {
@@ -491,6 +511,10 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 		writeTileError(w, "request cancelled", http.StatusRequestTimeout)
 		return
 	}
+
+	// Re-armed once more so the deadline covers the generation that starts
+	// here, not the semaphore wait that just ended.
+	t.extendWriteDeadline(w)
 
 	ctx, cancel := context.WithTimeout(r.Context(), t.cfg.GenerationTimeout)
 	defer cancel()

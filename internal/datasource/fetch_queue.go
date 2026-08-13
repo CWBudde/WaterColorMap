@@ -2,6 +2,7 @@ package datasource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -76,6 +77,14 @@ type FetchQueue struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 
+	// stateMu guards stopped and is held across every enqueue attempt, so no
+	// job can reach the channel once Stop has flipped the flag. Context
+	// cancellation alone could not do this: with a done context the send and
+	// the ctx.Done() case are both ready and the runtime may pick the send,
+	// reporting success for a job no worker will ever run.
+	stateMu sync.RWMutex
+	stopped bool
+
 	// Status tracking
 	activeFetches  atomic.Int32
 	totalCompleted atomic.Int64
@@ -129,22 +138,82 @@ func (fq *FetchQueue) Start() {
 // called Stop; graceful shutdown makes it reachable.
 func (fq *FetchQueue) Stop() {
 	fq.stopOnce.Do(func() {
+		// Close admission before cancelling: enqueue attempts never block
+		// while holding the read lock, so this acquisition is immediate and
+		// no submission can succeed from here on.
+		fq.stateMu.Lock()
+		fq.stopped = true
+		fq.stateMu.Unlock()
+
 		fq.cancel()
 		fq.wg.Wait()
 	})
 }
 
+// ErrQueueStopped is returned when a job is submitted to a queue that is
+// shutting down or already stopped.
+var ErrQueueStopped = errors.New("fetch queue is shutting down")
+
+// ErrQueueFull is returned when the queue has no room for another job.
+var ErrQueueFull = errors.New("fetch queue is full")
+
+// enqueueRetryInterval is how long a blocking submission waits before trying a
+// full queue again. Retrying instead of blocking on the send keeps stateMu free
+// for Stop.
+const enqueueRetryInterval = 10 * time.Millisecond
+
+// tryEnqueue attempts one non-blocking send. It reports whether the job was
+// queued, and errors only when the queue is stopped.
+func (fq *FetchQueue) tryEnqueue(job FetchJob) (bool, error) {
+	fq.stateMu.RLock()
+	defer fq.stateMu.RUnlock()
+
+	if fq.stopped {
+		return false, ErrQueueStopped
+	}
+	select {
+	case fq.jobs <- job:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// enqueue waits for room in the queue, giving up when either context ends.
+func (fq *FetchQueue) enqueue(ctx context.Context, job FetchJob) error {
+	for {
+		queued, err := fq.tryEnqueue(job)
+		if err != nil {
+			return err
+		}
+		if queued {
+			return nil
+		}
+
+		timer := time.NewTimer(enqueueRetryInterval)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-fq.ctx.Done():
+			timer.Stop()
+			return ErrQueueStopped
+		}
+	}
+}
+
 // Submit adds a fetch job to the queue and returns immediately.
 // The result will be sent to the job's ResultChan when complete.
 func (fq *FetchQueue) Submit(job FetchJob) error {
-	select {
-	case fq.jobs <- job:
-		return nil
-	case <-fq.ctx.Done():
-		return fmt.Errorf("fetch queue is shutting down")
-	default:
-		return fmt.Errorf("fetch queue is full")
+	queued, err := fq.tryEnqueue(job)
+	if err != nil {
+		return err
 	}
+	if !queued {
+		return ErrQueueFull
+	}
+	return nil
 }
 
 // SubmitAndWait submits a fetch job and blocks until the result is available.
@@ -156,12 +225,8 @@ func (fq *FetchQueue) SubmitAndWait(ctx context.Context, coord types.TileCoordin
 		ResultChan: resultChan,
 	}
 
-	select {
-	case fq.jobs <- job:
-	case <-ctx.Done():
-		return FetchResult{}, ctx.Err()
-	case <-fq.ctx.Done():
-		return FetchResult{}, fmt.Errorf("fetch queue is shutting down")
+	if err := fq.enqueue(ctx, job); err != nil {
+		return FetchResult{}, err
 	}
 
 	select {
@@ -169,6 +234,10 @@ func (fq *FetchQueue) SubmitAndWait(ctx context.Context, coord types.TileCoordin
 		return result, nil
 	case <-ctx.Done():
 		return FetchResult{}, ctx.Err()
+	case <-fq.ctx.Done():
+		// Without this the caller would keep waiting for a worker that has
+		// already exited, until its own context expires.
+		return FetchResult{}, ErrQueueStopped
 	}
 }
 
