@@ -16,7 +16,6 @@
   way["natural"="heath"](52.320000,9.650000,52.430000,9.850000);
   relation["natural"="heath"](52.320000,9.650000,52.430000,9.850000);
   way["landuse"="grass"](52.320000,9.650000,52.430000,9.850000);
-  way["natural"="heath"](52.320000,9.650000,52.430000,9.850000);
   way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link"](52.320000,9.650000,52.430000,9.850000);
   way["railway"="rail"](52.320000,9.650000,52.430000,9.850000);
   way["landuse"="residential"](52.320000,9.650000,52.430000,9.850000);
