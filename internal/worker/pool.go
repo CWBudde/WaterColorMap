@@ -90,14 +90,18 @@ func (p *Pool) Run(ctx context.Context, tasks []Task) []Result {
 		}()
 	}
 
-	// Feed tasks
+	// Feed tasks.
+	//
+	// The cancellation case is deliberately empty rather than a loop exit:
+	// taskCh is buffered to len(tasks), so a send is always ready and the
+	// select simply drops the occasional task once ctx is done. Leaving the
+	// loop instead would change how many Results Run returns for a cancelled
+	// run, which callers count failures from.
 	go func() {
 		for _, task := range tasks {
 			select {
 			case taskCh <- task:
 			case <-ctx.Done():
-				// Context cancelled, stop feeding
-				break
 			}
 		}
 		close(taskCh)
