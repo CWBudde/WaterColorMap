@@ -5,10 +5,11 @@ import (
 	"image/color"
 	"math"
 
-	"github.com/cwbudde/watercolormap/internal/geojson"
-	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb"
 	"golang.org/x/image/vector"
+
+	"github.com/cwbudde/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 type Renderer struct {

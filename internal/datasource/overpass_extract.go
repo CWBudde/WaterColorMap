@@ -5,8 +5,9 @@ import (
 	"fmt"
 
 	"github.com/cwbudde/go-overpass"
-	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb"
+
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // UnmarshalOverpassJSON decodes an Overpass API JSON response into an overpass.Result.

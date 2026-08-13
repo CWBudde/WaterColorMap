@@ -10,11 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/paulmach/orb"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/types"
-	"github.com/paulmach/orb"
-	"github.com/stretchr/testify/require"
 )
 
 // Test function with three subtests

@@ -11,13 +11,14 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
 	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/worker"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var generateCmd = &cobra.Command{

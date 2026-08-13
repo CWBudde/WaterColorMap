@@ -7,9 +7,10 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/cwbudde/watercolormap/internal/mbtiles"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/cwbudde/watercolormap/internal/mbtiles"
 )
 
 var convertCmd = &cobra.Command{

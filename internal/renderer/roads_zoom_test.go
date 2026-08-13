@@ -5,11 +5,12 @@ import (
 	"os"
 	"testing"
 
+	"github.com/paulmach/orb"
+	"github.com/paulmach/orb/maptile"
+
 	"github.com/cwbudde/watercolormap/internal/geojson"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/types"
-	"github.com/paulmach/orb"
-	"github.com/paulmach/orb/maptile"
 )
 
 // measureRoadWidth finds the widest contiguous run of non-transparent pixels across a handful

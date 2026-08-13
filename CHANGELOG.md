@@ -2,24 +2,22 @@
 
 ## [0.3.0](https://github.com/CWBudde/WaterColorMap/compare/v0.2.0...v0.3.0) (2026-08-13)
 
-
 ### Features
 
-* add railroad and civic layers, rename module to cwbudde ([#4](https://github.com/CWBudde/WaterColorMap/issues/4)) ([9f6b504](https://github.com/CWBudde/WaterColorMap/commit/9f6b5047dc3fe1d178445c62bb3dc3372098d8ec))
-* improve layer ordering, add playgrounds, and enhance road sizing at high zoom levels ([1d64e69](https://github.com/CWBudde/WaterColorMap/commit/1d64e6903c949834fb20a42b3938e3fce5361952))
-* improved inset shadow algorithm ([af6ce3a](https://github.com/CWBudde/WaterColorMap/commit/af6ce3aa7a88f6abf7ac3a382e346feba2473323))
-* more advanced render pipeline ([0d14bda](https://github.com/CWBudde/WaterColorMap/commit/0d14bda4ccc134d73b92dee831118b505a00e42a))
-* more stamen like style ([6947e01](https://github.com/CWBudde/WaterColorMap/commit/6947e0163527226f73017354f83eaf655c793083))
-* new baseline ([0aabc7c](https://github.com/CWBudde/WaterColorMap/commit/0aabc7ca7627da0f534dea5253d01fae3525ae0e))
-* new baseline rendering ([6a011e5](https://github.com/CWBudde/WaterColorMap/commit/6a011e56d141048a91b02bac7cf1326d25fc9b59))
-* recent improvements ([e693390](https://github.com/CWBudde/WaterColorMap/commit/e693390ccd5dd16fddd4cd3659b488493a084812))
-* rendering is fast and beautiful now. Features are so so... ([44d1989](https://github.com/CWBudde/WaterColorMap/commit/44d19898fa27cc0e87ccce3abb4d27f645b48420))
-
+- add railroad and civic layers, rename module to cwbudde ([#4](https://github.com/CWBudde/WaterColorMap/issues/4)) ([9f6b504](https://github.com/CWBudde/WaterColorMap/commit/9f6b5047dc3fe1d178445c62bb3dc3372098d8ec))
+- improve layer ordering, add playgrounds, and enhance road sizing at high zoom levels ([1d64e69](https://github.com/CWBudde/WaterColorMap/commit/1d64e6903c949834fb20a42b3938e3fce5361952))
+- improved inset shadow algorithm ([af6ce3a](https://github.com/CWBudde/WaterColorMap/commit/af6ce3aa7a88f6abf7ac3a382e346feba2473323))
+- more advanced render pipeline ([0d14bda](https://github.com/CWBudde/WaterColorMap/commit/0d14bda4ccc134d73b92dee831118b505a00e42a))
+- more stamen like style ([6947e01](https://github.com/CWBudde/WaterColorMap/commit/6947e0163527226f73017354f83eaf655c793083))
+- new baseline ([0aabc7c](https://github.com/CWBudde/WaterColorMap/commit/0aabc7ca7627da0f534dea5253d01fae3525ae0e))
+- new baseline rendering ([6a011e5](https://github.com/CWBudde/WaterColorMap/commit/6a011e56d141048a91b02bac7cf1326d25fc9b59))
+- recent improvements ([e693390](https://github.com/CWBudde/WaterColorMap/commit/e693390ccd5dd16fddd4cd3659b488493a084812))
+- rendering is fast and beautiful now. Features are so so... ([44d1989](https://github.com/CWBudde/WaterColorMap/commit/44d19898fa27cc0e87ccce3abb4d27f645b48420))
 
 ### Bug Fixes
 
-* performance fix ([c4538f7](https://github.com/CWBudde/WaterColorMap/commit/c4538f702c600495342d44c8a84aac90cbcca4a8))
-* polygon rendering fix ([a4044cc](https://github.com/CWBudde/WaterColorMap/commit/a4044cc3ae9bdc023933bbb990405c8f4d6832ef))
+- performance fix ([c4538f7](https://github.com/CWBudde/WaterColorMap/commit/c4538f702c600495342d44c8a84aac90cbcca4a8))
+- polygon rendering fix ([a4044cc](https://github.com/CWBudde/WaterColorMap/commit/a4044cc3ae9bdc023933bbb990405c8f4d6832ef))
 
 ## [0.2.0](https://github.com/MeKo-Christian/WaterColorMap/compare/v0.1.0...v0.2.0) (2025-12-20)
 

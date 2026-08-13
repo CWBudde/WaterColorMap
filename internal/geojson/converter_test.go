@@ -4,8 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb"
+
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 func TestToGeoJSON(t *testing.T) {

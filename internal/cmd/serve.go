@@ -14,12 +14,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
 	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/server"
 	"github.com/cwbudde/watercolormap/internal/types"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var serveCmd = &cobra.Command{

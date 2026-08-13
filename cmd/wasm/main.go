@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/png"
 	"strings"
+	"syscall/js"
 	"time"
 
 	"github.com/cwbudde/watercolormap/internal/composite"
@@ -21,7 +22,6 @@ import (
 	"github.com/cwbudde/watercolormap/internal/texture"
 	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/cwbudde/watercolormap/internal/watercolor"
-	"syscall/js"
 )
 
 const defaultConcurrency = 4

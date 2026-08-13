@@ -4,8 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb/geojson"
+
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // LayerType represents the different map layers we render
