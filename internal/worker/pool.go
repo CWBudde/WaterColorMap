@@ -73,6 +73,15 @@ func (p *Pool) Run(ctx context.Context, tasks []Task) []Result {
 	taskCh := make(chan Task, len(tasks))
 	resultCh := make(chan Result, len(tasks))
 
+	// Feed tasks. taskCh is buffered to len(tasks), so no send blocks and no
+	// task is dropped: every task reaches a worker, which emits either a real
+	// result or a context.Canceled one. len(results) == len(tasks) always,
+	// which is the invariant callers count failures against.
+	for _, task := range tasks {
+		taskCh <- task
+	}
+	close(taskCh)
+
 	// Track progress
 	var (
 		completed int
@@ -89,23 +98,6 @@ func (p *Pool) Run(ctx context.Context, tasks []Task) []Result {
 			p.worker(ctx, taskCh, resultCh)
 		}()
 	}
-
-	// Feed tasks.
-	//
-	// The cancellation case is deliberately empty rather than a loop exit:
-	// taskCh is buffered to len(tasks), so a send is always ready and the
-	// select simply drops the occasional task once ctx is done. Leaving the
-	// loop instead would change how many Results Run returns for a cancelled
-	// run, which callers count failures from.
-	go func() {
-		for _, task := range tasks {
-			select {
-			case taskCh <- task:
-			case <-ctx.Done():
-			}
-		}
-		close(taskCh)
-	}()
 
 	// Collect results in a separate goroutine
 	results := make([]Result, 0, len(tasks))
