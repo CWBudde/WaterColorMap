@@ -318,6 +318,21 @@ func smoothstep(edge0, edge1, x float64) float64 {
 // minDist: distance below which noise is minimal
 // maxDist: distance above which noise is at full strength
 func ApplyNoiseToMaskAdaptive(maskImg, noise, distanceMap *image.Gray, strength float64, minDist, maxDist float64) *image.Gray {
+	return applyNoise(maskImg, noise, distanceMap, strength, minDist, maxDist)
+}
+
+// ApplyNoiseToMask overlays Perlin noise onto a blurred mask to create organic edges.
+// maskImg: the blurred binary mask
+// noise: the Perlin noise texture (should match or be larger than mask dimensions)
+// strength: how much noise to apply (0.0 = no noise, 1.0 = full noise)
+func ApplyNoiseToMask(maskImg, noise *image.Gray, strength float64) *image.Gray {
+	return applyNoise(maskImg, noise, nil, strength, 0, 0)
+}
+
+// applyNoise is the shared kernel behind ApplyNoiseToMask and ApplyNoiseToMaskAdaptive.
+// A nil distanceMap applies the noise at full strength everywhere; otherwise the
+// per-pixel strength is scaled by smoothstep(minDist, maxDist, distance).
+func applyNoise(maskImg, noise, distanceMap *image.Gray, strength, minDist, maxDist float64) *image.Gray {
 	bounds := maskImg.Bounds()
 	result := image.NewGray(bounds)
 
@@ -328,62 +343,21 @@ func ApplyNoiseToMaskAdaptive(maskImg, noise, distanceMap *image.Gray, strength 
 			// Get mask value
 			maskVal := float64(maskImg.GrayAt(x, y).Y)
 
-			// Get distance value (pixel intensity represents distance in pixels)
-			distVal := float64(distanceMap.GrayAt(x, y).Y)
-
-			// Calculate noise scaling based on distance
-			// Use smoothstep for gradual transition
-			noiseScale := smoothstep(minDist, maxDist, distVal)
-
-			// Get noise value
-			nx := (x - bounds.Min.X) % noiseBounds.Dx()
-			ny := (y - bounds.Min.Y) % noiseBounds.Dy()
-			noiseVal := float64(noise.GrayAt(noiseBounds.Min.X+nx, noiseBounds.Min.Y+ny).Y)
-
-			// Apply noise as a perturbation, scaled by distance
-			noiseDelta := (noiseVal - 128.0) * strength * noiseScale
-
-			// Combine mask and noise
-			combined := maskVal + noiseDelta
-
-			// Clamp to valid range
-			if combined < 0 {
-				combined = 0
+			// Scale the noise by feature thickness so thin structures survive.
+			// Pixel intensity in the distance map represents distance in pixels.
+			noiseScale := 1.0
+			if distanceMap != nil {
+				noiseScale = smoothstep(minDist, maxDist, float64(distanceMap.GrayAt(x, y).Y))
 			}
-			if combined > 255 {
-				combined = 255
-			}
-
-			result.SetGray(x, y, color.Gray{Y: uint8(combined)})
-		}
-	}
-
-	return result
-}
-
-// ApplyNoiseToMask overlays Perlin noise onto a blurred mask to create organic edges.
-// mask: the blurred binary mask
-// noise: the Perlin noise texture (should match or be larger than mask dimensions)
-// strength: how much noise to apply (0.0 = no noise, 1.0 = full noise)
-func ApplyNoiseToMask(mask, noise *image.Gray, strength float64) *image.Gray {
-	bounds := mask.Bounds()
-	result := image.NewGray(bounds)
-
-	noiseBounds := noise.Bounds()
-
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			// Get mask value
-			maskVal := float64(mask.GrayAt(x, y).Y)
 
 			// Get noise value (tile if noise is smaller, or sample if larger)
 			nx := (x - bounds.Min.X) % noiseBounds.Dx()
 			ny := (y - bounds.Min.Y) % noiseBounds.Dy()
 			noiseVal := float64(noise.GrayAt(noiseBounds.Min.X+nx, noiseBounds.Min.Y+ny).Y)
 
-			// Apply noise as a perturbation
-			// Noise is centered around 128, so subtract 128 to get -128 to +127 range
-			noiseDelta := (noiseVal - 128.0) * strength
+			// Apply noise as a perturbation.
+			// Noise is centered around 128, so subtract 128 to get -128 to +127 range.
+			noiseDelta := (noiseVal - 128.0) * strength * noiseScale
 
 			// Combine mask and noise
 			combined := maskVal + noiseDelta
@@ -425,75 +399,37 @@ func ApplyThreshold(mask *image.Gray, threshold uint8) *image.Gray {
 }
 
 // ApplyThresholdWithAntialias applies a threshold with smooth antialiased edges.
-// Uses a fixed transition zone with cubic interpolation (smootherstep) for natural-looking edges.
-// The transition zone is 20 gray levels on each side of the threshold value.
-func ApplyThresholdWithAntialias(mask *image.Gray, threshold uint8) *image.Gray {
-	bounds := mask.Bounds()
-	result := image.NewGray(bounds)
-
-	// Transition zone: 20 gray levels on each side of threshold
-	const transitionWidth = 20
-
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			val := mask.GrayAt(x, y).Y
-
-			// Smooth threshold with cubic interpolation
-			lower := int(threshold) - transitionWidth
-			upper := int(threshold) + transitionWidth
-
-			var outVal uint8
-
-			switch {
-			case int(val) <= lower:
-				outVal = 0
-			case int(val) >= upper:
-				outVal = 255
-			default:
-				// Cubic interpolation: smootherstep (3t² - 2t³)
-				t := float32(int(val)-lower) / float32(2*transitionWidth)
-				smoothT := t * t * (3.0 - 2.0*t)
-				outVal = uint8((smoothT) * 255.0)
-			}
-			result.SetGray(x, y, color.Gray{Y: outVal})
-		}
-	}
-
-	return result
+// Uses a smoothstep (t²(3-2t)) transition zone of 20 gray levels on each side of
+// the threshold value for natural-looking edges.
+func ApplyThresholdWithAntialias(maskImg *image.Gray, threshold uint8) *image.Gray {
+	return applyThresholdWithAntialias(maskImg, threshold, false)
 }
 
-// ApplyThresholdWithAntialiasAndInvert applies a threshold with smooth antialiased edges.
-// Uses a fixed transition zone with cubic interpolation (smootherstep) for natural-looking edges.
-// The transition zone is 20 gray levels on each side of the threshold value.
-func ApplyThresholdWithAntialiasAndInvert(mask *image.Gray, threshold uint8) *image.Gray {
-	bounds := mask.Bounds()
+// ApplyThresholdWithAntialiasAndInvert is ApplyThresholdWithAntialias with inverted
+// polarity: values above the threshold become black instead of white. Used for the
+// land layer, which is the inverse of everything else.
+func ApplyThresholdWithAntialiasAndInvert(maskImg *image.Gray, threshold uint8) *image.Gray {
+	return applyThresholdWithAntialias(maskImg, threshold, true)
+}
+
+// applyThresholdWithAntialias is the shared kernel behind the two exported variants.
+func applyThresholdWithAntialias(maskImg *image.Gray, threshold uint8, invert bool) *image.Gray {
+	bounds := maskImg.Bounds()
 	result := image.NewGray(bounds)
 
 	// Transition zone: 20 gray levels on each side of threshold
 	const transitionWidth = 20
 
+	lower := float64(int(threshold) - transitionWidth)
+	upper := float64(int(threshold) + transitionWidth)
+
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			val := mask.GrayAt(x, y).Y
-
-			// Smooth threshold with cubic interpolation
-			lower := int(threshold) - transitionWidth
-			upper := int(threshold) + transitionWidth
-
-			var outVal uint8
-
-			switch {
-			case int(val) <= lower:
-				outVal = 255
-			case int(val) >= upper:
-				outVal = 0
-			default:
-				// Cubic interpolation: smootherstep (3t² - 2t³)
-				t := float32(int(val)-lower) / float32(2*transitionWidth)
-				smoothT := t * t * (3.0 - 2.0*t)
-				outVal = uint8((1.0 - smoothT) * 255.0)
+			t := smoothstep(lower, upper, float64(maskImg.GrayAt(x, y).Y))
+			if invert {
+				t = 1.0 - t
 			}
-			result.SetGray(x, y, color.Gray{Y: outVal})
+			result.SetGray(x, y, color.Gray{Y: uint8(t * 255.0)})
 		}
 	}
 
