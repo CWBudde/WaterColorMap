@@ -115,7 +115,11 @@ func (r *Renderer) isHighway(f *types.Feature) bool {
 	if f == nil || f.Properties == nil {
 		return false
 	}
-	hw, _ := f.Properties["highway"].(string)
+	hw, isString := f.Properties["highway"].(string)
+	if !isString {
+		// A missing or non-string highway tag never matches any zoom bracket.
+		return false
+	}
 
 	// At very low zoom (z <= 7), don't show any highways
 	if r.zoom <= 7 {

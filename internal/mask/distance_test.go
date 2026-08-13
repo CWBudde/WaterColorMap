@@ -3,7 +3,6 @@ package mask
 import (
 	"image"
 	"image/color"
-	"math"
 	"testing"
 )
 
@@ -357,11 +356,4 @@ func absDiffU8(a, b uint8) uint8 {
 		return a - b
 	}
 	return b - a
-}
-
-// Helper to compute Euclidean distance
-func euclideanDist(x1, y1, x2, y2 int) float64 {
-	dx := float64(x1 - x2)
-	dy := float64(y1 - y2)
-	return math.Sqrt(dx*dx + dy*dy)
 }

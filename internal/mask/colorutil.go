@@ -73,7 +73,7 @@ func rgbToHSL(r, g, b uint8) (h uint16, s, l uint8) {
 	switch maxv {
 	case r:
 		// sector 0 or 5
-		h = uint16((int(g)-int(b))*256 / delta)
+		h = uint16((int(g) - int(b)) * 256 / delta)
 		if int(g) < int(b) {
 			h += 1536
 		}
@@ -109,7 +109,7 @@ func hslToRGB(h uint16, s, l uint8) (r, g, b uint8) {
 	m := L - (C / 2)        // match offset, stays in-range
 
 	// Sector 0..5 and fractional position 0..255 inside sector
-	h = h % 1536
+	h %= 1536
 	sector := int(h >> 8) // 0..5
 	f := int(h & 0xFF)    // 0..255
 

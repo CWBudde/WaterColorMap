@@ -107,8 +107,8 @@ func alphaOver(dst *image.NRGBA, src image.Image) {
 
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			s := color.NRGBAModel.Convert(src.At(x, y)).(color.NRGBA)
-			if s.A == 0 {
+			s, ok := color.NRGBAModel.Convert(src.At(x, y)).(color.NRGBA)
+			if !ok || s.A == 0 {
 				continue
 			}
 
