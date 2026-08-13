@@ -63,14 +63,21 @@ func NewMultiPassRenderer(stylesDir, outputDir string, tileSize int, padPx int) 
 	}
 	mapnikRenderer.SetBufferSize(buf)
 
-	// Create temp directory for GeoJSON files
-	tempDir := filepath.Join(os.TempDir(), "watercolormap")
-	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+	// Create a private temp directory for GeoJSON files.
+	// It must be unique per renderer: the same tile coordinates are rendered
+	// concurrently at different tile sizes (base and @2x), and tile.Coords.String()
+	// carries no size, so a shared directory would make those renders overwrite and
+	// delete each other's GeoJSON files.
+	tempDir, err := os.MkdirTemp("", "watercolormap-geojson-*")
+	if err != nil {
+		mapnikRenderer.Close() // nolint:errcheck // Best-effort cleanup
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
 	// Create output directory
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		mapnikRenderer.Close() // nolint:errcheck // Best-effort cleanup
+		os.RemoveAll(tempDir)  // nolint:errcheck // Best-effort cleanup
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
@@ -84,9 +91,21 @@ func NewMultiPassRenderer(stylesDir, outputDir string, tileSize int, padPx int) 
 	}, nil
 }
 
-// Close cleans up resources
+// Close cleans up resources, including the renderer's private GeoJSON temp directory.
 func (r *MultiPassRenderer) Close() error {
-	return r.mapnikRenderer.Close()
+	err := r.mapnikRenderer.Close()
+	if r.tempDir != "" {
+		if rmErr := os.RemoveAll(r.tempDir); rmErr != nil && err == nil {
+			err = fmt.Errorf("failed to remove temp directory: %w", rmErr)
+		}
+		r.tempDir = ""
+	}
+	return err
+}
+
+// TempDir returns the renderer's private directory for intermediate GeoJSON files.
+func (r *MultiPassRenderer) TempDir() string {
+	return r.tempDir
 }
 
 // RenderTile renders all layers for a single tile
