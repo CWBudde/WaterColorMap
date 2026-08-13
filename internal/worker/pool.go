@@ -75,8 +75,9 @@ func (p *Pool) Run(ctx context.Context, tasks []Task) []Result {
 
 	// Feed tasks. taskCh is buffered to len(tasks), so no send blocks and no
 	// task is dropped: every task reaches a worker, which emits either a real
-	// result or a context.Canceled one. len(results) == len(tasks) always,
-	// which is the invariant callers count failures against.
+	// result or one carrying ctx.Err() (Canceled or DeadlineExceeded).
+	// len(results) == len(tasks) always, which is the invariant callers count
+	// failures against.
 	for _, task := range tasks {
 		taskCh <- task
 	}
