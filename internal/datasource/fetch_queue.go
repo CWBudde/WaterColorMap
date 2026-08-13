@@ -74,6 +74,7 @@ type FetchQueue struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	startOnce sync.Once
+	stopOnce  sync.Once
 
 	// Status tracking
 	activeFetches  atomic.Int32
@@ -119,11 +120,18 @@ func (fq *FetchQueue) Start() {
 	})
 }
 
-// Stop gracefully shuts down the fetch queue.
+// Stop gracefully shuts down the fetch queue. It is safe to call more than
+// once and safe to race with Submit.
+//
+// The jobs channel is deliberately not closed: workers already exit on
+// ctx.Done(), and closing it raced with an in-flight Submit sending on the
+// same channel, which panics. That was unreachable only because nothing ever
+// called Stop; graceful shutdown makes it reachable.
 func (fq *FetchQueue) Stop() {
-	fq.cancel()
-	close(fq.jobs)
-	fq.wg.Wait()
+	fq.stopOnce.Do(func() {
+		fq.cancel()
+		fq.wg.Wait()
+	})
 }
 
 // Submit adds a fetch job to the queue and returns immediately.

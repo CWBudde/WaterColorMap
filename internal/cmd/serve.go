@@ -1,11 +1,17 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/cwbudde/watercolormap/internal/datasource"
@@ -44,6 +50,14 @@ func init() {
 	serveCmd.Flags().Int("fetch-workers", 2, "Number of concurrent data fetch workers (separate from rendering)")
 	serveCmd.Flags().Int64("data-size-warning-mb", 10, "Warn when tile data exceeds this size in MB")
 
+	serveCmd.Flags().Int("max-pending-generations", 0, "Max requests in the generation path before returning 503 (0 = auto)")
+	serveCmd.Flags().Float64("tile-rate-limit", server.DefaultRateLimitRPS, "Per-client tile requests per second (0 disables)")
+	serveCmd.Flags().Int("tile-rate-burst", server.DefaultRateLimitBurst, "Per-client tile request burst")
+	serveCmd.Flags().Duration("tile-rate-ttl", server.DefaultRateLimitTTL, "Idle time before a rate-limit entry is evicted")
+	serveCmd.Flags().Int("tile-rate-max-entries", server.DefaultRateLimitMaxEntries, "Max tracked clients before falling back to a shared bucket")
+	serveCmd.Flags().String("trusted-proxies", "", "Comma-separated CIDRs whose X-Forwarded-For is trusted (empty = ignore the header)")
+	serveCmd.Flags().Duration("shutdown-timeout", 30*time.Second, "Grace period for draining connections on SIGINT/SIGTERM")
+
 	mustBind := func(key string, name string) {
 		if err := viper.BindPFlag(key, serveCmd.Flags().Lookup(name)); err != nil {
 			panic(fmt.Sprintf("failed to bind flag: %v", err))
@@ -67,6 +81,14 @@ func init() {
 	mustBind("serve.overpass_workers", "overpass-workers")
 	mustBind("serve.fetch_workers", "fetch-workers")
 	mustBind("serve.data_size_warning_mb", "data-size-warning-mb")
+
+	mustBind("serve.max_pending_generations", "max-pending-generations")
+	mustBind("serve.tile_rate_limit", "tile-rate-limit")
+	mustBind("serve.tile_rate_burst", "tile-rate-burst")
+	mustBind("serve.tile_rate_ttl", "tile-rate-ttl")
+	mustBind("serve.tile_rate_max_entries", "tile-rate-max-entries")
+	mustBind("serve.trusted_proxies", "trusted-proxies")
+	mustBind("serve.shutdown_timeout", "shutdown-timeout")
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -94,6 +116,27 @@ func runServe(cmd *cobra.Command, args []string) error {
 	overpassWorkers := viper.GetInt("serve.overpass_workers")
 	fetchWorkers := viper.GetInt("serve.fetch_workers")
 	dataSizeWarningMB := viper.GetInt64("serve.data_size_warning_mb")
+	maxPending := viper.GetInt("serve.max_pending_generations")
+	shutdownTimeout := viper.GetDuration("serve.shutdown_timeout")
+
+	proxyPolicy, err := server.ParseProxyPolicy(viper.GetString("serve.trusted_proxies"))
+	if err != nil {
+		return fmt.Errorf("invalid --trusted-proxies: %w", err)
+	}
+
+	rateLimiter := server.NewIPRateLimiter(server.RateLimitConfig{
+		RPS:        viper.GetFloat64("serve.tile_rate_limit"),
+		Burst:      viper.GetInt("serve.tile_rate_burst"),
+		TTL:        viper.GetDuration("serve.tile_rate_ttl"),
+		MaxEntries: viper.GetInt("serve.tile_rate_max_entries"),
+		Proxy:      proxyPolicy,
+		Logger:     logger,
+	})
+	defer rateLimiter.Close()
+
+	// Released at the start of the drain so long-lived handlers stop holding
+	// connections open; set below when the on-demand backend is in use.
+	onShutdown := func() {}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +167,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		defer mbHandler.Close()
 
-		mux.Handle("/tiles/", withCORS(mbHandler.Handler()))
+		mux.Handle("/tiles/", withCORS(rateLimiter.Middleware(mbHandler.Handler())))
 	} else {
 		logger.Info("Using folder-based tile serving with on-demand generation", "tiles_dir", tilesDir)
 		dataSourceName := viper.GetString("data-source")
@@ -151,14 +194,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 			CacheControl:             cacheControl,
 			FetchWorkers:             fetchWorkers,
 			DataSizeWarningMB:        dataSizeWarningMB,
+			MaxPendingGenerations:    maxPending,
 		}, logger)
 		if err != nil {
 			return err
 		}
+		defer od.Stop()
+		onShutdown = od.BeginShutdown
 
+		// The status endpoints are deliberately not rate limited: the SSE
+		// stream reconnects after any error, so throttling it produces a
+		// reconnect storm. /healthz and /demo/ are likewise exempt.
 		mux.Handle("/tiles/status", withCORS(od.StatusHandler()))
 		mux.Handle("/tiles/status/stream", withCORS(od.StatusStreamHandler()))
-		mux.Handle("/tiles/", withCORS(od.Handler()))
+		mux.Handle("/tiles/", withCORS(rateLimiter.Middleware(od.Handler())))
 	}
 
 	logger.Info("demo server listening",
@@ -175,8 +224,72 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Print the URL directly for easy access
 	fmt.Printf("\n  → http://%s/demo/\n\n", addr)
 
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	return srv.ListenAndServe()
+	srv := newHTTPServer(addr, mux, logger)
+	srv.RegisterOnShutdown(onShutdown)
+
+	return runHTTPServer(srv, shutdownTimeout, logger)
+}
+
+// newHTTPServer builds the tile server with timeouts on every phase of a
+// connection. Only ReadHeaderTimeout was set before, leaving the server open to
+// slow-loris bodies and to clients that request a tile and never read the
+// response — pinning a goroutine, an admission slot and possibly a render.
+//
+// WriteTimeout is deliberately shorter than a tile render. It is correct for
+// /healthz, /demo/, /tiles/status and cache hits; the two routes that need
+// longer extend the deadline per request via http.ResponseController.
+func newHTTPServer(addr string, handler http.Handler, logger *slog.Logger) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 16,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+	}
+}
+
+// runHTTPServer serves until a signal arrives or the listener fails, then
+// drains in-flight connections within shutdownTimeout.
+func runHTTPServer(srv *http.Server, shutdownTimeout time.Duration, logger *slog.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Request contexts derive from connCtx, not from the signal context. If
+	// they derived from the signal, SIGTERM would cancel every in-flight
+	// request at once and Shutdown would have nothing left to drain --
+	// throwing away a tile that was nearly rendered. connCtx is cancelled
+	// only after the drain, to abort whatever is still stuck.
+	connCtx, cancelConns := context.WithCancel(context.Background())
+	defer cancelConns()
+	srv.BaseContext = func(net.Listener) context.Context { return connCtx }
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		logger.Info("shutdown signal received, draining connections", "timeout", shutdownTimeout)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	err := srv.Shutdown(shutdownCtx)
+	cancelConns()
+	if err != nil {
+		return fmt.Errorf("graceful shutdown: %w", err)
+	}
+
+	logger.Info("server stopped")
+	return nil
 }
 
 // createOverpassDataSource creates an Overpass datasource from configuration.

@@ -705,16 +705,35 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
   context expires; and `retryWorker` released the semaphore by hand on each branch, so a panic
   leaked a generation slot for the life of the process — the job body is now extracted into
   `runRetryJob` with `defer`ed release.
-- [ ] **[P1]** Add per-IP rate limiting + bounded request-admission queue on `/tiles/`; return 503
-  when the render backlog is deep (backpressure — nothing bounds queued goroutines today).
+- [x] **[P1]** Add per-IP rate limiting + bounded request-admission queue on `/tiles/`.
+  Admission lives **inside** `OnDemandTiles`, not in middleware: middleware cannot tell a cache hit
+  from a miss and would shed requests for tiles already on disk. The gate sits before the per-tile
+  lock, because that lock is taken before the semaphore and held across the whole fetch+render, so
+  requests blocked there are the biggest pool of stuck goroutines — and are invisible to
+  `queuedRenders`. New `MaxPendingGenerations` (default `max(32, MaxConcurrentGenerations*8)`) →
+  503 + `Retry-After`. Rate limiting uses `golang.org/x/time/rate` keyed by client IP, with
+  TTL+cap eviction so it does not become another unbounded map; `X-Forwarded-For` is honoured only
+  from `--trusted-proxies`, and IPv6 keys collapse to /64 (a client controls its whole /64 and could
+  otherwise rotate freely). Status endpoints are exempt — rate-limiting SSE causes a reconnect storm.
+  Also added a bounded retry to the demo's tile loader: Leaflet never retries, so the first shed
+  request would otherwise leave a permanently blank tile and make backpressure look like a bug.
 - [x] **[P1]** Use `QueryContext(ctx, query)` in `datasource/overpass.go` — the fork already exposes
   a context-aware `Client.QueryContext`, so this was a one-line swap off the deprecated `Query`.
   Also gave the default HTTP client an actual `Timeout` (3m): it was `http.DefaultClient`, which has
   none, so a hung upstream pinned a fetch worker even with the context now threaded.
-- [ ] **[P1]** Set `ReadTimeout`, `IdleTimeout`, and a per-route write timeout on the `http.Server`
-  (`cmd/serve.go:178`, currently only `ReadHeaderTimeout`); keep the SSE route on a separate handler.
-  Add graceful shutdown that calls `od.Stop()` on SIGINT/SIGTERM (`serve.go` never does; `generate.go`
-  does — fix the inconsistency).
+- [x] **[P1]** Set `ReadTimeout`, `IdleTimeout`, `WriteTimeout`, `MaxHeaderBytes` and `ErrorLog` on
+  the `http.Server`, plus graceful shutdown via `signal.NotifyContext` + `srv.Shutdown` + `od.Stop()`.
+  Rather than a separate SSE handler, the two long-lived routes extend their own socket deadline with
+  `http.ResponseController` (`http.TimeoutHandler` is not usable — it buffers the whole response and
+  breaks `http.Flusher`). That forced `sendStatusEvent` to start returning an error: with a deadline
+  in play, a dead client would otherwise make the 250ms loop spin forever on a broken connection.
+  Three further findings: `srv.Shutdown` never ends the SSE stream, so shutting down with a demo tab
+  open burned the full timeout (fixed with `BeginShutdown` via `RegisterOnShutdown` — measured 1ms
+  instead of 30s); `od.Stop()` returned without waiting, so the retry worker could be killed
+  mid-`GenerateWithData` leaving a truncated PNG that the cache would serve forever (now a bounded
+  `WaitGroup` wait, bounded because Mapnik is cgo and may ignore cancellation); and
+  `FetchQueue.Stop` closed the jobs channel while `Submit` could still be sending — a
+  send-on-closed-channel panic that was unreachable only because nothing ever called `Stop`.
 - [x] **[P2]** Bound Overpass response reads — the unbounded `io.ReadAll` is *inside* the go-overpass
   dependency (`query.go:84`), not this repo, so it cannot be fixed at the call site. Capped instead
   at the transport: a `limitedTransport` RoundTripper wraps the injectable `OverpassConfig.HTTPClient`
