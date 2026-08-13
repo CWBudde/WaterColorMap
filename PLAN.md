@@ -898,21 +898,32 @@ Open items that the 7.3 work uncovered but deliberately did not change, so that 
 scoped and behaviour-preserving. They are listed here rather than left as prose inside 7.3, so that
 nothing in this plan claims a follow-up exists without an entry to point at.
 
-- [ ] **[P2]** `worker/pool.go` cancellation semantics. `taskCh` is buffered to `len(tasks)`, so a send
-      is always ready; once `ctx` is done both `select` arms are ready and Go picks at random, which
-      means a cancelled `Pool.Run` drops an arbitrary subset of the remaining tasks and returns a
-      nondeterministic number of `Result`s. Callers count failures from that slice. PR #10 only removed
-      the ineffective `break` (staticcheck SA4011) and the empty arm now documents the behaviour rather
-      than hiding it — but the behaviour itself is unchanged. Decide whether a cancelled run should emit
-      a cancellation `Result` per unfed task or stop feeding deterministically, then make the count
-      predictable either way.
-- [ ] **[P3]** `buildParksQuery` emits `natural=heath` twice from z10 — once as the way+relation pair
-      added at z ≥ 8, then again as a way-only rule at z ≥ 10. Harmless to Overpass (the union
-      de-duplicates) but it inflates the query. Surfaced by the table-driven rewrite in PR #14 and left
-      in place there so the goldens stayed byte-identical.
-- [ ] **[P3]** `buildRoadsQuery`'s z8-9 comment says "motorway + trunk" while the regex also matches
-      `primary`. Decide which is intended — the comment or the behaviour — and align them. Also from
-      PR #14; the goldens pin the current behaviour, so changing it is a deliberate, visible edit.
+- [x] **[P2]** `worker/pool.go` cancellation semantics — resolved as "one `Result` per task, always".
+      The fix turned out to be a deletion rather than an addition: the worker side was already correct
+      (`Pool.worker` does a non-blocking `ctx.Done()` check per task and emits `Result{Err: ctx.Err()}`),
+      so the only source of loss was the feeder's `select`. Since `taskCh` is buffered to `len(tasks)` a
+      send can never block, which makes the `ctx.Done()` arm pure downside — it could only ever drop a
+      task that was guaranteed to be deliverable. Feeding unconditionally makes
+      `len(results) == len(tasks)` an unconditional invariant, which is what `runTilePool` needs since it
+      counts failures off that slice. The feed **goroutine** went too: with no blocking send there is
+      nothing to run concurrently, so `Run` now fills and closes `taskCh` inline. Chosen over a
+      deterministic early exit because a short slice would have pushed "the rest were never attempted"
+      onto every caller. Regression cover: `TestPool_CancelledBeforeRun` (table-driven over 1/8/4 workers)
+      asserts one result per task and `context.Canceled` on all of them, and `TestPool_Cancellation` now
+      asserts the count invariant instead of only logging it. Verified with `-race -count=5`.
+- [x] **[P3]** `buildParksQuery`'s duplicate `natural=heath` removed — the way-only rule at z ≥ 10 was
+      dropped; the way+relation pair at z ≥ 8 already emits the identical `way[...]` line from z8 up.
+      Behaviour-preserving (Overpass's union de-duplicates), so this only shrinks the query. The 18
+      affected goldens (z10–z18 × plain/`-clipped`) were regenerated and audited line by line: each shows
+      exactly one deletion, all 18 the same `way["natural"="heath"](...)` line, and z00–z09 stayed
+      byte-identical.
+- [x] **[P3]** `buildRoadsQuery` z8-9 — resolved in favour of the **behaviour**, not the old comment.
+      Matching `primary` from z8 is what has always shipped and what every existing tile and golden was
+      generated with, so "fixing" it to motorway+trunk would have silently invalidated already-generated
+      z8-9 tiles for no reported defect. PR #14 had already corrected the doc block to name trunk and
+      primary at z8-11, so all that remained was deleting the stale `NOTE` that pointed at this very
+      follow-up, and folding a one-line rationale into the `roadsRules` doc comment so the next reader
+      does not "correct" it back. Comment-only: zero golden churn.
 
 ---
 
