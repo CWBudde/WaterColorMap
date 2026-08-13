@@ -8,10 +8,10 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/MeKo-Tech/watercolormap/internal/datasource"
-	"github.com/MeKo-Tech/watercolormap/internal/pipeline"
-	"github.com/MeKo-Tech/watercolormap/internal/server"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/datasource"
+	"github.com/cwbudde/watercolormap/internal/pipeline"
+	"github.com/cwbudde/watercolormap/internal/server"
+	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

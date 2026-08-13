@@ -13,14 +13,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MeKo-Tech/watercolormap/internal/composite"
-	"github.com/MeKo-Tech/watercolormap/internal/datasource"
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
-	"github.com/MeKo-Tech/watercolormap/internal/mask"
-	"github.com/MeKo-Tech/watercolormap/internal/raster"
-	"github.com/MeKo-Tech/watercolormap/internal/texture"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
-	"github.com/MeKo-Tech/watercolormap/internal/watercolor"
+	"github.com/cwbudde/watercolormap/internal/composite"
+	"github.com/cwbudde/watercolormap/internal/datasource"
+	"github.com/cwbudde/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/mask"
+	"github.com/cwbudde/watercolormap/internal/raster"
+	"github.com/cwbudde/watercolormap/internal/texture"
+	"github.com/cwbudde/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/watercolor"
 	"syscall/js"
 )
 

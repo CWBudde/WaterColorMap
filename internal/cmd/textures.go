@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/MeKo-Tech/watercolormap/internal/texture"
+	"github.com/cwbudde/watercolormap/internal/texture"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

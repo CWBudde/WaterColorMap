@@ -1,6 +1,6 @@
 package main
 
-import "github.com/MeKo-Tech/watercolormap/internal/cmd"
+import "github.com/cwbudde/watercolormap/internal/cmd"
 
 func main() {
 	cmd.Execute()

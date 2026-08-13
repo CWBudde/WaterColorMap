@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // FetchJob represents a tile fetch request.
@@ -262,6 +262,7 @@ func (fq *FetchQueue) doFetch(ctx context.Context, coord types.TileCoordinate, b
 		"parks_features", len(data.Features.Parks),
 		"buildings_features", len(data.Features.Buildings),
 		"urban_features", len(data.Features.Urban),
+		"civic_features", len(data.Features.Civic),
 	)
 
 	if dataSize > fq.cfg.DataSizeWarningThreshold {
@@ -298,7 +299,8 @@ func estimateDataSize(data *types.TileData) int64 {
 		len(data.Features.Roads) +
 		len(data.Features.Parks) +
 		len(data.Features.Buildings) +
-		len(data.Features.Urban)
+		len(data.Features.Urban) +
+		len(data.Features.Civic)
 
 	size = int64(featureCount * bytesPerFeature)
 

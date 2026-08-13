@@ -6,7 +6,7 @@ import (
 	"image/color"
 	"math"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/geojson"
 )
 
 // DefaultOrder defines the bottom-to-top compositing order for watercolor layers.

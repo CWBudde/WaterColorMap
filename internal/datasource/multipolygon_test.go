@@ -3,7 +3,7 @@ package datasource
 import (
 	"testing"
 
-	"github.com/MeKo-Christian/go-overpass"
+	"github.com/cwbudde/go-overpass"
 	"github.com/paulmach/orb"
 )
 

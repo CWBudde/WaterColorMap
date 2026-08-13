@@ -3,7 +3,7 @@ package types
 import (
 	"time"
 
-	"github.com/MeKo-Christian/go-overpass"
+	"github.com/cwbudde/go-overpass"
 	"github.com/paulmach/orb"
 )
 
@@ -14,8 +14,10 @@ const (
 	FeatureTypeWater    FeatureType = "water"
 	FeatureTypePark     FeatureType = "park"
 	FeatureTypeRoad     FeatureType = "road"
+	FeatureTypeRailroad FeatureType = "railroad"
 	FeatureTypeBuilding FeatureType = "building"
 	FeatureTypeUrban    FeatureType = "urban"
+	FeatureTypeCivic    FeatureType = "civic"
 	FeatureTypeLand     FeatureType = "land"
 	FeatureTypeUnknown  FeatureType = "unknown"
 )
@@ -35,8 +37,10 @@ type FeatureCollection struct {
 	Rivers    []Feature // Linear waterways (rivers, streams, canals)
 	Parks     []Feature // Parks, forests, green spaces
 	Roads     []Feature // Streets, highways
+	Railroads []Feature // Railway lines (rail, light_rail, subway, tram)
 	Buildings []Feature // Building footprints
-	Urban     []Feature // Urban areas (residential/commercial/industrial landuse) and urban buildings
+	Urban     []Feature // Urban landuse areas (residential/commercial/industrial/retail)
+	Civic     []Feature // Civic buildings (schools, hospitals, universities, libraries, town halls)
 	Land      []Feature // Land polygons (background)
 }
 
@@ -52,7 +56,7 @@ type TileData struct {
 
 // Count returns the total number of features
 func (fc FeatureCollection) Count() int {
-	return len(fc.Water) + len(fc.Parks) + len(fc.Roads) + len(fc.Buildings) + len(fc.Urban) + len(fc.Land)
+	return len(fc.Water) + len(fc.Parks) + len(fc.Roads) + len(fc.Railroads) + len(fc.Buildings) + len(fc.Urban) + len(fc.Civic) + len(fc.Land)
 }
 
 // FeatureCounts returns a map of feature counts by type
@@ -61,8 +65,10 @@ func (fc FeatureCollection) FeatureCounts() map[string]int {
 		"water":     len(fc.Water),
 		"parks":     len(fc.Parks),
 		"roads":     len(fc.Roads),
+		"railroads": len(fc.Railroads),
 		"buildings": len(fc.Buildings),
 		"urban":     len(fc.Urban),
+		"civic":     len(fc.Civic),
 		"land":      len(fc.Land),
 		"total":     fc.Count(),
 	}

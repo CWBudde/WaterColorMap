@@ -267,6 +267,7 @@ OpenStreetMap's raw data does **not include ocean polygons**. The ocean is repre
 **Current (Broken) Behavior**:
 
 For pure ocean tiles (e.g., z9_x266_y164.png):
+
 1. Query Overpass API for features within tile bounds
 2. Overpass returns **NOTHING** (ocean is not mapped)
 3. `land.xml` fills tile with TAN background (#C4A574)
@@ -274,6 +275,7 @@ For pure ocean tiles (e.g., z9_x266_y164.png):
 5. **Result**: Ocean appears as LAND (tan) ❌
 
 For coastal tiles with islands:
+
 1. Islands may have `natural=water` polygons (lakes)
 2. Lakes render BLUE
 3. Surrounding ocean has no data → stays TAN
@@ -289,6 +291,7 @@ For coastal tiles with islands:
 **Root Cause**:
 
 The rendering pipeline assumes all features (water, land, parks, etc.) are explicitly present as polygons in OSM data. This works for inland features but fails for oceans because:
+
 1. OSM uses an **implicit ocean model** (ocean = not land)
 2. Coastlines are directional lines (water is to the right)
 3. Converting coastlines to ocean polygons requires complex processing:
@@ -306,6 +309,7 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 **Cons**: External dependency, ~500MB-1GB download
 
 **Implementation**:
+
 - [ ] Download processed water polygons from https://osmdata.openstreetmap.de/data/water-polygons.html
 - [ ] Add new data source interface for shapefile/GeoPackage reading (alongside Overpass)
 - [ ] Integrate water polygons into the data pipeline
@@ -316,10 +320,12 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 - [ ] Update documentation with water polygon setup instructions
 
 **Files**:
+
 - Water-polygons-split-4326.zip (~500MB) - split into smaller files for tile-based access
 - Simplified-water-polygons-split-4326.zip (~50MB) - simplified for low zoom levels
 
 **Data Source Priority**:
+
 1. Use simplified polygons for z ≤ 9
 2. Use full polygons for z ≥ 10
 3. Use Overpass for detailed inland water features at all zooms
@@ -331,6 +337,7 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 **Cons**: Heuristic-based, may miss edge cases, doesn't solve coastal complexity
 
 **Implementation**:
+
 - [ ] Add ocean tile detection logic in datasource layer
 - [ ] If tile query returns zero land features AND tile bounds intersect known ocean areas:
   - Synthesize a water polygon covering the entire tile bounds
@@ -343,6 +350,7 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 - [ ] Document limitations (coastal tiles may still have issues)
 
 **Limitations**:
+
 - Doesn't handle complex coastlines (bays, islands, estuaries)
 - Requires hardcoding ocean bounding boxes
 - Won't work for all edge cases
@@ -358,11 +366,13 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 **Decision Required**: Choose between Option 1 (proper solution) or Option 2 (quick fix) based on project timeline and requirements.
 
 **Recommended Path**:
+
 1. Implement Option 2 (quick fix) for immediate unblocking
 2. Plan Option 1 (water polygons) as proper long-term solution
 3. Document both approaches in configuration
 
 **Testing Requirements**:
+
 - [ ] Pure ocean tile rendering (z9_x266_y164 North Sea area)
 - [ ] Coastal tile with mainland and ocean (Hamburg area)
 - [ ] Island tile (British Isles, Mediterranean islands)
@@ -372,12 +382,14 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 - [ ] Test across zoom levels z5-z12
 
 **Related Code**:
+
 - `internal/datasource/overpass.go` - buildWaterQuery() (lines 249-283)
 - `internal/datasource/overpass_extract.go` - isWater() (lines 270-277)
 - `assets/styles/layers/water.xml` - water rendering style
 - `assets/styles/layers/land.xml` - background color definition
 
 **References**:
+
 - [OSM Water Polygons](https://osmdata.openstreetmap.de/data/water-polygons.html)
 - [OSM Coastline Processing](https://wiki.openstreetmap.org/wiki/Coastline)
 - [osmcoastline tool](https://osmcode.org/osmcoastline/)

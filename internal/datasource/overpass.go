@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/MeKo-Christian/go-overpass"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/go-overpass"
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // OverpassConfig contains configuration for the Overpass API client.
@@ -227,6 +227,9 @@ func (ds *OverpassDataSource) buildTileQuery(bounds types.BoundingBox, zoom int)
 	// Roads features
 	queryParts = append(queryParts, ds.buildRoadsQuery(bbox, zoom)...)
 
+	// Railroads features
+	queryParts = append(queryParts, ds.buildRailroadsQuery(bbox, zoom)...)
+
 	// Buildings and urban (only at higher zooms)
 	queryParts = append(queryParts, ds.buildBuildingsQuery(bbox, zoom)...)
 
@@ -260,18 +263,19 @@ func (ds *OverpassDataSource) buildWaterQuery(bbox string, zoom int) []string {
 	)
 
 	// Rivers and waterways - progressively add detail
+	// Streams excluded at zoom ≤15 as they render too narrow to be useful
 	if zoom >= 10 {
-		if zoom >= 14 {
-			// z14+: All waterways
+		if zoom >= 16 {
+			// z16+: All waterways including streams
 			parts = append(parts,
 				fmt.Sprintf(`way["waterway"](%s);`, bbox),
 				fmt.Sprintf(`relation["waterway"](%s);`, bbox),
 			)
 		} else if zoom >= 12 {
-			// z12-13: Rivers, streams, canals (no drains/ditches)
+			// z12-15: Rivers and canals only (no streams - too narrow)
 			parts = append(parts,
-				fmt.Sprintf(`way["waterway"~"river|stream|canal"](%s);`, bbox),
-				fmt.Sprintf(`relation["waterway"~"river|stream|canal"](%s);`, bbox),
+				fmt.Sprintf(`way["waterway"~"river|canal"](%s);`, bbox),
+				fmt.Sprintf(`relation["waterway"~"river|canal"](%s);`, bbox),
 			)
 		} else {
 			// z10-11: Major rivers only
@@ -317,12 +321,9 @@ func (ds *OverpassDataSource) buildParksQuery(bbox string, zoom int) []string {
 	}
 
 	if zoom >= 10 {
-		// z10+: Add meadows, grass, and farmland
+		// z10+: Add grass (landuse=grass only, not natural=grassland or meadow/farmland)
 		parts = append(parts,
 			fmt.Sprintf(`way["landuse"="grass"](%s);`, bbox),
-			fmt.Sprintf(`way["landuse"="meadow"](%s);`, bbox),
-			fmt.Sprintf(`way["landuse"="farmland"](%s);`, bbox),
-			fmt.Sprintf(`way["natural"="grassland"](%s);`, bbox),
 			fmt.Sprintf(`way["natural"="heath"](%s);`, bbox),
 		)
 	}
@@ -401,12 +402,44 @@ func (ds *OverpassDataSource) buildRoadsQuery(bbox string, zoom int) []string {
 	return parts
 }
 
+// buildRailroadsQuery returns railroad query parts based on zoom level.
+// Zoom-based filtering:
+//   - z<9: No railroads
+//   - z9-15: Main rail lines only (major railway tracks)
+//   - z16: + light_rail
+//   - z17+: + subway, tram
+func (ds *OverpassDataSource) buildRailroadsQuery(bbox string, zoom int) []string {
+	if zoom < 9 {
+		// No railroads at very low zooms
+		return nil
+	}
+
+	if zoom <= 15 {
+		// z9-15: Main rail lines only (major railway tracks)
+		return []string{
+			fmt.Sprintf(`way["railway"="rail"](%s);`, bbox),
+		}
+	}
+
+	if zoom == 16 {
+		// z16: Main rail + light rail
+		return []string{
+			fmt.Sprintf(`way["railway"~"rail|light_rail"](%s);`, bbox),
+		}
+	}
+
+	// z17+: All major railway types including subway and tram
+	return []string{
+		fmt.Sprintf(`way["railway"~"rail|light_rail|subway|tram"](%s);`, bbox),
+	}
+}
+
 // buildBuildingsQuery returns building and urban area query parts based on zoom level.
 // Zoom-based filtering:
 //   - z<11: Nothing
 //   - z11-13: Urban landuse areas (residential, commercial, industrial, retail)
-//   - z14-15: Urban areas + urban buildings (schools, hospitals, universities)
-//   - z16+: Urban areas + urban buildings + all individual buildings
+//   - z14-15: Urban landuse areas + civic amenities (schools, hospitals, universities)
+//   - z16+: Individual building footprints + civic amenities (replaces urban areas)
 func (ds *OverpassDataSource) buildBuildingsQuery(bbox string, zoom int) []string {
 	if zoom < 11 {
 		// No buildings or urban areas at very low zooms
@@ -415,9 +448,9 @@ func (ds *OverpassDataSource) buildBuildingsQuery(bbox string, zoom int) []strin
 
 	var parts []string
 
-	// Urban landuse areas - from z11+
-	// These show built-up areas to identify towns/cities at medium zooms
-	if zoom >= 11 {
+	// Urban landuse areas - z11 through z15 only
+	// At z16+, individual buildings replace landuse areas
+	if zoom >= 11 && zoom <= 15 {
 		parts = append(parts,
 			fmt.Sprintf(`way["landuse"="residential"](%s);`, bbox),
 			fmt.Sprintf(`relation["landuse"="residential"](%s);`, bbox),
@@ -430,16 +463,20 @@ func (ds *OverpassDataSource) buildBuildingsQuery(bbox string, zoom int) []strin
 		)
 	}
 
-	// Civic buildings - from z14+
+	// Civic buildings - z14+ (as areas at z14-15, as buildings at z16+)
 	if zoom >= 14 {
 		parts = append(parts,
 			fmt.Sprintf(`way["amenity"="school"](%s);`, bbox),
 			fmt.Sprintf(`way["amenity"="hospital"](%s);`, bbox),
 			fmt.Sprintf(`way["amenity"="university"](%s);`, bbox),
+			fmt.Sprintf(`way["amenity"="college"](%s);`, bbox),
+			fmt.Sprintf(`way["amenity"="library"](%s);`, bbox),
+			fmt.Sprintf(`way["amenity"="town_hall"](%s);`, bbox),
+			fmt.Sprintf(`way["leisure"="stadium"](%s);`, bbox),
 		)
 	}
 
-	// Individual buildings - from z16+
+	// Individual buildings - from z16+ (replaces landuse areas)
 	if zoom >= 16 {
 		parts = append(parts, fmt.Sprintf(`way["building"](%s);`, bbox))
 	}
@@ -495,20 +532,21 @@ type serverInstance struct {
 // At least one server with nil coverage (default/fallback) should be provided.
 //
 // Example:
-//   ds := NewMultiOverpassDataSource(
-//       ServerConfig{
-//           Endpoint: "http://localhost:12345/api/interpreter",
-//           Workers:  10,
-//           Coverage: &types.BoundingBox{MinLat: 51.3, MaxLat: 53.9, MinLon: 6.6, MaxLon: 11.6},
-//           Name:     "Niedersachsen",
-//       },
-//       ServerConfig{
-//           Endpoint: "https://overpass-api.de/api/interpreter",
-//           Workers:  2,
-//           Coverage: nil, // Fallback for rest of world
-//           Name:     "Public",
-//       },
-//   )
+//
+//	ds := NewMultiOverpassDataSource(
+//	    ServerConfig{
+//	        Endpoint: "http://localhost:12345/api/interpreter",
+//	        Workers:  10,
+//	        Coverage: &types.BoundingBox{MinLat: 51.3, MaxLat: 53.9, MinLon: 6.6, MaxLon: 11.6},
+//	        Name:     "Niedersachsen",
+//	    },
+//	    ServerConfig{
+//	        Endpoint: "https://overpass-api.de/api/interpreter",
+//	        Workers:  2,
+//	        Coverage: nil, // Fallback for rest of world
+//	        Name:     "Public",
+//	    },
+//	)
 func NewMultiOverpassDataSource(configs ...ServerConfig) *MultiOverpassDataSource {
 	servers := make([]serverInstance, 0, len(configs))
 
@@ -621,7 +659,7 @@ var ErrEmptyOverpassResponse = fmt.Errorf("overpass returned empty response")
 func validateFeatureResponse(features types.FeatureCollection, zoom int) error {
 	// Count all features including rivers
 	totalFeatures := len(features.Water) + len(features.Rivers) + len(features.Parks) +
-		len(features.Roads) + len(features.Buildings) + len(features.Urban)
+		len(features.Roads) + len(features.Buildings) + len(features.Urban) + len(features.Civic)
 
 	// At zoom 8-13, if we have ZERO features of any kind, it's suspicious.
 	// Real land tiles should have at least forests, parks, water, or roads.

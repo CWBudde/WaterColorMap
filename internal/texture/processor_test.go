@@ -5,18 +5,20 @@ import (
 	"image/color"
 	"testing"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/geojson"
 )
 
 func TestTextureNameForLayer(t *testing.T) {
 	expected := map[geojson.LayerType]string{
-		geojson.LayerPaper:    "white.png",
-		geojson.LayerLand:     "land.png",
-		geojson.LayerWater:    "water.png",
-		geojson.LayerParks:    "green.png",
-		geojson.LayerUrban:    "urban.png",
-		geojson.LayerRoads:    "gray.png",
-		geojson.LayerHighways: "yellow.png",
+		geojson.LayerPaper:     "white.png",
+		geojson.LayerLand:      "land.png",
+		geojson.LayerWater:     "water.png",
+		geojson.LayerParks:     "green.png",
+		geojson.LayerUrban:     "urban.png",
+		geojson.LayerCivic:     "civic.png",
+		geojson.LayerBuildings: "urban.png",
+		geojson.LayerRoads:     "gray.png",
+		geojson.LayerHighways:  "yellow.png",
 	}
 
 	for layer, want := range expected {

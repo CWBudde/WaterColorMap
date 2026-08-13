@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MeKo-Tech/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/tile"
 )
 
 // mockGenerator simulates tile generation for testing

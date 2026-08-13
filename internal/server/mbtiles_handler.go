@@ -7,8 +7,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/MeKo-Tech/watercolormap/internal/mbtiles"
-	"github.com/MeKo-Tech/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/mbtiles"
+	"github.com/cwbudde/watercolormap/internal/tile"
 )
 
 // MBTilesHandler serves tiles from an MBTiles database.

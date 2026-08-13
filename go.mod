@@ -1,10 +1,10 @@
-module github.com/MeKo-Tech/watercolormap
+module github.com/cwbudde/watercolormap
 
 go 1.25.0
 
 require (
-	github.com/MeKo-Christian/go-overpass v0.0.0-20251220122618-2dfca379d0cd
 	github.com/aquilax/go-perlin v1.1.0
+	github.com/cwbudde/go-overpass v0.0.0-20260418190031-ddf15fac5067
 	github.com/disintegration/gift v1.2.1
 	github.com/omniscale/go-mapnik/v2 v2.0.1
 	github.com/paulmach/orb v0.12.0

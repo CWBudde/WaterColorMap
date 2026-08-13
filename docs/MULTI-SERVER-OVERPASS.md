@@ -31,17 +31,17 @@ overpass:
     # Local Niedersachsen instance (fast, covers Lower Saxony, Germany)
     - name: "Niedersachsen"
       endpoint: "http://localhost:12345/api/interpreter"
-      workers: 10  # Higher parallelism for local instance
+      workers: 10 # Higher parallelism for local instance
       coverage:
-        min_lat: 51.3   # Southern edge
-        max_lat: 53.9   # Northern edge
-        min_lon: 6.6    # Western edge
-        max_lon: 11.6   # Eastern edge
+        min_lat: 51.3 # Southern edge
+        max_lat: 53.9 # Northern edge
+        min_lon: 6.6 # Western edge
+        max_lon: 11.6 # Eastern edge
 
     # Public fallback (covers everything else)
     - name: "Public"
       endpoint: "https://overpass-api.de/api/interpreter"
-      workers: 2  # Conservative for public API
+      workers: 2 # Conservative for public API
       # No coverage = matches everything
 ```
 
@@ -128,7 +128,7 @@ overpass:
     # Local instance with aggressive parallelism
     - name: "Local"
       endpoint: "http://localhost:12345/api/interpreter"
-      workers: 20  # Local can handle more
+      workers: 20 # Local can handle more
       coverage:
         min_lat: 50.0
         max_lat: 55.0

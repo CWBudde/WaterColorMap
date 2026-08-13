@@ -11,7 +11,7 @@ import (
 	"math"
 	"os"
 
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/types"
 	mapnik "github.com/omniscale/go-mapnik/v2"
 )
 

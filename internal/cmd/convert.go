@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/MeKo-Tech/watercolormap/internal/mbtiles"
+	"github.com/cwbudde/watercolormap/internal/mbtiles"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

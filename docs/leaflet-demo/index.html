@@ -122,13 +122,13 @@
     <div class="status-panel" id="status-panel">
       <h3>Server Status</h3>
       <div id="status-content">
-        <div style="color: #6b7280; font-style: italic;">Loading...</div>
+        <div style="color: #6b7280; font-style: italic">Loading...</div>
       </div>
     </div>
 
     <script>
       // Version marker - if you don't see this in console, browser is serving cached HTML
-      console.log('🎨 WaterColorMap Demo v3.0 - SSE Status Stream');
+      console.log("🎨 WaterColorMap Demo v3.0 - SSE Status Stream");
 
       // ============================================================
       // IMPORTANT: Start SSE connection FIRST, before any tile requests
@@ -153,10 +153,13 @@
         let html = "";
 
         // Check if system is completely idle
-        const isIdle = status.render.active_renders === 0 &&
-                       status.render.total_rendered === 0 &&
-                       status.render.queued_renders === 0 &&
-                       (!status.fetch || (status.fetch.active_fetches === 0 && status.fetch.total_completed === 0));
+        const isIdle =
+          status.render.active_renders === 0 &&
+          status.render.total_rendered === 0 &&
+          status.render.queued_renders === 0 &&
+          (!status.fetch ||
+            (status.fetch.active_fetches === 0 &&
+              status.fetch.total_completed === 0));
 
         if (isIdle) {
           html += `<div style="color: #6b7280; font-style: italic; padding: 4px 0;">Ready - navigate map to generate tiles</div>`;
@@ -253,10 +256,12 @@
           eventSource.close();
         }
 
-        eventSource = new EventSource(`${window.location.origin}/tiles/status/stream`);
+        eventSource = new EventSource(
+          `${window.location.origin}/tiles/status/stream`,
+        );
 
         eventSource.onopen = () => {
-          console.log('SSE connection established');
+          console.log("SSE connection established");
           statusConnected = true;
           reconnectAttempts = 0;
         };
@@ -267,12 +272,12 @@
             statusConnected = true;
             renderStatus(status);
           } catch (err) {
-            console.error('Failed to parse status:', err);
+            console.error("Failed to parse status:", err);
           }
         };
 
         eventSource.onerror = () => {
-          console.log('SSE connection error, will retry');
+          console.log("SSE connection error, will retry");
           statusConnected = false;
           eventSource.close();
 
@@ -282,7 +287,8 @@
             statusContent.innerHTML = `<div style="color: #6b7280; font-style: italic;">Reconnecting...</div>`;
             setTimeout(connectStatusStream, delay);
           } else {
-            statusContent.innerHTML = '<div class="status-disconnected">Disconnected</div>';
+            statusContent.innerHTML =
+              '<div class="status-disconnected">Disconnected</div>';
           }
         };
       }

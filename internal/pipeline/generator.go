@@ -13,14 +13,14 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/MeKo-Tech/watercolormap/internal/composite"
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
-	"github.com/MeKo-Tech/watercolormap/internal/mask"
-	"github.com/MeKo-Tech/watercolormap/internal/renderer"
-	"github.com/MeKo-Tech/watercolormap/internal/texture"
-	"github.com/MeKo-Tech/watercolormap/internal/tile"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
-	"github.com/MeKo-Tech/watercolormap/internal/watercolor"
+	"github.com/cwbudde/watercolormap/internal/composite"
+	"github.com/cwbudde/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/mask"
+	"github.com/cwbudde/watercolormap/internal/renderer"
+	"github.com/cwbudde/watercolormap/internal/texture"
+	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/watercolor"
 )
 
 // StageCapture represents a single captured intermediate stage.
@@ -407,8 +407,9 @@ type maskSet struct {
 	waterMask     *image.Gray
 	riversMask    *image.Gray
 	roadsMask     *image.Gray
+	railroadsMask *image.Gray
 	highwaysAlpha *image.Gray
-	nonLandUnion  *image.Gray // Union of water + rivers + roads (used as base for land inversion)
+	nonLandUnion  *image.Gray // Union of water + rivers + roads + railroads (used as base for land inversion)
 }
 
 // buildMasks extracts alpha masks from rendered layers and creates the non-land union.
@@ -422,7 +423,11 @@ func buildMasks(
 	waterImg := rawLayers[geojson.LayerWater]
 	riversImg := rawLayers[geojson.LayerRivers]
 	roadsImg := rawLayers[geojson.LayerRoads]
+	railroadsImg := rawLayers[geojson.LayerRailroads]
 	highwaysImg := rawLayers[geojson.LayerHighways]
+	urbanImg := rawLayers[geojson.LayerUrban]
+	civicImg := rawLayers[geojson.LayerCivic]
+	buildingsImg := rawLayers[geojson.LayerBuildings]
 
 	baseBounds := image.Rect(0, 0, params.TileSize, params.TileSize)
 
@@ -430,7 +435,11 @@ func buildMasks(
 	waterMask := mask.NewEmptyMask(baseBounds)
 	riversMask := mask.NewEmptyMask(baseBounds)
 	roadsMask := mask.NewEmptyMask(baseBounds)
+	railroadsMask := mask.NewEmptyMask(baseBounds)
 	highwaysAlpha := mask.NewEmptyMask(baseBounds)
+	urbanMask := mask.NewEmptyMask(baseBounds)
+	civicMask := mask.NewEmptyMask(baseBounds)
+	buildingsMask := mask.NewEmptyMask(baseBounds)
 
 	if waterImg != nil {
 		waterMask = mask.ExtractAlphaMask(waterImg)
@@ -441,25 +450,43 @@ func buildMasks(
 	if roadsImg != nil {
 		roadsMask = mask.ExtractAlphaMask(roadsImg)
 	}
+	if railroadsImg != nil {
+		railroadsMask = mask.ExtractAlphaMask(railroadsImg)
+	}
 	if highwaysImg != nil {
 		highwaysAlpha = mask.ExtractAlphaMask(highwaysImg)
+	}
+	if urbanImg != nil {
+		urbanMask = mask.ExtractAlphaMask(urbanImg)
+	}
+	if civicImg != nil {
+		civicMask = mask.ExtractAlphaMask(civicImg)
+	}
+	if buildingsImg != nil {
+		buildingsMask = mask.ExtractAlphaMask(buildingsImg)
 	}
 
 	// Capture alpha masks (all grayscale)
 	dc.Capture("01_water_alpha", "Alpha mask from water layer", waterMask, 1)
 	dc.Capture("02_rivers_alpha", "Alpha mask from rivers layer", riversMask, 2)
 	dc.Capture("03_roads_alpha", "Alpha mask from roads layer", roadsMask, 3)
+	dc.Capture("03_railroads_alpha", "Alpha mask from railroads layer", railroadsMask, 3)
 	dc.Capture("03_highways_alpha", "Alpha mask from highways layer", highwaysAlpha, 3)
+	dc.Capture("04_urban_alpha", "Alpha mask from urban layer", urbanMask, 4)
+	dc.Capture("04_civic_alpha", "Alpha mask from civic layer", civicMask, 4)
+	dc.Capture("04_buildings_alpha", "Alpha mask from buildings layer", buildingsMask, 4)
 
-	// Combine water, rivers, roads, and highways into non-land union mask
+	// Combine water, rivers, roads, railroads, highways, urban, civic, and buildings into non-land union mask
 	// This is the base mask for land - will be inverted during processing (InvertMask=true)
-	nonLandUnion := mask.MaxMasks(waterMask, riversMask, roadsMask, highwaysAlpha)
-	dc.Capture("04_nonland_union", "Union of water + rivers + roads + highways masks", nonLandUnion, 4)
+	// All these layers are subtracted from land
+	nonLandUnion := mask.MaxMasks(waterMask, riversMask, roadsMask, railroadsMask, highwaysAlpha, urbanMask, civicMask, buildingsMask)
+	dc.Capture("05_nonland_union", "Union of water + rivers + roads + railroads + highways + urban + civic + buildings masks", nonLandUnion, 5)
 
 	return &maskSet{
 		waterMask:     waterMask,
 		riversMask:    riversMask,
 		roadsMask:     roadsMask,
+		railroadsMask: railroadsMask,
 		highwaysAlpha: highwaysAlpha,
 		nonLandUnion:  nonLandUnion,
 	}, nil
@@ -530,6 +557,16 @@ func paintAllLayers(
 		dc.Capture("15_painted_roads", "Watercolor-painted roads layer", roadsPainted, 15)
 	}
 
+	// Paint railroads from their own alpha mask
+	if railroadsImg := rawLayers[geojson.LayerRailroads]; railroadsImg != nil {
+		railroadsPainted, err := watercolor.PaintLayer(railroadsImg, geojson.LayerRailroads, params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to paint railroads: %w", err)
+		}
+		painted[geojson.LayerRailroads] = railroadsPainted
+		dc.Capture("16_painted_railroads", "Watercolor-painted railroads layer", railroadsPainted, 16)
+	}
+
 	// Paint highways/major roads on top
 	if highwaysImg := rawLayers[geojson.LayerHighways]; highwaysImg != nil {
 		highwaysPainted, err := watercolor.PaintLayer(highwaysImg, geojson.LayerHighways, params)
@@ -540,35 +577,67 @@ func paintAllLayers(
 		dc.Capture("19_painted_highways", "Watercolor-painted highways layer", highwaysPainted, 19)
 	}
 
-	// Constrain parks/urban/buildings to land, then paint
-	if parksImg := rawLayers[geojson.LayerParks]; parksImg != nil {
-		parksMask := mask.MinMask(mask.ExtractAlphaMask(parksImg), landMask)
-		dc.Capture("14_parks_on_land", "Parks constrained to land", parksMask, 14)
-		parksPainted, err := watercolor.PaintLayerFromMask(parksMask, geojson.LayerParks, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint parks constrained to land: %w", err)
-		}
-		painted[geojson.LayerParks] = parksPainted
-		dc.Capture("16_painted_parks", "Watercolor-painted parks layer", parksPainted, 16)
-	}
+	// Create roads+railroads+highways union mask for subtracting from urban/civic areas
+	roadsRailroadsHighwaysUnion := mask.MaxMasks(masks.roadsMask, masks.railroadsMask, masks.highwaysAlpha)
+	dc.Capture("14a_roads_railroads_highways_union", "Union of roads + railroads + highways for area subtraction", roadsRailroadsHighwaysUnion, 14)
 
+	// Paint urban with roads/railroads/highways subtracted (similar to land subtraction)
 	if urbanImg := rawLayers[geojson.LayerUrban]; urbanImg != nil {
-		urbanMask := mask.MinMask(mask.ExtractAlphaMask(urbanImg), landMask)
-		dc.Capture("10_civic_on_land", "Civic constrained to land", urbanMask, 10)
-		urbanPainted, err := watercolor.PaintLayerFromMask(urbanMask, geojson.LayerUrban, params)
+		urbanMask := mask.ExtractAlphaMask(urbanImg)
+		// Subtract roads, railroads, and highways from urban areas
+		urbanMinusRoads := mask.SubtractMask(urbanMask, roadsRailroadsHighwaysUnion)
+		dc.Capture("14b_urban_minus_roads", "Urban areas with roads/railroads/highways subtracted", urbanMinusRoads, 14)
+		urbanPainted, err := watercolor.PaintLayerFromMask(urbanMinusRoads, geojson.LayerUrban, params)
 		if err != nil {
-			return nil, fmt.Errorf("failed to paint urban constrained to land: %w", err)
+			return nil, fmt.Errorf("failed to paint urban: %w", err)
 		}
 		painted[geojson.LayerUrban] = urbanPainted
-		dc.Capture("17_painted_civic", "Watercolor-painted urban layer", urbanPainted, 17)
+		dc.Capture("14_painted_urban", "Watercolor-painted urban layer", urbanPainted, 14)
 	}
 
-	if buildingsImg := rawLayers[geojson.LayerBuildings]; buildingsImg != nil {
-		buildingsMask := mask.MinMask(mask.ExtractAlphaMask(buildingsImg), landMask)
-		dc.Capture("11_buildings_on_land", "Buildings constrained to land", buildingsMask, 11)
-		buildingsPainted, err := watercolor.PaintLayerFromMask(buildingsMask, geojson.LayerBuildings, params)
+	// Paint civic with roads/railroads/highways subtracted (similar to land subtraction)
+	if civicImg := rawLayers[geojson.LayerCivic]; civicImg != nil {
+		civicMask := mask.ExtractAlphaMask(civicImg)
+		// Subtract roads, railroads, and highways from civic areas
+		civicMinusRoads := mask.SubtractMask(civicMask, roadsRailroadsHighwaysUnion)
+		dc.Capture("14c_civic_minus_roads", "Civic areas with roads/railroads/highways subtracted", civicMinusRoads, 14)
+		civicPainted, err := watercolor.PaintLayerFromMask(civicMinusRoads, geojson.LayerCivic, params)
 		if err != nil {
-			return nil, fmt.Errorf("failed to paint buildings constrained to land: %w", err)
+			return nil, fmt.Errorf("failed to paint civic: %w", err)
+		}
+		painted[geojson.LayerCivic] = civicPainted
+		dc.Capture("15_painted_civic", "Watercolor-painted civic layer", civicPainted, 15)
+	}
+
+	// Constrain parks to land+urban+civic combined (parks render on top of developed areas)
+	if parksImg := rawLayers[geojson.LayerParks]; parksImg != nil {
+		// Parks can appear on land OR on urban/civic areas
+		urbanImg := rawLayers[geojson.LayerUrban]
+		civicImg := rawLayers[geojson.LayerCivic]
+		urbanMask := mask.NewEmptyMask(landMask.Bounds())
+		civicMask := mask.NewEmptyMask(landMask.Bounds())
+		if urbanImg != nil {
+			urbanMask = mask.ExtractAlphaMask(urbanImg)
+		}
+		if civicImg != nil {
+			civicMask = mask.ExtractAlphaMask(civicImg)
+		}
+		landPlusUrbanCivic := mask.MaxMasks(landMask, urbanMask, civicMask)
+		parksMask := mask.MinMask(mask.ExtractAlphaMask(parksImg), landPlusUrbanCivic)
+		dc.Capture("16_parks_constrained", "Parks constrained to land+urban+civic", parksMask, 16)
+		parksPainted, err := watercolor.PaintLayerFromMask(parksMask, geojson.LayerParks, params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to paint parks: %w", err)
+		}
+		painted[geojson.LayerParks] = parksPainted
+		dc.Capture("17_painted_parks", "Watercolor-painted parks layer", parksPainted, 17)
+	}
+
+	// Buildings painted directly (they are subtracted from land, rendered on top)
+	if buildingsImg := rawLayers[geojson.LayerBuildings]; buildingsImg != nil {
+		buildingsPainted, err := watercolor.PaintLayer(buildingsImg, geojson.LayerBuildings, params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to paint buildings: %w", err)
 		}
 		painted[geojson.LayerBuildings] = buildingsPainted
 		dc.Capture("18_painted_buildings", "Watercolor-painted buildings layer", buildingsPainted, 18)
@@ -590,11 +659,13 @@ func (g *Generator) compositeAndWrite(
 	// Paper base: fill the entire tile with a white texture so road cutouts show through
 	base := texture.TileTexture(g.textures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY)
 
-	// Layer order matches OSM standard: land (back) → parks → rivers → water → roads → highways → buildings → urban (front)
+	// Layer order: land → urban → civic → parks → rivers → water → roads → railroads → highways → buildings
+	// Urban/civic are below parks so green spaces show on top of developed areas
+	// Buildings are on top so individual footprints show over everything at high zoom
 	composited, err := composite.CompositeLayersOverBase(
 		base,
 		painted,
-		[]geojson.LayerType{geojson.LayerLand, geojson.LayerParks, geojson.LayerRivers, geojson.LayerWater, geojson.LayerRoads, geojson.LayerHighways, geojson.LayerBuildings, geojson.LayerUrban},
+		[]geojson.LayerType{geojson.LayerLand, geojson.LayerUrban, geojson.LayerCivic, geojson.LayerParks, geojson.LayerRivers, geojson.LayerWater, geojson.LayerRoads, geojson.LayerRailroads, geojson.LayerHighways, geojson.LayerBuildings},
 		params.TileSize,
 	)
 	if err != nil {

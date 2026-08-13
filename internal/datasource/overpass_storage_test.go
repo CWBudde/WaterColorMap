@@ -3,8 +3,8 @@ package datasource
 import (
 	"testing"
 
-	"github.com/MeKo-Christian/go-overpass"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/go-overpass"
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // TestOverpassResultStorage verifies that raw Overpass response storage is opt-in

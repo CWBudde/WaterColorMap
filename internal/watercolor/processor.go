@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"image"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
-	"github.com/MeKo-Tech/watercolormap/internal/mask"
-	"github.com/MeKo-Tech/watercolormap/internal/texture"
+	"github.com/cwbudde/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/mask"
+	"github.com/cwbudde/watercolormap/internal/texture"
 )
 
 // ProcessorContext holds reusable buffers for watercolor processing.
@@ -176,6 +176,21 @@ func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]imag
 				EdgeSigma:         2.8,
 				EdgeGamma:         8.9,
 			},
+			geojson.LayerRailroads: {
+				Layer:             geojson.LayerRailroads,
+				Texture:           textures[geojson.LayerRailroads],
+				MaskThreshold:     ptr(100), // Balanced threshold for railroads
+				MaskBlurSigma:     0.9,      // Moderate blur for subtle softening
+				MaskNoiseStrength: 0.18,     // Moderate noise for organic edges
+				AdaptiveNoise:     true,     // Protect thin railroad lines from fragmentation
+				NoiseMinDist:      2.0,      // Minimal noise below 2px from edge
+				NoiseMaxDist:      10.0,     // Full noise above 10px from edge
+				ShadeSigma:        0,
+				ShadeStrength:     0,
+				EdgeStrength:      0.2,
+				EdgeSigma:         2.8,
+				EdgeGamma:         8.9,
+			},
 			geojson.LayerHighways: {
 				Layer:             geojson.LayerHighways,
 				Texture:           textures[geojson.LayerHighways],
@@ -201,10 +216,20 @@ func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]imag
 				EdgeSigma:     3.1,
 				EdgeGamma:     8.8,
 			},
+			geojson.LayerCivic: {
+				Layer:         geojson.LayerCivic,
+				Texture:       textures[geojson.LayerCivic],
+				MaskThreshold: ptr(155),
+				ShadeSigma:    0,
+				ShadeStrength: 0,
+				EdgeStrength:  0.2,
+				EdgeSigma:     3.15,
+				EdgeGamma:     8.7,
+			},
 			geojson.LayerBuildings: {
 				Layer:         geojson.LayerBuildings,
-				Texture:       textures[geojson.LayerUrban], // Use same texture as urban
-				MaskThreshold: ptr(150),                     // Higher threshold for layers after land
+				Texture:       textures[geojson.LayerBuildings],
+				MaskThreshold: ptr(150),
 				ShadeSigma:    0,
 				ShadeStrength: 0,
 				EdgeStrength:  0.2,

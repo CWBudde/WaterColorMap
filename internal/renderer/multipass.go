@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
-	"github.com/MeKo-Tech/watercolormap/internal/tile"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // MultiPassRenderer renders tiles in multiple passes, one per layer
@@ -102,9 +102,11 @@ func (r *MultiPassRenderer) RenderTile(coords tile.Coords, data *types.TileData)
 		geojson.LayerWater,     // Water bodies
 		geojson.LayerRivers,    // Rivers and streams (linear waterways)
 		geojson.LayerParks,     // Parks and green spaces
-		geojson.LayerUrban,     // Civic buildings and areas
-		geojson.LayerBuildings, // Buildings (darker lavender)
+		geojson.LayerUrban,     // Urban landuse areas (residential/commercial/industrial/retail)
+		geojson.LayerCivic,     // Civic areas (schools, hospitals, universities, libraries, town halls)
+		geojson.LayerBuildings, // Individual building footprints
 		geojson.LayerRoads,     // All roads (white mask; used for cutouts)
+		geojson.LayerRailroads, // Railway lines (rail, light_rail, subway, tram)
 		geojson.LayerHighways,  // Major roads/highways (yellow)
 	}
 

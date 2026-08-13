@@ -5,7 +5,7 @@ import (
 	"image/color"
 	"testing"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/geojson"
 )
 
 func solidTexture(w, h int, c color.NRGBA) image.Image {

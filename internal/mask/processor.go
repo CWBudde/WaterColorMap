@@ -103,6 +103,39 @@ func MaxMasks(masks ...*image.Gray) *image.Gray {
 	return out
 }
 
+// SubtractMask subtracts mask b from mask a (a AND NOT b).
+// Result is min(a, 255-b) at each pixel. Masks must have identical bounds.
+func SubtractMask(a, b *image.Gray) *image.Gray {
+	if a == nil {
+		return nil
+	}
+	if b == nil {
+		// Nothing to subtract, return copy of a
+		out := image.NewGray(a.Bounds())
+		copy(out.Pix, a.Pix)
+		return out
+	}
+	if a.Bounds() != b.Bounds() {
+		return nil
+	}
+
+	bounds := a.Bounds()
+	out := image.NewGray(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			av := int(a.GrayAt(x, y).Y)
+			bv := int(b.GrayAt(x, y).Y)
+			// Subtract: where b is opaque, result is transparent
+			result := av - bv
+			if result < 0 {
+				result = 0
+			}
+			out.SetGray(x, y, color.Gray{Y: uint8(result)})
+		}
+	}
+	return out
+}
+
 // MinMask computes a pixel-wise min of two masks (intersection/and for alpha masks).
 // Masks must have identical bounds.
 func MinMask(a, b *image.Gray) *image.Gray {

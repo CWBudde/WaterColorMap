@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Map background-color="#00000000" srs="+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs +over">
+
+  <!-- Railroads Layer Style -->
+  <!-- Renders railway lines in pure white (#FFFFFF) for mask extraction -->
+  <!-- z9-15: Main rail only, z16: +light_rail, z17+: +subway/tram -->
+
+  <Style name="railroads">
+    <!-- z9: Main rail lines only -->
+    <Rule>
+      <Filter>[railway] = 'rail'</Filter>
+      <MaxScaleDenominator>2000000</MaxScaleDenominator>
+      <MinScaleDenominator>1000000</MinScaleDenominator>
+      <LineSymbolizer stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="butt" stroke-linejoin="miter" />
+    </Rule>
+
+    <!-- z10-11: Main rail lines only -->
+    <Rule>
+      <Filter>[railway] = 'rail'</Filter>
+      <MaxScaleDenominator>1000000</MaxScaleDenominator>
+      <MinScaleDenominator>150000</MinScaleDenominator>
+      <LineSymbolizer stroke="#FFFFFF" stroke-width="2.0" stroke-linecap="butt" stroke-linejoin="miter" />
+    </Rule>
+
+    <!-- z12-13: Main rail lines -->
+    <Rule>
+      <Filter>[railway] = 'rail'</Filter>
+      <MaxScaleDenominator>150000</MaxScaleDenominator>
+      <MinScaleDenominator>50000</MinScaleDenominator>
+      <LineSymbolizer stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="butt" stroke-linejoin="miter" />
+    </Rule>
+
+    <!-- z14-15: Main rail lines -->
+    <Rule>
+      <Filter>[railway] = 'rail'</Filter>
+      <MaxScaleDenominator>50000</MaxScaleDenominator>
+      <MinScaleDenominator>10000</MinScaleDenominator>
+      <LineSymbolizer stroke="#FFFFFF" stroke-width="3.0" stroke-linecap="butt" stroke-linejoin="miter" />
+    </Rule>
+
+    <!-- z16: Main rail + light rail -->
+    <Rule>
+      <Filter>[railway] = 'rail'</Filter>
+      <MaxScaleDenominator>10000</MaxScaleDenominator>
+      <MinScaleDenominator>5000</MinScaleDenominator>
+      <LineSymbolizer stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="butt" stroke-linejoin="miter" />
+    </Rule>
+    <Rule>
+      <Filter>[railway] = 'light_rail'</Filter>
+      <MaxScaleDenominator>10000</MaxScaleDenominator>
+      <MinScaleDenominator>5000</MinScaleDenominator>
+      <LineSymbolizer stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="butt" stroke-linejoin="miter" />
+    </Rule>
+
+    <!-- z17+: All railway types -->
+    <Rule>
+      <Filter>[railway] = 'rail'</Filter>
+      <MaxScaleDenominator>5000</MaxScaleDenominator>
+      <LineSymbolizer stroke="#FFFFFF" stroke-width="4.0" stroke-linecap="butt" stroke-linejoin="miter" />
+    </Rule>
+    <Rule>
+      <Filter>[railway] = 'light_rail'</Filter>
+      <MaxScaleDenominator>5000</MaxScaleDenominator>
+      <LineSymbolizer stroke="#FFFFFF" stroke-width="3.0" stroke-linecap="butt" stroke-linejoin="miter" />
+    </Rule>
+    <Rule>
+      <Filter>[railway] = 'subway' or [railway] = 'tram'</Filter>
+      <MaxScaleDenominator>5000</MaxScaleDenominator>
+      <LineSymbolizer stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="butt" stroke-linejoin="miter" />
+    </Rule>
+  </Style>
+
+  <!-- Data Layer -->
+  <Layer name="railroads" srs="+proj=longlat +datum=WGS84 +no_defs">
+    <StyleName>railroads</StyleName>
+    <Datasource>
+      <Parameter name="type">ogr</Parameter>
+      <Parameter name="file">DATASOURCE_PLACEHOLDER</Parameter>
+      <Parameter name="layer">LAYER_PLACEHOLDER</Parameter>
+    </Datasource>
+  </Layer>
+
+</Map>
