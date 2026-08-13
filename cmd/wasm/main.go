@@ -328,10 +328,7 @@ func watercolorRenderTileFromOverpassJSON(this js.Value, args []js.Value) interf
 	composited, err := composite.CompositeLayersOverBase(
 		base,
 		painted,
-		[]geojson.LayerType{
-			geojson.LayerWater, geojson.LayerLand, geojson.LayerParks, geojson.LayerCivic,
-			geojson.LayerRoads, geojson.LayerRailroads, geojson.LayerHighways,
-		},
+		composite.DefaultOrder,
 		params.TileSize,
 	)
 	if err != nil {

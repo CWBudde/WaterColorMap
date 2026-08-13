@@ -743,13 +743,10 @@ func (g *Generator) compositeAndWrite(
 	// Paper base: fill the entire tile with a white texture so road cutouts show through
 	base := texture.TileTexture(g.textures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY)
 
-	// Layer order: land → urban → civic → parks → rivers → water → roads → railroads → highways → buildings
-	// Urban/civic are below parks so green spaces show on top of developed areas
-	// Buildings are on top so individual footprints show over everything at high zoom
 	composited, err := composite.CompositeLayersOverBase(
 		base,
 		painted,
-		[]geojson.LayerType{geojson.LayerLand, geojson.LayerUrban, geojson.LayerCivic, geojson.LayerParks, geojson.LayerRivers, geojson.LayerWater, geojson.LayerRoads, geojson.LayerRailroads, geojson.LayerHighways, geojson.LayerBuildings},
+		composite.DefaultOrder,
 		params.TileSize,
 	)
 	if err != nil {
