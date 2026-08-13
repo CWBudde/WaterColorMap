@@ -9,9 +9,9 @@ import "math"
 // EarthRadius is the sphere radius used by EPSG:3857, in metres.
 const EarthRadius = 6378137.0
 
-// MaxLatMercator is the highest latitude representable in Web Mercator. Beyond
-// it the projection diverges (lat=90 maps to +Inf), so the tile scheme cuts the
-// world off at this parallel, which makes the projected world square.
+// MaxLatMercator is the highest latitude representable in Web Mercator. Towards
+// the poles the projection diverges, so the tile scheme cuts the world off at
+// this parallel, which makes the projected world square.
 const MaxLatMercator = 85.05112878
 
 // ClampLat limits a latitude to the Web Mercator valid range.
@@ -30,8 +30,11 @@ func ClampLat(lat float64) float64 {
 // valid latitude band. Callers working in metres multiply by EarthRadius;
 // callers working in global pixel space divide by pi.
 //
-// The latitude is not clamped, so lat=+-90 yields +-Inf; use ClampLat first if
-// the input can reach the poles.
+// The latitude is not clamped, and the result outside the valid band is neither
+// bounded nor symmetric: lat=90 returns a large finite value (about 37.33,
+// because math.Tan(math.Pi/4+math.Pi/4) is finite rather than infinite),
+// lat=-90 returns -Inf, and |lat|>90 returns NaN. Use ClampLat first if the
+// input can reach or exceed the poles.
 func MercatorY(lat float64) float64 {
 	latRad := lat * math.Pi / 180.0
 	return math.Log(math.Tan(math.Pi/4.0 + latRad/2.0))
