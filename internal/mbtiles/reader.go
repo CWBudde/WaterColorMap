@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -28,12 +29,10 @@ func OpenReader(path string) (*Reader, error) {
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tiles'").Scan(&count)
 	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to verify schema: %w", err)
+		return nil, errors.Join(fmt.Errorf("failed to verify schema: %w", err), db.Close())
 	}
 	if count == 0 {
-		db.Close()
-		return nil, fmt.Errorf("database does not contain tiles table")
+		return nil, errors.Join(errors.New("database does not contain tiles table"), db.Close())
 	}
 
 	return &Reader{
@@ -72,28 +71,48 @@ func (r *Reader) ReadTile(z, x, y int) ([]byte, error) {
 
 // Metadata reads metadata from the database.
 func (r *Reader) Metadata() (Metadata, error) {
+	metaMap, err := r.readMetadataMap()
+	if err != nil {
+		return Metadata{}, err
+	}
+
+	return metadataFromMap(metaMap), nil
+}
+
+// readMetadataMap reads all name/value pairs from the metadata table.
+func (r *Reader) readMetadataMap() (metaMap map[string]string, err error) {
 	rows, err := r.db.Query("SELECT name, value FROM metadata")
 	if err != nil {
-		return Metadata{}, fmt.Errorf("failed to query metadata: %w", err)
+		return nil, fmt.Errorf("failed to query metadata: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			metaMap, err = nil, fmt.Errorf("failed to close metadata rows: %w", closeErr)
+		}
+	}()
 
-	meta := Metadata{}
-	metaMap := make(map[string]string)
+	metaMap = make(map[string]string)
 
 	for rows.Next() {
 		var name, value string
 		if err := rows.Scan(&name, &value); err != nil {
-			return Metadata{}, fmt.Errorf("failed to scan metadata row: %w", err)
+			return nil, fmt.Errorf("failed to scan metadata row: %w", err)
 		}
 		metaMap[name] = value
 	}
 
 	if err := rows.Err(); err != nil {
-		return Metadata{}, fmt.Errorf("error iterating metadata: %w", err)
+		return nil, fmt.Errorf("error iterating metadata: %w", err)
 	}
 
-	// Parse metadata fields
+	return metaMap, nil
+}
+
+// metadataFromMap converts raw metadata name/value pairs into a Metadata struct.
+// Malformed numeric values are ignored, leaving the corresponding field at its zero value.
+func metadataFromMap(metaMap map[string]string) Metadata {
+	meta := Metadata{}
+
 	meta.Name = metaMap["name"]
 	meta.Format = metaMap["format"]
 	meta.Attribution = metaMap["attribution"]
@@ -113,30 +132,32 @@ func (r *Reader) Metadata() (Metadata, error) {
 	}
 
 	// Parse bounds: "minLon,minLat,maxLon,maxLat"
-	if v, ok := metaMap["bounds"]; ok {
-		parts := strings.Split(v, ",")
-		if len(parts) == 4 {
-			for i, part := range parts {
-				if f, err := strconv.ParseFloat(strings.TrimSpace(part), 64); err == nil {
-					meta.Bounds[i] = f
-				}
-			}
-		}
-	}
+	parseFloatList(metaMap["bounds"], meta.Bounds[:])
 
 	// Parse center: "lon,lat,zoom"
-	if v, ok := metaMap["center"]; ok {
-		parts := strings.Split(v, ",")
-		if len(parts) == 3 {
-			for i, part := range parts {
-				if f, err := strconv.ParseFloat(strings.TrimSpace(part), 64); err == nil {
-					meta.Center[i] = f
-				}
-			}
-		}
+	parseFloatList(metaMap["center"], meta.Center[:])
+
+	return meta
+}
+
+// parseFloatList parses a comma-separated list of floats into dst.
+// It is a no-op unless the list has exactly len(dst) elements; individual
+// values that fail to parse leave their destination element untouched.
+func parseFloatList(value string, dst []float64) {
+	if value == "" {
+		return
 	}
 
-	return meta, nil
+	parts := strings.Split(value, ",")
+	if len(parts) != len(dst) {
+		return
+	}
+
+	for i, part := range parts {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(part), 64); err == nil {
+			dst[i] = f
+		}
+	}
 }
 
 // Close closes the database connection.
@@ -148,14 +169,18 @@ func (r *Reader) Close() error {
 }
 
 // gzipDecompress decompresses gzip data.
-func gzipDecompress(data []byte) ([]byte, error) {
+func gzipDecompress(data []byte) (uncompressed []byte, err error) {
 	gr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
-	defer gr.Close()
+	defer func() {
+		if closeErr := gr.Close(); closeErr != nil && err == nil {
+			uncompressed, err = nil, closeErr
+		}
+	}()
 
-	uncompressed, err := io.ReadAll(gr)
+	uncompressed, err = io.ReadAll(gr)
 	if err != nil {
 		return nil, err
 	}
