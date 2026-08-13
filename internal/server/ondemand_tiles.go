@@ -686,11 +686,16 @@ func (t *OnDemandTiles) runRetryJob(job retryJob) bool {
 	tileKey := job.coords.String() + job.suffix
 	t.activeRenders.Add(1)
 	t.currentRenders.Store(tileKey, time.Now())
+	// Deferred, not unwound by hand: a panic inside GenerateWithData is
+	// recovered further up the stack, so a manual decrement here would be
+	// skipped and permanently inflate active_renders while leaving a phantom
+	// entry in current_tiles.
+	defer func() {
+		t.activeRenders.Add(-1)
+		t.currentRenders.Delete(tileKey)
+	}()
 
 	_, _, err = gen.GenerateWithData(ctx, job.coords, false, job.suffix, nil, tileData)
-
-	t.activeRenders.Add(-1)
-	t.currentRenders.Delete(tileKey)
 
 	if err != nil {
 		t.totalFailed.Add(1)

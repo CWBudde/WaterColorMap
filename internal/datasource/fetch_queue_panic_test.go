@@ -54,3 +54,29 @@ func TestFetchQueueSurvivesPanickingFetch(t *testing.T) {
 		t.Fatalf("TotalFailed = %d, want 2 (worker stopped consuming jobs)", got)
 	}
 }
+
+// Delivering a result on a closed channel panics even inside a select with a
+// default case, so the send needs its own recovery: without it the panic
+// escapes the per-job boundary and kills the worker goroutine.
+func TestFetchQueueSurvivesClosedResultChan(t *testing.T) {
+	fq := NewFetchQueue(nil, FetchQueueConfig{
+		Workers: 1,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	fq.Start()
+	t.Cleanup(fq.Stop)
+
+	coord := types.TileCoordinate{Zoom: 13, X: 4317, Y: 2692}
+	bounds := types.TileToBounds(coord)
+
+	closed := make(chan FetchResult, 1)
+	close(closed)
+	fq.jobs <- FetchJob{Coordinate: coord, Bounds: bounds, ResultChan: closed}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := fq.SubmitAndWait(ctx, coord, bounds); err != nil {
+		t.Fatalf("worker did not survive delivery on a closed channel: %v", err)
+	}
+}

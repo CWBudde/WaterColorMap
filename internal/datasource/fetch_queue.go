@@ -208,12 +208,27 @@ func (fq *FetchQueue) runJob(log *slog.Logger, job FetchJob) {
 		result = FetchResult{Error: fmt.Errorf("fetch panicked: %w", err)}
 	}
 
-	if job.ResultChan != nil {
+	fq.deliverResult(log, job, result)
+}
+
+// deliverResult hands the result to the submitter. The send itself runs under
+// its own recovery: a select cannot guard against a closed ResultChan — sending
+// on one panics regardless of the default case — and that panic would otherwise
+// escape runJob's recovery boundary and kill the worker goroutine.
+func (fq *FetchQueue) deliverResult(log *slog.Logger, job FetchJob, result FetchResult) {
+	if job.ResultChan == nil {
+		return
+	}
+
+	err := safe.Do(log, "fetch result delivery", func() {
 		select {
 		case job.ResultChan <- result:
 		default:
-			log.Warn("result channel full or closed", "tile", formatTileCoord(job.Coordinate))
+			log.Warn("result channel full", "tile", formatTileCoord(job.Coordinate))
 		}
+	})
+	if err != nil {
+		log.Warn("result channel closed", "tile", formatTileCoord(job.Coordinate))
 	}
 }
 
