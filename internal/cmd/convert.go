@@ -110,8 +110,8 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	metadata := mbtiles.Metadata{
 		Name:        name,
 		Format:      "png",
-		MinZoom:     minZoom,
-		MaxZoom:     maxZoom,
+		MinZoom:     mbtiles.Zoom(minZoom),
+		MaxZoom:     mbtiles.Zoom(maxZoom),
 		Bounds:      bounds,
 		Center:      center,
 		Attribution: attribution,
