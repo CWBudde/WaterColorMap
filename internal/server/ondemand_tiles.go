@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,11 @@ type OnDemandTilesConfig struct {
 	FetchWorkers int
 	// DataSizeWarningMB logs a warning when tile data exceeds this size (default: 10)
 	DataSizeWarningMB int64
+	// MaxPendingGenerations caps how many requests may be in the generation
+	// path at once (rendering, fetching, or waiting for either). Beyond this
+	// the server sheds load with 503 rather than queueing goroutines without
+	// bound. Default: max(32, MaxConcurrentGenerations*8).
+	MaxPendingGenerations int
 }
 
 type OnDemandTiles struct {
@@ -52,12 +58,25 @@ type OnDemandTiles struct {
 	retryCtx    context.Context
 	retryCancel context.CancelFunc
 
+	// Shutdown coordination. stopCh is closed by BeginShutdown to release
+	// long-lived handlers (SSE); wg tracks background workers so Stop can
+	// wait for them instead of killing them mid-render.
+	wg        sync.WaitGroup
+	stopOnce  sync.Once
+	beginOnce sync.Once
+	stopCh    chan struct{}
+
 	// Status tracking for renders
 	activeRenders  atomic.Int32
 	totalRendered  atomic.Int64
 	totalFailed    atomic.Int64
 	currentRenders sync.Map // map[string]time.Time - tile coord string -> start time
 	pendingRetries atomic.Int32
+
+	// Admission control - counts every request past the admission gate,
+	// including those blocked on the per-tile lock and in the fetch phase.
+	inFlightGenerations atomic.Int32
+	rejectedBusy        atomic.Int64
 
 	// Queue tracking - tiles waiting for semaphore
 	queuedRenders atomic.Int32
@@ -97,6 +116,12 @@ type RenderStatus struct {
 	MaxConcurrent int      `json:"max_concurrent"`
 	QueuedRenders int      `json:"queued_renders"`
 	QueuedTiles   []string `json:"queued_tiles"`
+	// PendingGenerations counts requests admitted to the generation path,
+	// including those blocked on a per-tile lock or in the fetch phase.
+	PendingGenerations int `json:"pending_generations"`
+	MaxPending         int `json:"max_pending"`
+	// RejectedBusy counts requests shed because the backlog was full.
+	RejectedBusy int64 `json:"rejected_busy"`
 }
 
 // RetryStatus contains retry queue status.
@@ -140,6 +165,11 @@ func NewOnDemandTiles(ds pipeline.DataSource, cfg OnDemandTilesConfig, logger *s
 	if cfg.DataSizeWarningMB <= 0 {
 		cfg.DataSizeWarningMB = 10
 	}
+	if cfg.MaxPendingGenerations <= 0 {
+		// Deep enough that a normal viewport load is never shed, shallow
+		// enough that the queue drains faster than a browser gives up.
+		cfg.MaxPendingGenerations = max(32, cfg.MaxConcurrentGenerations*8)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -165,21 +195,85 @@ func NewOnDemandTiles(ds pipeline.DataSource, cfg OnDemandTilesConfig, logger *s
 		retryQueue:  make(chan retryJob, 1000),
 		retryCtx:    ctx,
 		retryCancel: cancel,
+		stopCh:      make(chan struct{}),
 	}
 
 	// Start retry worker. safe.Go is a backstop for the loop itself; each
-	// individual job is additionally recovered inside retryWorker.
-	safe.Go(t.log(), "retry worker", t.retryWorker)
+	// individual job is additionally recovered inside retryWorker. The
+	// WaitGroup lets Stop wait for it rather than killing it mid-render.
+	t.wg.Add(1)
+	safe.Go(t.log(), "retry worker", func() {
+		defer t.wg.Done()
+		t.retryWorker()
+	})
 
 	return t, nil
 }
 
-// Stop gracefully shuts down the server.
+// stopWaitTimeout bounds how long Stop waits for background workers.
+//
+// Mapnik rendering happens in cgo and may not observe context cancellation, so
+// an unbounded wait could turn a graceful shutdown into a multi-minute hang.
+const stopWaitTimeout = 10 * time.Second
+
+// sseWriteTimeout bounds a single status-stream write. The stream itself is
+// unbounded in duration; only an individual stalled write is capped.
+const sseWriteTimeout = 10 * time.Second
+
+// tileWriteGrace is added to GenerationTimeout when extending the socket write
+// deadline for a tile that has to be generated, covering the PNG write itself.
+const tileWriteGrace = 30 * time.Second
+
+// busyRetryAfterSeconds is the Retry-After hint returned when the render
+// backlog is full.
+const busyRetryAfterSeconds = 5
+
+// BeginShutdown releases long-lived handlers so they stop holding connections
+// open. It does not stop background work; call Stop for that.
+//
+// http.Server.Shutdown waits for active connections, and the SSE status stream
+// only ends when its request context is cancelled -- which Shutdown does not
+// do. Without this, shutting down with a demo tab open always burned the full
+// shutdown timeout. Wire it up via srv.RegisterOnShutdown.
+func (t *OnDemandTiles) BeginShutdown() {
+	t.beginOnce.Do(func() {
+		if t.stopCh != nil {
+			close(t.stopCh)
+		}
+	})
+}
+
+// Stop gracefully shuts down the server. It is idempotent.
+//
+// Order matters: cancel first, then wait, then stop the fetch queue. Stopping
+// the fetch queue before the retry worker has exited would let the worker call
+// SubmitAndWait on an already-stopped queue.
+//
+// Waiting at all is what keeps a half-written PNG off disk: the retry worker
+// can be inside GenerateWithData writing a tile, and a truncated file would be
+// served from the cache as a corrupt image indefinitely.
 func (t *OnDemandTiles) Stop() {
-	t.retryCancel()
-	if t.fetchQueue != nil {
-		t.fetchQueue.Stop()
-	}
+	t.stopOnce.Do(func() {
+		t.BeginShutdown()
+		t.retryCancel()
+
+		done := make(chan struct{})
+		go func() {
+			t.wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(stopWaitTimeout):
+			t.log().Warn("timed out waiting for background workers to stop",
+				"timeout", stopWaitTimeout)
+		}
+
+		if t.fetchQueue != nil {
+			t.fetchQueue.Stop()
+		}
+	})
 }
 
 // Status returns the current status of the tile generation system.
@@ -205,6 +299,11 @@ func (t *OnDemandTiles) Status() TileStatus {
 			MaxConcurrent: t.cfg.MaxConcurrentGenerations,
 			QueuedRenders: int(t.queuedRenders.Load()),
 			QueuedTiles:   queuedTiles,
+			// Surfaced so the demo can show backpressure rather than tiles
+			// silently failing.
+			PendingGenerations: int(t.inFlightGenerations.Load()),
+			MaxPending:         t.cfg.MaxPendingGenerations,
+			RejectedBusy:       t.rejectedBusy.Load(),
 		},
 		Retry: RetryStatus{
 			PendingRetries: int(t.pendingRetries.Load()),
@@ -253,32 +352,64 @@ func (t *OnDemandTiles) StatusStreamHandler() http.Handler {
 			return
 		}
 
+		// The server-wide WriteTimeout would kill this long-lived response,
+		// so the deadline is re-armed per event instead of cleared outright:
+		// the stream may live indefinitely, but a single stalled write is
+		// still bounded.
+		rc := http.NewResponseController(w)
+
 		// Send status updates every 250ms
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
 
 		// Send initial status immediately
-		t.sendStatusEvent(w, flusher)
+		if err := t.sendStatusEvent(w, flusher, rc); err != nil {
+			return
+		}
 
 		for {
 			select {
 			case <-r.Context().Done():
 				return
+			case <-t.stopCh:
+				// Released on shutdown; otherwise http.Server.Shutdown would
+				// wait on this connection for the whole drain timeout.
+				return
 			case <-ticker.C:
-				t.sendStatusEvent(w, flusher)
+				if err := t.sendStatusEvent(w, flusher, rc); err != nil {
+					t.log().Debug("status stream ended", "error", err)
+					return
+				}
 			}
 		}
 	})
 }
 
-func (t *OnDemandTiles) sendStatusEvent(w http.ResponseWriter, flusher http.Flusher) {
+// sendStatusEvent writes one SSE event, returning an error when the client is
+// gone or the write stalls.
+//
+// The error must be propagated: once a write deadline is in play, an expired
+// deadline makes every subsequent write fail instantly, and the 250ms loop
+// would otherwise spin forever writing to a dead connection.
+func (t *OnDemandTiles) sendStatusEvent(w http.ResponseWriter, flusher http.Flusher, rc *http.ResponseController) error {
 	status := t.Status()
 	data, err := json.Marshal(status)
 	if err != nil {
-		return
+		return err
 	}
-	fmt.Fprintf(w, "data: %s\n\n", data)
+
+	// Not supported over HTTP/2 or behind a ResponseWriter wrapper without
+	// Unwrap; the stream still works, just without a per-write bound.
+	if err := rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return err
+	}
 	flusher.Flush()
+	return nil
 }
 
 func (t *OnDemandTiles) Handler() http.Handler {
@@ -316,6 +447,21 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 		writeTileError(w, "tile not found", http.StatusNotFound)
 		return
 	}
+
+	// Admit before taking the per-tile lock. That lock is acquired before the
+	// semaphore and held across the whole fetch+render, so requests blocked on
+	// it are the largest pool of stuck goroutines -- and they are invisible to
+	// queuedRenders, which is only incremented once the lock is already held.
+	if !t.admit() {
+		t.writeBusy(w)
+		return
+	}
+	defer t.release()
+
+	// Generation legitimately outlives the server-wide WriteTimeout, so the
+	// socket deadline is extended for this request only. The cache-hit path
+	// above deliberately keeps the shorter default.
+	t.extendWriteDeadline(w)
 
 	unlock := t.lockTile(filename)
 	defer unlock()
@@ -440,6 +586,43 @@ func (t *OnDemandTiles) serveTileFile(w http.ResponseWriter, r *http.Request, fu
 //
 // Messages here are deliberately generic: the detail (Overpass endpoint names,
 // filesystem paths, Mapnik XML errors) goes to the log, not to the client.
+// admit reserves a generation slot, reporting false when the backlog is full.
+//
+// Add-then-check is exact without a CAS loop: concurrent callers each observe a
+// distinct value, so the limit is never exceeded.
+func (t *OnDemandTiles) admit() bool {
+	if n := t.inFlightGenerations.Add(1); n > int32(t.cfg.MaxPendingGenerations) {
+		t.inFlightGenerations.Add(-1)
+		t.rejectedBusy.Add(1)
+		return false
+	}
+	return true
+}
+
+// release returns a generation slot reserved by admit.
+func (t *OnDemandTiles) release() {
+	t.inFlightGenerations.Add(-1)
+}
+
+// writeBusy rejects a request because the render backlog is full. Shedding
+// here is the only real backpressure: per-IP rate limiting cannot protect the
+// pipeline, because one legitimate browser is allowed to outpace it.
+func (t *OnDemandTiles) writeBusy(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa(busyRetryAfterSeconds))
+	writeTileError(w, "tile render queue full", http.StatusServiceUnavailable)
+}
+
+// extendWriteDeadline lengthens the socket write deadline to cover a full
+// generation. Failure is not fatal: the deadline is simply unsupported (HTTP/2,
+// or a ResponseWriter wrapper without Unwrap), which only costs the bound.
+func (t *OnDemandTiles) extendWriteDeadline(w http.ResponseWriter) {
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Now().Add(t.cfg.GenerationTimeout + tileWriteGrace)); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		t.log().Warn("could not extend write deadline", "error", err)
+	}
+}
+
 func writeTileError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, msg, code)
