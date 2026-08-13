@@ -25,6 +25,16 @@ jobs:
         run: |
           just setup-deps
 
+      - name: Install treefmt
+        env:
+          TREEFMT_VERSION: 2.5.0
+        run: |
+          curl -fsSL -o /tmp/treefmt.tar.gz \
+            "https://github.com/numtide/treefmt/releases/download/v${TREEFMT_VERSION}/treefmt_${TREEFMT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/treefmt.tar.gz -C /tmp treefmt
+          sudo install -m 0755 /tmp/treefmt /usr/local/bin/treefmt
+          treefmt --version
+
       - name: Run treefmt
         run: |
           just check-formatted

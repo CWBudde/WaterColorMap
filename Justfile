@@ -5,18 +5,28 @@
 default:
     @just --list
 
+# Mapnik font/plugin paths. go-mapnik hardcodes /usr/local/lib/mapnik/{fonts,input}
+# and expects them to be overridden at link time; on a distro install they live
+# elsewhere, so without this every run logs "MAPNIK: open ... no such file" and
+# renders with no fonts and no input plugins registered.
+mapnik_ldflags := "-X github.com/omniscale/go-mapnik/v2.fontPath=" + shell("mapnik-config --fonts 2>/dev/null || echo /usr/local/lib/mapnik/fonts") + " -X github.com/omniscale/go-mapnik/v2.pluginPath=" + shell("mapnik-config --input-plugins 2>/dev/null || echo /usr/local/lib/mapnik/input")
+
 # Install dependencies
 deps:
     go mod download
     go mod tidy
 
+# Install the formatters treefmt.toml drives that are Go-installable
+deps-fmt:
+    go install github.com/daixiang0/gci@latest
+
 # Build the application
 build:
-    CGO_ENABLED=1 go build -o bin/watercolormap ./cmd/watercolormap
+    CGO_ENABLED=1 go build -ldflags "{{mapnik_ldflags}}" -o bin/watercolormap ./cmd/watercolormap
 
 # Build with version information
 build-release version:
-    CGO_ENABLED=1 go build -ldflags "-X github.com/cwbudde/watercolormap/internal/cmd.version={{version}} -X github.com/cwbudde/watercolormap/internal/cmd.commit=$(git rev-parse HEAD) -X github.com/cwbudde/watercolormap/internal/cmd.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/watercolormap ./cmd/watercolormap
+    CGO_ENABLED=1 go build -ldflags "{{mapnik_ldflags}} -X github.com/cwbudde/watercolormap/internal/cmd.version={{version}} -X github.com/cwbudde/watercolormap/internal/cmd.commit=$(git rev-parse HEAD) -X github.com/cwbudde/watercolormap/internal/cmd.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/watercolormap ./cmd/watercolormap
 
 # Run the application
 run *args:
@@ -41,7 +51,7 @@ build-wasm-local: build-wasm
 
 # Run tests
 test:
-    go test ./... -v
+    go test -ldflags "{{mapnik_ldflags}}" ./... -v
 
 # Run unit tests (alias for CI)
 test-unit:
@@ -49,7 +59,7 @@ test-unit:
 
 # Run tests with coverage
 test-coverage:
-    go test ./... -coverprofile=coverage.out
+    go test -ldflags "{{mapnik_ldflags}}" ./... -coverprofile=coverage.out
     go tool cover -html=coverage.out -o coverage.html
 
 # Format code
@@ -74,6 +84,7 @@ check-formatted:
 # Setup dependencies (alias for CI)
 setup-deps:
     just deps
+    just deps-fmt
 
 # Check if go mod tidy is needed
 check-tidy:
@@ -194,11 +205,11 @@ generate-test-tile:
 
 # Run integration tests (requires Mapnik installed and Overpass reachable)
 test-integration:
-    WATERCOLORMAP_INTEGRATION=1 go test ./... -v
+    WATERCOLORMAP_INTEGRATION=1 go test -ldflags "{{mapnik_ldflags}}" ./... -v
 
 # Update golden stage images (synthetic, deterministic)
 update-goldens:
-    UPDATE_GOLDEN=1 go test ./... -run TestWatercolorStagesGolden
+    UPDATE_GOLDEN=1 go test -ldflags "{{mapnik_ldflags}}" ./... -run 'TestWatercolorStagesGolden|TestPipelineStages/Synthetic'
 
 # Update Hannover real-tile golden stage images (requires Mapnik + Overpass)
 update-goldens-hannover:
