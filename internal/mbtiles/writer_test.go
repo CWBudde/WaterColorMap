@@ -181,6 +181,98 @@ func TestWriter_MetadataUniqueName(t *testing.T) {
 	}
 }
 
+// TestWriter_GzipsPBFTiles is the counterpart of TestWriter_StoresRawPNG: the
+// MBTiles 1.3 spec requires vector (pbf) tile_data to carry a gzip envelope, so
+// only raster formats may skip compression.
+func TestWriter_GzipsPBFTiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "vector.mbtiles")
+
+	w, err := New(dbPath, Metadata{Name: "Test", Format: FormatPBF})
+	if err != nil {
+		t.Fatalf("Failed to create writer: %v", err)
+	}
+	defer w.Close()
+
+	payload := []byte("fake vector tile payload")
+	if err := w.WriteTile(13, 4317, 2692, payload); err != nil {
+		t.Fatalf("Failed to write tile: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	var stored []byte
+	tmsY := (1 << 13) - 1 - 2692
+	err = w.db.QueryRow("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+		13, 4317, tmsY).Scan(&stored)
+	if err != nil {
+		t.Fatalf("Failed to read tile: %v", err)
+	}
+
+	if len(stored) < 2 || stored[0] != 0x1f || stored[1] != 0x8b {
+		t.Fatalf("Stored pbf blob is not gzipped: got % x", stored[:min(8, len(stored))])
+	}
+
+	roundTripped, err := maybeGunzip(stored)
+	if err != nil {
+		t.Fatalf("Failed to gunzip stored blob: %v", err)
+	}
+	if !bytes.Equal(roundTripped, payload) {
+		t.Error("Gunzipped blob differs from the written payload")
+	}
+}
+
+// TestWriter_LegacyMetadataGetsUniqueIndex covers reopening a database written
+// by an older release: CREATE TABLE IF NOT EXISTS leaves its unconstrained
+// metadata table alone, so the unique index has to supply the constraint.
+func TestWriter_LegacyMetadataGetsUniqueIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "legacy.mbtiles")
+
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open legacy database: %v", err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE metadata (name TEXT, value TEXT);
+		CREATE TABLE tiles (
+			zoom_level INTEGER,
+			tile_column INTEGER,
+			tile_row INTEGER,
+			tile_data BLOB
+		);
+		INSERT INTO metadata (name, value) VALUES ('name', 'old'), ('name', 'duplicate');
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create legacy schema: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("Failed to close legacy database: %v", err)
+	}
+
+	w, err := New(dbPath, Metadata{Name: "Test", Format: "png"})
+	if err != nil {
+		t.Fatalf("Failed to reopen legacy database: %v", err)
+	}
+	defer w.Close()
+
+	// The duplicate legacy rows are gone (insertMetadata clears the table)...
+	var count int
+	if err := w.db.QueryRow("SELECT COUNT(*) FROM metadata WHERE name='name'").Scan(&count); err != nil {
+		t.Fatalf("Failed to count metadata rows: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Expected exactly one 'name' row, got %d", count)
+	}
+
+	// ...and new duplicates are rejected even though the table predates the
+	// PRIMARY KEY.
+	if _, err := w.db.Exec("INSERT INTO metadata (name, value) VALUES ('name', 'duplicate')"); err == nil {
+		t.Error("Expected duplicate metadata name to be rejected on a legacy table, got nil error")
+	}
+}
+
 // TestMetadata_ToMapZeroZoom pins down that zoom level 0 survives the round
 // trip instead of being dropped as an unset value.
 func TestMetadata_ToMapZeroZoom(t *testing.T) {

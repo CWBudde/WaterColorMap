@@ -1,9 +1,12 @@
 package mbtiles
 
 import (
+	"bytes"
+	"compress/gzip"
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	_ "modernc.org/sqlite" // SQLite driver
@@ -12,11 +15,16 @@ import (
 const (
 	// DefaultBatchSize is the number of tiles to buffer before flushing to the database.
 	DefaultBatchSize = 100
+
+	// FormatPBF is the metadata format value for Mapbox vector tiles. The
+	// MBTiles 1.3 spec requires pbf tile_data to be gzip-compressed, while
+	// raster formats (png, jpg, webp) are stored verbatim.
+	FormatPBF = "pbf"
 )
 
 // TileEntry represents a single tile to be written.
 type TileEntry struct {
-	Data []byte // Raw PNG data, stored verbatim (raster tiles are never gzipped)
+	Data []byte // Encoded tile payload as handed to WriteTile, before any gzip envelope
 	Z    int
 	X    int
 	Y    int
@@ -29,6 +37,9 @@ type Writer struct {
 	batch     []TileEntry
 	metadata  Metadata
 	batchSize int
+	// gzipTiles is true for pbf tilesets, whose payloads the spec requires to
+	// be gzipped. Raster tilesets store their bytes unchanged.
+	gzipTiles bool
 	mu        sync.Mutex
 }
 
@@ -63,12 +74,20 @@ func New(path string, metadata Metadata) (*Writer, error) {
 		return nil, errors.Join(fmt.Errorf("failed to insert metadata: %w", err), db.Close())
 	}
 
+	// Retrofit the uniqueness constraint onto legacy databases. This has to run
+	// after insertMetadata, which empties the table and therefore removes any
+	// duplicate legacy rows that would make the index fail.
+	if err := ensureMetadataNameUnique(db); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+
 	return &Writer{
 		db:        db,
 		path:      path,
 		batch:     make([]TileEntry, 0, DefaultBatchSize),
 		batchSize: DefaultBatchSize,
 		metadata:  metadata,
+		gzipTiles: strings.EqualFold(metadata.Format, FormatPBF),
 	}, nil
 }
 
@@ -76,7 +95,10 @@ func New(path string, metadata Metadata) (*Writer, error) {
 func createSchema(db *sql.DB) error {
 	schema := `
 		-- The spec requires metadata names to be unique; PRIMARY KEY enforces
-		-- that. insertMetadata clears the table first, so re-writing is safe.
+		-- that for freshly created files. insertMetadata clears the table
+		-- first, so re-writing is safe. Databases from older releases keep
+		-- their existing table definition — ensureMetadataNameUnique covers
+		-- those.
 		CREATE TABLE IF NOT EXISTS metadata (
 			name TEXT NOT NULL PRIMARY KEY,
 			value TEXT
@@ -94,6 +116,23 @@ func createSchema(db *sql.DB) error {
 
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("failed to execute schema: %w", err)
+	}
+
+	return nil
+}
+
+// ensureMetadataNameUnique makes the uniqueness of metadata.name effective for
+// databases that already existed. CREATE TABLE IF NOT EXISTS never alters an
+// existing table, so the PRIMARY KEY in createSchema only applies to files this
+// version created; a unique index, by contrast, is created on pre-existing
+// tables as well. The practical exposure is small because insertMetadata
+// deletes every row before writing, but the index makes the constraint hold for
+// anything written afterwards too.
+func ensureMetadataNameUnique(db *sql.DB) error {
+	const stmt = `CREATE UNIQUE INDEX IF NOT EXISTS metadata_name_index ON metadata (name)`
+
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("failed to create unique metadata name index: %w", err)
 	}
 
 	return nil
@@ -128,9 +167,10 @@ func insertMetadata(db *sql.DB, meta Metadata) (err error) {
 }
 
 // WriteTile adds a tile to the batch. When the batch is full, it is automatically flushed.
-// The PNG data is stored uncompressed, as the MBTiles 1.3 spec requires for raster
-// formats; gzip applies to pbf vector tiles only. Coordinates are converted to TMS format.
-func (w *Writer) WriteTile(z, x, y int, pngData []byte) error {
+// Raster payloads (png, jpg, webp) are stored uncompressed, as the MBTiles 1.3 spec
+// requires; for a pbf tileset the payload is gzipped on flush, as the same spec requires
+// for vector tiles. Coordinates are converted to TMS format.
+func (w *Writer) WriteTile(z, x, y int, tileData []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -138,7 +178,7 @@ func (w *Writer) WriteTile(z, x, y int, pngData []byte) error {
 		Z:    z,
 		X:    x,
 		Y:    y,
-		Data: pngData,
+		Data: tileData,
 	})
 
 	if len(w.batch) >= w.batchSize {
@@ -181,9 +221,18 @@ func (w *Writer) flushLocked() (err error) {
 		// Convert XYZ to TMS coordinates
 		tmsY := (1 << tile.Z) - 1 - tile.Y
 
-		// Store the PNG bytes verbatim: MBTiles readers (QGIS, tileserver-gl,
-		// mbutil) expect raster tile_data to be the image itself.
-		if _, err := stmt.Exec(tile.Z, tile.X, tmsY, tile.Data); err != nil {
+		// Raster bytes go in verbatim: MBTiles readers (QGIS, tileserver-gl,
+		// mbutil) expect raster tile_data to be the image itself. Vector (pbf)
+		// tiles are the opposite case — the spec requires a gzip envelope.
+		data := tile.Data
+		if w.gzipTiles {
+			data, err = gzipBytes(tile.Data)
+			if err != nil {
+				return fmt.Errorf("failed to gzip tile %d/%d/%d: %w", tile.Z, tile.X, tile.Y, err)
+			}
+		}
+
+		if _, err := stmt.Exec(tile.Z, tile.X, tmsY, data); err != nil {
 			return fmt.Errorf("failed to insert tile %d/%d/%d: %w", tile.Z, tile.X, tile.Y, err)
 		}
 	}
@@ -194,6 +243,22 @@ func (w *Writer) flushLocked() (err error) {
 
 	w.batch = w.batch[:0]
 	return nil
+}
+
+// gzipBytes wraps data in a gzip stream, as the MBTiles spec mandates for pbf
+// vector tiles. Reader.ReadTile unwraps it again via maybeGunzip.
+func gzipBytes(data []byte) (compressed []byte, err error) {
+	var buf bytes.Buffer
+
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		return nil, errors.Join(err, gw.Close())
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
 }
 
 // Close flushes any remaining tiles and closes the database.
