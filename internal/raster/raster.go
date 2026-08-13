@@ -8,6 +8,7 @@ import (
 	"github.com/paulmach/orb"
 	"golang.org/x/image/vector"
 
+	"github.com/cwbudde/watercolormap/internal/geo"
 	"github.com/cwbudde/watercolormap/internal/geojson"
 	"github.com/cwbudde/watercolormap/internal/types"
 )
@@ -386,8 +387,8 @@ func (r *Renderer) lonLatToLocalPx(lon, lat float64) (float64, float64) {
 	// Global pixel space (at this zoom) in [0, n*tileSize)
 	globalX := (lon + 180.0) / 360.0 * n * float64(r.tileSize)
 
-	latRad := lat * math.Pi / 180.0
-	mercY := math.Log(math.Tan(math.Pi/4.0 + latRad/2.0))
+	// Clamping keeps the poles finite: MercatorY(+-90) diverges to +-Inf.
+	mercY := geo.MercatorY(geo.ClampLat(lat))
 	globalY := (1.0 - mercY/math.Pi) / 2.0 * n * float64(r.tileSize)
 
 	return globalX - float64(r.offsetX), globalY - float64(r.offsetY)
