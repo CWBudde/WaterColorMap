@@ -40,8 +40,14 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=1 GOOS=linux go build -o watercolormap ./cmd/watercolormap
+# Build the application.
+# go-mapnik hardcodes /usr/local/lib/mapnik/{fonts,input} and expects a link-time
+# override; on this image Mapnik lives elsewhere, so without these flags nothing is
+# registered and rendering runs with no fonts and no input plugins. The runtime
+# stage is the same Ubuntu release with the same Mapnik, so the builder's paths hold.
+RUN CGO_ENABLED=1 GOOS=linux go build \
+	-ldflags "-X github.com/omniscale/go-mapnik/v2.fontPath=$(mapnik-config --fonts) -X github.com/omniscale/go-mapnik/v2.pluginPath=$(mapnik-config --input-plugins)" \
+	-o watercolormap ./cmd/watercolormap
 
 # Runtime stage - smaller image
 FROM ubuntu:24.04

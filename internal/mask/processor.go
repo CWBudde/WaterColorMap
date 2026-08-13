@@ -443,11 +443,13 @@ func ApplyThresholdWithAntialias(mask *image.Gray, threshold uint8) *image.Gray 
 			upper := int(threshold) + transitionWidth
 
 			var outVal uint8
-			if int(val) <= lower {
+
+			switch {
+			case int(val) <= lower:
 				outVal = 0
-			} else if int(val) >= upper {
+			case int(val) >= upper:
 				outVal = 255
-			} else {
+			default:
 				// Cubic interpolation: smootherstep (3t² - 2t³)
 				t := float32(int(val)-lower) / float32(2*transitionWidth)
 				smoothT := t * t * (3.0 - 2.0*t)
@@ -479,11 +481,13 @@ func ApplyThresholdWithAntialiasAndInvert(mask *image.Gray, threshold uint8) *im
 			upper := int(threshold) + transitionWidth
 
 			var outVal uint8
-			if int(val) <= lower {
+
+			switch {
+			case int(val) <= lower:
 				outVal = 255
-			} else if int(val) >= upper {
+			case int(val) >= upper:
 				outVal = 0
-			} else {
+			default:
 				// Cubic interpolation: smootherstep (3t² - 2t³)
 				t := float32(int(val)-lower) / float32(2*transitionWidth)
 				smoothT := t * t * (3.0 - 2.0*t)
@@ -509,13 +513,20 @@ func BoxBlur(mask *image.Gray, radius int) *image.Gray {
 	}
 
 	bounds := mask.Bounds()
-	width := bounds.Dx()
-	height := bounds.Dy()
 
 	// Temporary buffer for horizontal pass
 	temp := image.NewGray(bounds)
+	boxBlurHorizontal(mask, temp, bounds.Dx(), bounds.Dy(), radius)
 
-	// Horizontal pass
+	// Vertical pass (on temp -> dst)
+	dst := image.NewGray(bounds)
+	boxBlurVertical(temp, dst, bounds.Dx(), bounds.Dy(), radius)
+
+	return dst
+}
+
+// boxBlurHorizontal runs the horizontal sliding-window pass of BoxBlur from src into dst.
+func boxBlurHorizontal(src, dst *image.Gray, width, height, radius int) {
 	for y := 0; y < height; y++ {
 		// Sliding window sum
 		sum := 0
@@ -524,8 +535,8 @@ func BoxBlur(mask *image.Gray, radius int) *image.Gray {
 		// Initialize window
 		for x := -radius; x <= radius; x++ {
 			if x >= 0 && x < width {
-				idx := y*mask.Stride + x
-				sum += int(mask.Pix[idx])
+				idx := y*src.Stride + x
+				sum += int(src.Pix[idx])
 				count++
 			}
 		}
@@ -534,7 +545,7 @@ func BoxBlur(mask *image.Gray, radius int) *image.Gray {
 		invCount := 1.0 / float64(count)
 
 		// First pixel - truncate to match integer division behavior
-		temp.Pix[y*temp.Stride] = uint8(int(float64(sum) * invCount))
+		dst.Pix[y*dst.Stride] = uint8(int(float64(sum) * invCount))
 
 		// Slide window across row
 		for x := 1; x < width; x++ {
@@ -544,16 +555,16 @@ func BoxBlur(mask *image.Gray, radius int) *image.Gray {
 			// Remove left pixel from window
 			leftX := x - radius - 1
 			if leftX >= 0 {
-				idx := y*mask.Stride + leftX
-				sum -= int(mask.Pix[idx])
+				idx := y*src.Stride + leftX
+				sum -= int(src.Pix[idx])
 				count--
 			}
 
 			// Add right pixel to window
 			rightX := x + radius
 			if rightX < width {
-				idx := y*mask.Stride + rightX
-				sum += int(mask.Pix[idx])
+				idx := y*src.Stride + rightX
+				sum += int(src.Pix[idx])
 				count++
 			}
 
@@ -562,13 +573,13 @@ func BoxBlur(mask *image.Gray, radius int) *image.Gray {
 				invCount = 1.0 / float64(count)
 			}
 
-			temp.Pix[y*temp.Stride+x] = uint8(int(float64(sum) * invCount))
+			dst.Pix[y*dst.Stride+x] = uint8(int(float64(sum) * invCount))
 		}
 	}
+}
 
-	// Vertical pass (on temp -> dst)
-	dst := image.NewGray(bounds)
-
+// boxBlurVertical runs the vertical sliding-window pass of BoxBlur from src into dst.
+func boxBlurVertical(src, dst *image.Gray, width, height, radius int) {
 	for x := 0; x < width; x++ {
 		// Sliding window sum
 		sum := 0
@@ -577,8 +588,8 @@ func BoxBlur(mask *image.Gray, radius int) *image.Gray {
 		// Initialize window
 		for y := -radius; y <= radius; y++ {
 			if y >= 0 && y < height {
-				idx := y*temp.Stride + x
-				sum += int(temp.Pix[idx])
+				idx := y*src.Stride + x
+				sum += int(src.Pix[idx])
 				count++
 			}
 		}
@@ -597,16 +608,16 @@ func BoxBlur(mask *image.Gray, radius int) *image.Gray {
 			// Remove top pixel from window
 			topY := y - radius - 1
 			if topY >= 0 {
-				idx := topY*temp.Stride + x
-				sum -= int(temp.Pix[idx])
+				idx := topY*src.Stride + x
+				sum -= int(src.Pix[idx])
 				count--
 			}
 
 			// Add bottom pixel to window
 			bottomY := y + radius
 			if bottomY < height {
-				idx := bottomY*temp.Stride + x
-				sum += int(temp.Pix[idx])
+				idx := bottomY*src.Stride + x
+				sum += int(src.Pix[idx])
 				count++
 			}
 
@@ -618,8 +629,6 @@ func BoxBlur(mask *image.Gray, radius int) *image.Gray {
 			dst.Pix[y*dst.Stride+x] = uint8(float64(sum) * invCount)
 		}
 	}
-
-	return dst
 }
 
 // BoxBlurSigma applies a 3-pass box blur to approximate a Gaussian blur.

@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/cwbudde/watercolormap/internal/texture"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/cwbudde/watercolormap/internal/texture"
 )
 
 var texturesCmd = &cobra.Command{

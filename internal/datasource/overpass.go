@@ -7,23 +7,26 @@ import (
 	"time"
 
 	"github.com/cwbudde/go-overpass"
+
 	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // OverpassConfig contains configuration for the Overpass API client.
+//
+// Fields are ordered for struct alignment, not for reading order.
 type OverpassConfig struct {
-	// Endpoint is the Overpass API URL (default: https://overpass-api.de/api/interpreter)
-	Endpoint string
-	// Workers controls parallelism (default: 2 for public API, increase for private instances)
-	Workers int
 	// RetryConfig configures retry behavior with exponential backoff
 	RetryConfig *overpass.RetryConfig
 	// HTTPClient allows custom HTTP client (default: a client with Timeout set)
 	HTTPClient *http.Client
+	// Endpoint is the Overpass API URL (default: https://overpass-api.de/api/interpreter)
+	Endpoint string
 	// MaxResponseBytes caps a single Overpass response body. Zero means
 	// "unset" and is defaulted to DefaultMaxResponseBytes; a negative value
 	// is an explicit opt-out that disables the cap.
 	MaxResponseBytes int64
+	// Workers controls parallelism (default: 2 for public API, increase for private instances)
+	Workers int
 }
 
 // defaultHTTPTimeout bounds a single Overpass request. http.DefaultClient has
@@ -290,19 +293,20 @@ func (ds *OverpassDataSource) buildWaterQuery(bbox string, zoom int) []string {
 	// Rivers and waterways - progressively add detail
 	// Streams excluded at zoom ≤15 as they render too narrow to be useful
 	if zoom >= 10 {
-		if zoom >= 16 {
+		switch {
+		case zoom >= 16:
 			// z16+: All waterways including streams
 			parts = append(parts,
 				fmt.Sprintf(`way["waterway"](%s);`, bbox),
 				fmt.Sprintf(`relation["waterway"](%s);`, bbox),
 			)
-		} else if zoom >= 12 {
+		case zoom >= 12:
 			// z12-15: Rivers and canals only (no streams - too narrow)
 			parts = append(parts,
 				fmt.Sprintf(`way["waterway"~"river|canal"](%s);`, bbox),
 				fmt.Sprintf(`relation["waterway"~"river|canal"](%s);`, bbox),
 			)
-		} else {
+		default:
 			// z10-11: Major rivers only
 			parts = append(parts,
 				fmt.Sprintf(`way["waterway"="river"](%s);`, bbox),
@@ -404,20 +408,21 @@ func (ds *OverpassDataSource) buildRoadsQuery(bbox string, zoom int) []string {
 
 	var parts []string
 
-	if zoom >= 16 {
+	switch {
+	case zoom >= 16:
 		// z16+: All roads
 		parts = append(parts, fmt.Sprintf(`way["highway"](%s);`, bbox))
-	} else if zoom >= 14 {
+	case zoom >= 14:
 		// z14-15: Major + residential (no service, track, path, footway, etc.)
 		parts = append(parts,
 			fmt.Sprintf(`way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|residential|unclassified|living_street"](%s);`, bbox),
 		)
-	} else if zoom >= 12 {
+	case zoom >= 12:
 		// z12-13: Major roads + secondary/tertiary
 		parts = append(parts,
 			fmt.Sprintf(`way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link"](%s);`, bbox),
 		)
-	} else {
+	default:
 		// z10-11: Major roads only
 		parts = append(parts,
 			fmt.Sprintf(`way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link"](%s);`, bbox),
@@ -534,23 +539,25 @@ func (ds *OverpassDataSource) CacheSize() int {
 }
 
 // ServerConfig defines configuration for a single Overpass server with its coverage area.
+//
+// Fields are ordered for struct alignment, not for reading order.
 type ServerConfig struct {
-	// Endpoint is the Overpass API URL
-	Endpoint string
-	// Workers controls parallelism for this server
-	Workers int
 	// RetryConfig configures retry behavior
 	RetryConfig *overpass.RetryConfig
 	// HTTPClient allows custom HTTP client
 	HTTPClient *http.Client
+	// Coverage defines the geographic area this server covers (nil = covers everything)
+	Coverage *types.BoundingBox
+	// Endpoint is the Overpass API URL
+	Endpoint string
+	// Name is an optional human-readable name for logging (e.g., "Niedersachsen", "Public")
+	Name string
 	// MaxResponseBytes caps a single Overpass response body. Zero means
 	// "unset" and is defaulted to DefaultMaxResponseBytes; a negative value
 	// disables the cap.
 	MaxResponseBytes int64
-	// Coverage defines the geographic area this server covers (nil = covers everything)
-	Coverage *types.BoundingBox
-	// Name is an optional human-readable name for logging (e.g., "Niedersachsen", "Public")
-	Name string
+	// Workers controls parallelism for this server
+	Workers int
 }
 
 // MultiOverpassDataSource routes queries to different Overpass servers based on geography.

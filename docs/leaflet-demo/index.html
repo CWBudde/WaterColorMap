@@ -367,7 +367,10 @@
             fetch(url, { signal: controller.signal }).then((response) => {
               if (response.ok) return response.blob();
 
-              if (RETRYABLE.includes(response.status) && attempt < MAX_RETRIES) {
+              if (
+                RETRYABLE.includes(response.status) &&
+                attempt < MAX_RETRIES
+              ) {
                 // Honour Retry-After, but cap it: the header is a hint and
                 // the user is waiting on a visible tile.
                 const hinted = parseFloat(response.headers.get("Retry-After"));

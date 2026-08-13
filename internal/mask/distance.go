@@ -106,55 +106,78 @@ func EuclideanDistanceTransformWithContext(mask *image.Gray, maxDistance float64
 	}
 
 	// First, detect which inside pixels are at the edge (adjacent to background)
+	detectEdgePixels(mask, isEdge, width, height)
+
+	// Now initialize based on edge detection
+	initDistanceField(mask, temp, isEdge, width, height, infinity)
+
+	// Separable passes: rows then columns (complete Euclidean distance)
+	distanceTransformRows(temp, ctx, width, height)
+	distanceTransformColumns(temp, ctx, width, height)
+
+	// Convert squared distances to distances and normalize to 0-255
+	return normalizeDistanceField(mask, temp, width, height, maxDistance, infinity)
+}
+
+// detectEdgePixels marks every foreground pixel that has a 4-connected background neighbour.
+func detectEdgePixels(mask *image.Gray, isEdge []bool, width, height int) {
+	bounds := mask.Bounds()
+
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			val := mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y).Y
-			if val > 0 {
-				// Check if any 4-connected neighbor is background (value == 0)
-				isEdgePixel := false
-				// Check left
-				if x > 0 && mask.GrayAt(bounds.Min.X+x-1, bounds.Min.Y+y).Y == 0 {
-					isEdgePixel = true
-				}
-				// Check right
-				if x < width-1 && mask.GrayAt(bounds.Min.X+x+1, bounds.Min.Y+y).Y == 0 {
-					isEdgePixel = true
-				}
-				// Check top
-				if y > 0 && mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y-1).Y == 0 {
-					isEdgePixel = true
-				}
-				// Check bottom
-				if y < height-1 && mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y+1).Y == 0 {
-					isEdgePixel = true
-				}
-				isEdge[y*width+x] = isEdgePixel
+			if val == 0 {
+				continue
 			}
+
+			// Check if any 4-connected neighbor is background (value == 0)
+			isEdgePixel := false
+			// Check left
+			if x > 0 && mask.GrayAt(bounds.Min.X+x-1, bounds.Min.Y+y).Y == 0 {
+				isEdgePixel = true
+			}
+			// Check right
+			if x < width-1 && mask.GrayAt(bounds.Min.X+x+1, bounds.Min.Y+y).Y == 0 {
+				isEdgePixel = true
+			}
+			// Check top
+			if y > 0 && mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y-1).Y == 0 {
+				isEdgePixel = true
+			}
+			// Check bottom
+			if y < height-1 && mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y+1).Y == 0 {
+				isEdgePixel = true
+			}
+
+			isEdge[y*width+x] = isEdgePixel
 		}
 	}
+}
 
-	// Now initialize based on edge detection
+// initDistanceField seeds the squared-distance field: edge pixels at 0, everything else at infinity.
+func initDistanceField(mask *image.Gray, temp []float64, isEdge []bool, width, height int, infinity float64) {
+	bounds := mask.Bounds()
+
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			idx := y*width + x
 			val := mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y).Y
-			if val > 0 {
-				if isEdge[idx] {
-					temp[idx] = 0.0 // Edge pixel - distance is 0
-				} else {
-					temp[idx] = infinity // Interior pixel - needs distance computed
-				}
-			} else {
-				temp[idx] = infinity // Background pixel - outside the shape
+
+			if val > 0 && isEdge[idx] {
+				temp[idx] = 0.0 // Edge pixel - distance is 0
+				continue
 			}
+
+			// Interior pixels need a distance computed; background pixels are outside the shape.
+			temp[idx] = infinity
 		}
 	}
+}
 
-	// Use row/col buffers from context
+// distanceTransformRows runs the horizontal 1D distance transform pass in place.
+func distanceTransformRows(temp []float64, ctx *DistanceContext, width, height int) {
 	rowBuf := ctx.rowBuf
-	colBuf := ctx.colBuf
 
-	// First pass: rows (horizontal distances)
 	for y := 0; y < height; y++ {
 		rowStart := y * width
 		// Copy row to buffer
@@ -168,8 +191,12 @@ func EuclideanDistanceTransformWithContext(mask *image.Gray, maxDistance float64
 			temp[rowStart+x] = rowBuf[x]
 		}
 	}
+}
 
-	// Second pass: columns (complete Euclidean distance)
+// distanceTransformColumns runs the vertical 1D distance transform pass in place.
+func distanceTransformColumns(temp []float64, ctx *DistanceContext, width, height int) {
+	colBuf := ctx.colBuf
+
 	for x := 0; x < width; x++ {
 		// Extract column to buffer
 		for y := 0; y < height; y++ {
@@ -182,54 +209,52 @@ func EuclideanDistanceTransformWithContext(mask *image.Gray, maxDistance float64
 			temp[y*width+x] = colBuf[y]
 		}
 	}
+}
 
-	// Convert squared distances to distances and normalize to 0-255
+// normalizeDistanceField converts squared distances into a 0-255 gray image.
+func normalizeDistanceField(
+	mask *image.Gray, temp []float64, width, height int, maxDistance, infinity float64,
+) *image.Gray {
+	bounds := mask.Bounds()
 	output := image.NewGray(bounds)
 	maxDistSq := maxDistance * maxDistance
 
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
-			idx := y*width + x
-			distSq := temp[idx]
+			distSq := temp[y*width+x]
 			val := mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y).Y
 
-			// Background pixels (outside shape) remain at 0
-			if val == 0 {
-				output.SetGray(bounds.Min.X+x, bounds.Min.Y+y, color.Gray{Y: 0})
-				continue
-			}
-
-			// Interior pixels: if still at infinity, clamp to maxDistance
-			// (this happens when distance exceeds maxDistance)
-			if distSq >= infinity/2 {
-				output.SetGray(bounds.Min.X+x, bounds.Min.Y+y, color.Gray{Y: 255})
-				continue
-			}
-
-			// Clamp to maxDistance and normalize
-			if distSq >= maxDistSq {
-				output.SetGray(bounds.Min.X+x, bounds.Min.Y+y, color.Gray{Y: 255})
-			} else {
-				dist := math.Sqrt(distSq)
-				normalized := uint8(255.0 * dist / maxDistance)
-				output.SetGray(bounds.Min.X+x, bounds.Min.Y+y, color.Gray{Y: normalized})
-			}
+			output.SetGray(
+				bounds.Min.X+x, bounds.Min.Y+y,
+				color.Gray{Y: normalizedDistanceValue(val, distSq, maxDistSq, maxDistance, infinity)},
+			)
 		}
 	}
 
 	return output
 }
 
-// distanceTransform1D computes the squared distance transform along one dimension
-// using the parabola lower envelope method from Felzenszwalb & Huttenlocher.
-//
-// Input: array of values (0 for inside pixels, infinity for boundary)
-// Output: array of squared distances to nearest boundary
-func distanceTransform1D(input []float64, output []float64) {
-	n := len(input)
-	v := make([]int, n)
-	z := make([]float64, n+1)
-	distanceTransform1DWithBuffers(input, output, v, z)
+// normalizedDistanceValue maps a single pixel's squared distance to its gray output value.
+func normalizedDistanceValue(val uint8, distSq, maxDistSq, maxDistance, infinity float64) uint8 {
+	// Background pixels (outside shape) remain at 0
+	if val == 0 {
+		return 0
+	}
+
+	// Interior pixels: if still at infinity, clamp to maxDistance
+	// (this happens when distance exceeds maxDistance)
+	if distSq >= infinity/2 {
+		return 255
+	}
+
+	// Clamp to maxDistance and normalize
+	if distSq >= maxDistSq {
+		return 255
+	}
+
+	dist := math.Sqrt(distSq)
+
+	return uint8(255.0 * dist / maxDistance)
 }
 
 // distanceTransform1DWithBuffers computes the squared distance transform using provided buffers.

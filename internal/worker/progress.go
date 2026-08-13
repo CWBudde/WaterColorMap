@@ -92,14 +92,22 @@ func (p *Progress) Print() {
 	// Pad to clear previous line content
 	line += "          "
 
-	fmt.Fprint(p.output, line)
+	writeProgress(p.output, line)
+}
+
+// writeProgress emits progress output, dropping write errors on purpose.
+// Progress is cosmetic, Print and Done have no error path to report on, and a
+// broken output stream must not derail tile generation.
+func writeProgress(w io.Writer, s string) {
+	//nolint:errcheck // cosmetic output; a failed write is deliberately ignored
+	fmt.Fprint(w, s)
 }
 
 // Done prints the final progress and a newline.
 func (p *Progress) Done() {
 	if p.enabled {
 		p.Print()
-		fmt.Fprintln(p.output)
+		writeProgress(p.output, "\n")
 	}
 }
 

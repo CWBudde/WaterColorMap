@@ -10,11 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/paulmach/orb"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/types"
-	"github.com/paulmach/orb"
-	"github.com/stretchr/testify/require"
 )
 
 // Test function with three subtests
@@ -233,6 +234,36 @@ func (s *syntheticDataSource) FetchTileData(ctx context.Context, coord types.Til
 					{scale(0.3, 0.1), scale(0.4, 0.1), scale(0.4, 0.2), scale(0.3, 0.2), scale(0.3, 0.1)},
 				},
 				Properties: map[string]interface{}{"building": "yes"},
+			},
+		},
+		Railroads: []types.Feature{
+			{
+				ID:   "synthetic/railroad/1",
+				Type: types.FeatureTypeRailroad,
+				Geometry: orb.LineString{
+					scale(0.0, 0.9), scale(1.0, 0.6),
+				},
+				Properties: map[string]interface{}{"railway": "rail"},
+			},
+		},
+		Urban: []types.Feature{
+			{
+				ID:   "synthetic/urban/1",
+				Type: types.FeatureTypeUrban,
+				Geometry: orb.Polygon{
+					{scale(0.6, 0.0), scale(1.0, 0.0), scale(1.0, 0.25), scale(0.6, 0.25), scale(0.6, 0.0)},
+				},
+				Properties: map[string]interface{}{"landuse": "residential"},
+			},
+		},
+		Civic: []types.Feature{
+			{
+				ID:   "synthetic/civic/1",
+				Type: types.FeatureTypeCivic,
+				Geometry: orb.Polygon{
+					{scale(0.05, 0.75), scale(0.25, 0.75), scale(0.25, 0.95), scale(0.05, 0.95), scale(0.05, 0.75)},
+				},
+				Properties: map[string]interface{}{"amenity": "school"},
 			},
 		},
 	}

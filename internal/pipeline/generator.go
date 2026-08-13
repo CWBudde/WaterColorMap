@@ -25,9 +25,9 @@ import (
 
 // StageCapture represents a single captured intermediate stage.
 type StageCapture struct {
+	Image       image.Image // The actual image data
 	Name        string      // e.g., "01_water_alpha"
 	Description string      // e.g., "Alpha mask extracted from water layer"
-	Image       image.Image // The actual image data
 	ZOrder      int         // For sorting (01, 02, etc.)
 }
 
@@ -148,7 +148,9 @@ func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, fo
 	// Type-assert debugCtx to *DebugContext if provided
 	var dc *DebugContext
 	if debugCtx != nil {
-		dc = debugCtx.(*DebugContext)
+		if typed, ok := debugCtx.(*DebugContext); ok {
+			dc = typed
+		}
 	}
 	suffix := strings.TrimSpace(filenameSuffix)
 
@@ -180,7 +182,7 @@ func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, fo
 	}
 
 	// Phase 1: Setup and render all layers (optionally with pre-fetched data)
-	renderResult, err := g.renderLayersWithData(ctx, coords, dc, prefetchedData)
+	renderResult, err := g.renderLayersWithData(ctx, coords, prefetchedData)
 	if err != nil {
 		return "", "", err
 	}
@@ -190,10 +192,7 @@ func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, fo
 	}
 
 	// Phase 2: Build masks from rendered layers
-	masks, err := buildMasks(renderResult.rawLayers, renderResult.params, dc)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to build masks: %w", err)
-	}
+	masks := buildMasks(renderResult.rawLayers, renderResult.params, dc)
 
 	// Phase 3: Paint all layers with watercolor effects
 	painted, err := paintAllLayers(renderResult.rawLayers, masks, renderResult.params, g.textures, dc)
@@ -231,9 +230,11 @@ func readPNG(path string) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 
 	img, err := png.Decode(file)
+	if cerr := file.Close(); cerr != nil && err == nil {
+		return nil, cerr
+	}
 	return img, err
 }
 
@@ -282,7 +283,6 @@ func (g *Generator) TileSize() int {
 func (g *Generator) renderLayersWithData(
 	ctx context.Context,
 	coords tile.Coords,
-	dc *DebugContext,
 	prefetchedData *types.TileData,
 ) (*renderLayersResult, error) {
 	// Create watercolor parameters with zoom adjustments
@@ -396,10 +396,10 @@ func (g *Generator) renderLayersWithData(
 // renderLayersResult holds the output from the rendering phase.
 type renderLayersResult struct {
 	rawLayers      map[geojson.LayerType]image.Image
-	params         watercolor.Params
-	padPx          int
 	layerDir       string
 	layerDirReturn string
+	params         watercolor.Params
+	padPx          int
 }
 
 // maskSet holds all extracted alpha masks for a tile.
@@ -418,7 +418,7 @@ func buildMasks(
 	rawLayers map[geojson.LayerType]image.Image,
 	params watercolor.Params,
 	dc *DebugContext,
-) (*maskSet, error) {
+) *maskSet {
 	// Extract image references
 	waterImg := rawLayers[geojson.LayerWater]
 	riversImg := rawLayers[geojson.LayerRivers]
@@ -489,7 +489,7 @@ func buildMasks(
 		railroadsMask: railroadsMask,
 		highwaysAlpha: highwaysAlpha,
 		nonLandUnion:  nonLandUnion,
-	}, nil
+	}
 }
 
 // paintAllLayers applies watercolor effects to all layers.
@@ -502,26 +502,76 @@ func paintAllLayers(
 ) (map[geojson.LayerType]image.Image, error) {
 	painted := make(map[geojson.LayerType]image.Image)
 
+	if err := paintWaterLayers(painted, rawLayers, params, dc); err != nil {
+		return nil, err
+	}
+
+	landMask, err := paintLandLayer(painted, masks, params, textures, dc)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := paintLineLayers(painted, rawLayers, params, dc); err != nil {
+		return nil, err
+	}
+
+	if err := paintAreaLayers(painted, rawLayers, masks, landMask, params, dc); err != nil {
+		return nil, err
+	}
+
+	return painted, nil
+}
+
+// paintDirectLayer paints a layer straight from its own alpha, if it was rendered.
+func paintDirectLayer(
+	painted map[geojson.LayerType]image.Image,
+	rawLayers map[geojson.LayerType]image.Image,
+	layer geojson.LayerType,
+	params watercolor.Params,
+	dc *DebugContext,
+	stage string,
+	description string,
+	zorder int,
+) error {
+	img := rawLayers[layer]
+	if img == nil {
+		return nil
+	}
+	result, err := watercolor.PaintLayer(img, layer, params)
+	if err != nil {
+		return fmt.Errorf("failed to paint %s: %w", layer, err)
+	}
+	painted[layer] = result
+	dc.Capture(stage, description, result, zorder)
+	return nil
+}
+
+// paintWaterLayers paints water and rivers from their own alpha masks.
+func paintWaterLayers(
+	painted map[geojson.LayerType]image.Image,
+	rawLayers map[geojson.LayerType]image.Image,
+	params watercolor.Params,
+	dc *DebugContext,
+) error {
 	// Paint water from its own alpha mask (not the combined non-land mask)
-	if waterImg := rawLayers[geojson.LayerWater]; waterImg != nil {
-		waterPainted, err := watercolor.PaintLayer(waterImg, geojson.LayerWater, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint water: %w", err)
-		}
-		painted[geojson.LayerWater] = waterPainted
-		dc.Capture("12_painted_water", "Watercolor-painted water layer", waterPainted, 12)
+	if err := paintDirectLayer(painted, rawLayers, geojson.LayerWater, params, dc,
+		"12_painted_water", "Watercolor-painted water layer", 12); err != nil {
+		return err
 	}
 
 	// Paint rivers from their own alpha mask
-	if riversImg := rawLayers[geojson.LayerRivers]; riversImg != nil {
-		riversPainted, err := watercolor.PaintLayer(riversImg, geojson.LayerRivers, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint rivers: %w", err)
-		}
-		painted[geojson.LayerRivers] = riversPainted
-		dc.Capture("13_painted_rivers", "Watercolor-painted rivers layer", riversPainted, 18)
-	}
+	return paintDirectLayer(painted, rawLayers, geojson.LayerRivers, params, dc,
+		"13_painted_rivers", "Watercolor-painted rivers layer", 18)
+}
 
+// paintLandLayer paints land from the non-land union mask and returns the land mask.
+func paintLandLayer(
+	painted map[geojson.LayerType]image.Image,
+	masks *maskSet,
+	params watercolor.Params,
+	textures map[geojson.LayerType]image.Image,
+	dc *DebugContext,
+) (*image.Gray, error) {
 	// Paint land from non-land union mask (will be inverted during processing due to InvertMask=true)
 	// The watercolor processor handles blur/noise/threshold/invert/edges uniformly
 	paintedLand, landMask, err := watercolor.PaintLayerFromMaskWithMask(masks.nonLandUnion, geojson.LayerLand, params)
@@ -544,106 +594,140 @@ func paintAllLayers(
 	}
 	dc.Capture("11_painted_land_on_canvas", "Land layer composited on white canvas", landOnCanvas, 11)
 
+	return landMask, nil
+}
+
+// paintLineLayers paints roads, railroads and highways from their own alpha masks.
+func paintLineLayers(
+	painted map[geojson.LayerType]image.Image,
+	rawLayers map[geojson.LayerType]image.Image,
+	params watercolor.Params,
+	dc *DebugContext,
+) error {
 	// Paint roads from their own alpha mask
 	// NOTE: Roads are also part of the derived non-land union mask, so they carve holes
 	// into land. Painting roads fills those holes with the intended style (instead of
 	// leaving paper showing through).
-	if roadsImg := rawLayers[geojson.LayerRoads]; roadsImg != nil {
-		roadsPainted, err := watercolor.PaintLayer(roadsImg, geojson.LayerRoads, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint roads: %w", err)
-		}
-		painted[geojson.LayerRoads] = roadsPainted
-		dc.Capture("15_painted_roads", "Watercolor-painted roads layer", roadsPainted, 15)
+	if err := paintDirectLayer(painted, rawLayers, geojson.LayerRoads, params, dc,
+		"15_painted_roads", "Watercolor-painted roads layer", 15); err != nil {
+		return err
 	}
 
 	// Paint railroads from their own alpha mask
-	if railroadsImg := rawLayers[geojson.LayerRailroads]; railroadsImg != nil {
-		railroadsPainted, err := watercolor.PaintLayer(railroadsImg, geojson.LayerRailroads, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint railroads: %w", err)
-		}
-		painted[geojson.LayerRailroads] = railroadsPainted
-		dc.Capture("16_painted_railroads", "Watercolor-painted railroads layer", railroadsPainted, 16)
+	if err := paintDirectLayer(painted, rawLayers, geojson.LayerRailroads, params, dc,
+		"16_painted_railroads", "Watercolor-painted railroads layer", 16); err != nil {
+		return err
 	}
 
 	// Paint highways/major roads on top
-	if highwaysImg := rawLayers[geojson.LayerHighways]; highwaysImg != nil {
-		highwaysPainted, err := watercolor.PaintLayer(highwaysImg, geojson.LayerHighways, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint highways: %w", err)
-		}
-		painted[geojson.LayerHighways] = highwaysPainted
-		dc.Capture("19_painted_highways", "Watercolor-painted highways layer", highwaysPainted, 19)
-	}
+	return paintDirectLayer(painted, rawLayers, geojson.LayerHighways, params, dc,
+		"19_painted_highways", "Watercolor-painted highways layer", 19)
+}
 
+// paintAreaLayers paints urban, civic, parks and buildings, subtracting line layers
+// from the developed areas.
+func paintAreaLayers(
+	painted map[geojson.LayerType]image.Image,
+	rawLayers map[geojson.LayerType]image.Image,
+	masks *maskSet,
+	landMask *image.Gray,
+	params watercolor.Params,
+	dc *DebugContext,
+) error {
 	// Create roads+railroads+highways union mask for subtracting from urban/civic areas
 	roadsRailroadsHighwaysUnion := mask.MaxMasks(masks.roadsMask, masks.railroadsMask, masks.highwaysAlpha)
 	dc.Capture("14a_roads_railroads_highways_union", "Union of roads + railroads + highways for area subtraction", roadsRailroadsHighwaysUnion, 14)
 
 	// Paint urban with roads/railroads/highways subtracted (similar to land subtraction)
-	if urbanImg := rawLayers[geojson.LayerUrban]; urbanImg != nil {
-		urbanMask := mask.ExtractAlphaMask(urbanImg)
-		// Subtract roads, railroads, and highways from urban areas
-		urbanMinusRoads := mask.SubtractMask(urbanMask, roadsRailroadsHighwaysUnion)
-		dc.Capture("14b_urban_minus_roads", "Urban areas with roads/railroads/highways subtracted", urbanMinusRoads, 14)
-		urbanPainted, err := watercolor.PaintLayerFromMask(urbanMinusRoads, geojson.LayerUrban, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint urban: %w", err)
-		}
-		painted[geojson.LayerUrban] = urbanPainted
-		dc.Capture("14_painted_urban", "Watercolor-painted urban layer", urbanPainted, 14)
+	if err := paintAreaMinusRoads(painted, rawLayers, geojson.LayerUrban, roadsRailroadsHighwaysUnion, params, dc,
+		"14b_urban_minus_roads", "Urban areas with roads/railroads/highways subtracted", 14,
+		"14_painted_urban", "Watercolor-painted urban layer", 14); err != nil {
+		return err
 	}
 
 	// Paint civic with roads/railroads/highways subtracted (similar to land subtraction)
-	if civicImg := rawLayers[geojson.LayerCivic]; civicImg != nil {
-		civicMask := mask.ExtractAlphaMask(civicImg)
-		// Subtract roads, railroads, and highways from civic areas
-		civicMinusRoads := mask.SubtractMask(civicMask, roadsRailroadsHighwaysUnion)
-		dc.Capture("14c_civic_minus_roads", "Civic areas with roads/railroads/highways subtracted", civicMinusRoads, 14)
-		civicPainted, err := watercolor.PaintLayerFromMask(civicMinusRoads, geojson.LayerCivic, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint civic: %w", err)
-		}
-		painted[geojson.LayerCivic] = civicPainted
-		dc.Capture("15_painted_civic", "Watercolor-painted civic layer", civicPainted, 15)
+	if err := paintAreaMinusRoads(painted, rawLayers, geojson.LayerCivic, roadsRailroadsHighwaysUnion, params, dc,
+		"14c_civic_minus_roads", "Civic areas with roads/railroads/highways subtracted", 14,
+		"15_painted_civic", "Watercolor-painted civic layer", 15); err != nil {
+		return err
 	}
 
-	// Constrain parks to land+urban+civic combined (parks render on top of developed areas)
-	if parksImg := rawLayers[geojson.LayerParks]; parksImg != nil {
-		// Parks can appear on land OR on urban/civic areas
-		urbanImg := rawLayers[geojson.LayerUrban]
-		civicImg := rawLayers[geojson.LayerCivic]
-		urbanMask := mask.NewEmptyMask(landMask.Bounds())
-		civicMask := mask.NewEmptyMask(landMask.Bounds())
-		if urbanImg != nil {
-			urbanMask = mask.ExtractAlphaMask(urbanImg)
-		}
-		if civicImg != nil {
-			civicMask = mask.ExtractAlphaMask(civicImg)
-		}
-		landPlusUrbanCivic := mask.MaxMasks(landMask, urbanMask, civicMask)
-		parksMask := mask.MinMask(mask.ExtractAlphaMask(parksImg), landPlusUrbanCivic)
-		dc.Capture("16_parks_constrained", "Parks constrained to land+urban+civic", parksMask, 16)
-		parksPainted, err := watercolor.PaintLayerFromMask(parksMask, geojson.LayerParks, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint parks: %w", err)
-		}
-		painted[geojson.LayerParks] = parksPainted
-		dc.Capture("17_painted_parks", "Watercolor-painted parks layer", parksPainted, 17)
+	if err := paintParksLayer(painted, rawLayers, landMask, params, dc); err != nil {
+		return err
 	}
 
 	// Buildings painted directly (they are subtracted from land, rendered on top)
-	if buildingsImg := rawLayers[geojson.LayerBuildings]; buildingsImg != nil {
-		buildingsPainted, err := watercolor.PaintLayer(buildingsImg, geojson.LayerBuildings, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to paint buildings: %w", err)
-		}
-		painted[geojson.LayerBuildings] = buildingsPainted
-		dc.Capture("18_painted_buildings", "Watercolor-painted buildings layer", buildingsPainted, 18)
+	return paintDirectLayer(painted, rawLayers, geojson.LayerBuildings, params, dc,
+		"18_painted_buildings", "Watercolor-painted buildings layer", 18)
+}
+
+// paintAreaMinusRoads paints an area layer with the road union subtracted from it.
+func paintAreaMinusRoads(
+	painted map[geojson.LayerType]image.Image,
+	rawLayers map[geojson.LayerType]image.Image,
+	layer geojson.LayerType,
+	roadsUnion *image.Gray,
+	params watercolor.Params,
+	dc *DebugContext,
+	minusStage string,
+	minusDescription string,
+	minusZOrder int,
+	paintedStage string,
+	paintedDescription string,
+	paintedZOrder int,
+) error {
+	img := rawLayers[layer]
+	if img == nil {
+		return nil
+	}
+	areaMask := mask.ExtractAlphaMask(img)
+	// Subtract roads, railroads, and highways from the area
+	areaMinusRoads := mask.SubtractMask(areaMask, roadsUnion)
+	dc.Capture(minusStage, minusDescription, areaMinusRoads, minusZOrder)
+	result, err := watercolor.PaintLayerFromMask(areaMinusRoads, layer, params)
+	if err != nil {
+		return fmt.Errorf("failed to paint %s: %w", layer, err)
+	}
+	painted[layer] = result
+	dc.Capture(paintedStage, paintedDescription, result, paintedZOrder)
+	return nil
+}
+
+// paintParksLayer constrains parks to land+urban+civic and paints them.
+func paintParksLayer(
+	painted map[geojson.LayerType]image.Image,
+	rawLayers map[geojson.LayerType]image.Image,
+	landMask *image.Gray,
+	params watercolor.Params,
+	dc *DebugContext,
+) error {
+	// Constrain parks to land+urban+civic combined (parks render on top of developed areas)
+	parksImg := rawLayers[geojson.LayerParks]
+	if parksImg == nil {
+		return nil
 	}
 
-	return painted, nil
+	// Parks can appear on land OR on urban/civic areas
+	urbanImg := rawLayers[geojson.LayerUrban]
+	civicImg := rawLayers[geojson.LayerCivic]
+	urbanMask := mask.NewEmptyMask(landMask.Bounds())
+	civicMask := mask.NewEmptyMask(landMask.Bounds())
+	if urbanImg != nil {
+		urbanMask = mask.ExtractAlphaMask(urbanImg)
+	}
+	if civicImg != nil {
+		civicMask = mask.ExtractAlphaMask(civicImg)
+	}
+	landPlusUrbanCivic := mask.MaxMasks(landMask, urbanMask, civicMask)
+	parksMask := mask.MinMask(mask.ExtractAlphaMask(parksImg), landPlusUrbanCivic)
+	dc.Capture("16_parks_constrained", "Parks constrained to land+urban+civic", parksMask, 16)
+	parksPainted, err := watercolor.PaintLayerFromMask(parksMask, geojson.LayerParks, params)
+	if err != nil {
+		return fmt.Errorf("failed to paint parks: %w", err)
+	}
+	painted[geojson.LayerParks] = parksPainted
+	dc.Capture("17_painted_parks", "Watercolor-painted parks layer", parksPainted, 17)
+	return nil
 }
 
 // compositeAndWrite composites all painted layers, crops to tile size, and writes the final PNG.

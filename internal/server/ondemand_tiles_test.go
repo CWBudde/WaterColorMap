@@ -40,17 +40,17 @@ func TestParseTilePath(t *testing.T) {
 	// Malformed paths and impossible coordinates are distinguished so the
 	// handlers can answer 404 and 400 respectively.
 	errKind := []struct {
+		wantErr error
 		name    string
 		path    string
-		wantErr error
 	}{
-		{"reject non-png", "/tiles/z5_x1_y2.jpg", tile.ErrCoordsFormat},
-		{"reject other prefix", "/demo/z5_x1_y2.png", tile.ErrCoordsFormat},
-		{"reject trailing garbage", "/tiles/z13_x1_y2JUNK.png", tile.ErrCoordsFormat},
-		{"reject zoom above max", "/tiles/z23_x1_y2.png", tile.ErrCoordsOutOfRange},
-		{"reject x outside grid", "/tiles/z1_x2_y0.png", tile.ErrCoordsOutOfRange},
-		{"reject y outside grid", "/tiles/z0_x0_y1.png", tile.ErrCoordsOutOfRange},
-		{"reject huge coords", "/tiles/z30_x999999999_y1.png", tile.ErrCoordsOutOfRange},
+		{tile.ErrCoordsFormat, "reject non-png", "/tiles/z5_x1_y2.jpg"},
+		{tile.ErrCoordsFormat, "reject other prefix", "/demo/z5_x1_y2.png"},
+		{tile.ErrCoordsFormat, "reject trailing garbage", "/tiles/z13_x1_y2JUNK.png"},
+		{tile.ErrCoordsOutOfRange, "reject zoom above max", "/tiles/z23_x1_y2.png"},
+		{tile.ErrCoordsOutOfRange, "reject x outside grid", "/tiles/z1_x2_y0.png"},
+		{tile.ErrCoordsOutOfRange, "reject y outside grid", "/tiles/z0_x0_y1.png"},
+		{tile.ErrCoordsOutOfRange, "reject huge coords", "/tiles/z30_x999999999_y1.png"},
 	}
 	for _, tt := range errKind {
 		t.Run(tt.name, func(t *testing.T) {

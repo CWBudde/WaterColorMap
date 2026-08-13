@@ -5,8 +5,9 @@ import (
 	"fmt"
 
 	"github.com/cwbudde/go-overpass"
-	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb"
+
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // UnmarshalOverpassJSON decodes an Overpass API JSON response into an overpass.Result.
@@ -27,23 +28,7 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 		return features
 	}
 
-	// Build a set of way IDs that are members of multipolygon relations
-	// Note: We check both embedded Way objects and referenced way IDs
-	memberWayIDs := make(map[int64]bool)
-	for _, rel := range result.Relations {
-		if rel.Tags["type"] == "multipolygon" {
-			for _, member := range rel.Members {
-				if member.Type == "way" {
-					if member.Way != nil {
-						// Embedded way object (from test data or some APIs)
-						memberWayIDs[member.Way.ID] = true
-					}
-					// Note: Real Overpass API doesn't embed way geometry in relations
-					// Member ways must be looked up from result.Ways map during assembly
-				}
-			}
-		}
-	}
+	memberWayIDs := collectMultipolygonMemberWayIDs(result.Relations)
 
 	// Process ways (skip those that are multipolygon members)
 	for _, way := range result.Ways {
@@ -57,25 +42,7 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 			continue
 		}
 
-		switch {
-		case isWater(way.Tags):
-			features.Water = append(features.Water, *feature)
-		case isRiver(way.Tags):
-			features.Rivers = append(features.Rivers, *feature)
-		case isGreen(way.Tags):
-			features.Parks = append(features.Parks, *feature)
-		case isRoad(way.Tags):
-			features.Roads = append(features.Roads, *feature)
-		case isRailroad(way.Tags):
-			features.Railroads = append(features.Railroads, *feature)
-		case isCivic(way.Tags):
-			// Check civic BEFORE building - civic buildings have both amenity=* and building=*
-			features.Civic = append(features.Civic, *feature)
-		case isBuilding(way.Tags):
-			features.Buildings = append(features.Buildings, *feature)
-		case isUrban(way.Tags):
-			features.Urban = append(features.Urban, *feature)
-		}
+		appendWayFeature(&features, way.Tags, feature)
 	}
 
 	// Process relations (mainly for multipolygon water bodies and parks)
@@ -84,7 +51,7 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 
 		// Handle multipolygon relations specially
 		if rel.Tags["type"] == "multipolygon" {
-			feature = convertMultipolygonRelationToFeature(rel, result.Ways)
+			feature = convertMultipolygonRelationToFeature(rel)
 		} else {
 			feature = convertRelationToFeature(rel)
 		}
@@ -93,23 +60,81 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 			continue
 		}
 
-		switch {
-		case isWater(rel.Tags):
-			features.Water = append(features.Water, *feature)
-		case isRiver(rel.Tags):
-			features.Rivers = append(features.Rivers, *feature)
-		case isGreen(rel.Tags):
-			features.Parks = append(features.Parks, *feature)
-		case isCivic(rel.Tags):
-			// Civic campuses (schools, hospitals, universities) are often mapped
-			// as multipolygon relations - classify them before urban landuse.
-			features.Civic = append(features.Civic, *feature)
-		case isUrban(rel.Tags):
-			features.Urban = append(features.Urban, *feature)
-		}
+		appendRelationFeature(&features, rel.Tags, feature)
 	}
 
 	return features
+}
+
+// collectMultipolygonMemberWayIDs returns the set of way IDs that are members of
+// multipolygon relations, so those ways are not emitted a second time on their own.
+//
+// Only members with an embedded *Way are collected. go-overpass's RelationMember
+// carries Type, Node, Way, Relation and Role but no reference ID, so a member the
+// API returned by reference alone cannot be identified here and will not be
+// deduplicated. In practice Overpass does not embed way geometry in relations, so
+// this mainly catches test fixtures and APIs that do embed it.
+func collectMultipolygonMemberWayIDs(relations map[int64]*overpass.Relation) map[int64]bool {
+	memberWayIDs := make(map[int64]bool)
+	for _, rel := range relations {
+		if rel.Tags["type"] != "multipolygon" {
+			continue
+		}
+		for _, member := range rel.Members {
+			if member.Type != "way" {
+				continue
+			}
+			if member.Way != nil {
+				// Embedded way object (from test data or some APIs)
+				memberWayIDs[member.Way.ID] = true
+			}
+			// Note: Real Overpass API doesn't embed way geometry in relations
+			// Member ways must be looked up from result.Ways map during assembly
+		}
+	}
+	return memberWayIDs
+}
+
+// appendWayFeature files a way-derived feature into the matching collection bucket.
+func appendWayFeature(features *types.FeatureCollection, tags map[string]string, feature *types.Feature) {
+	switch {
+	case isWater(tags):
+		features.Water = append(features.Water, *feature)
+	case isRiver(tags):
+		features.Rivers = append(features.Rivers, *feature)
+	case isGreen(tags):
+		features.Parks = append(features.Parks, *feature)
+	case isRoad(tags):
+		features.Roads = append(features.Roads, *feature)
+	case isRailroad(tags):
+		features.Railroads = append(features.Railroads, *feature)
+	case isCivic(tags):
+		// Check civic BEFORE building - civic buildings have both amenity=* and building=*
+		features.Civic = append(features.Civic, *feature)
+	case isBuilding(tags):
+		features.Buildings = append(features.Buildings, *feature)
+	case isUrban(tags):
+		features.Urban = append(features.Urban, *feature)
+	}
+}
+
+// appendRelationFeature files a relation-derived feature into the matching
+// collection bucket. Relations support fewer categories than ways.
+func appendRelationFeature(features *types.FeatureCollection, tags map[string]string, feature *types.Feature) {
+	switch {
+	case isWater(tags):
+		features.Water = append(features.Water, *feature)
+	case isRiver(tags):
+		features.Rivers = append(features.Rivers, *feature)
+	case isGreen(tags):
+		features.Parks = append(features.Parks, *feature)
+	case isCivic(tags):
+		// Civic campuses (schools, hospitals, universities) are often mapped
+		// as multipolygon relations - classify them before urban landuse.
+		features.Civic = append(features.Civic, *feature)
+	case isUrban(tags):
+		features.Urban = append(features.Urban, *feature)
+	}
 }
 
 func convertWayToFeature(way *overpass.Way) *types.Feature {
@@ -168,8 +193,12 @@ func convertRelationToFeature(rel *overpass.Relation) *types.Feature {
 	}
 }
 
-// convertMultipolygonRelationToFeature assembles a multipolygon relation from its member ways
-func convertMultipolygonRelationToFeature(rel *overpass.Relation, ways map[int64]*overpass.Way) *types.Feature {
+// convertMultipolygonRelationToFeature assembles a multipolygon relation from its member ways.
+//
+// Only ways embedded in the relation's members are usable: the go-overpass library
+// does not expose member ref IDs, so ways living solely in result.Ways cannot be
+// looked up and are skipped.
+func convertMultipolygonRelationToFeature(rel *overpass.Relation) *types.Feature {
 	if rel == nil {
 		return nil
 	}

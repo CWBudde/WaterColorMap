@@ -6,106 +6,134 @@ import (
 	"testing"
 )
 
+func validateNoChangeAtWhiteMask(t *testing.T, result color.NRGBA) {
+	t.Helper()
+
+	if result.R != 200 || result.G != 100 || result.B != 50 || result.A != 255 {
+		t.Errorf("expected no change at white mask, got %+v", result)
+	}
+}
+
+func validateMaxDarkeningAtBlackMask(t *testing.T, result color.NRGBA) {
+	t.Helper()
+
+	// Should be significantly darker but preserve hue
+	if result.R >= 200 || result.G >= 100 || result.B >= 50 {
+		t.Errorf("expected darkening at black mask, got %+v", result)
+	}
+
+	if result.A != 255 {
+		t.Errorf("alpha should be preserved, got %d", result.A)
+	}
+	// Check that relative color ratios are maintained (hue preservation)
+	// Original ratio: R:G:B = 4:2:1
+	if result.R == 0 || result.G == 0 {
+		return // Too dark to check ratios
+	}
+
+	ratio := float64(result.R) / float64(result.G)
+	expectedRatio := 200.0 / 100.0
+
+	if ratio < expectedRatio*0.9 || ratio > expectedRatio*1.1 {
+		t.Errorf("hue not preserved: R/G ratio = %.2f, expected ~%.2f", ratio, expectedRatio)
+	}
+}
+
+func validateGrayStaysGray(t *testing.T, result color.NRGBA) {
+	t.Helper()
+
+	// Should remain gray (R=G=B) but darker
+	if result.R != result.G || result.G != result.B {
+		t.Errorf("gray should stay gray, got %+v", result)
+	}
+
+	if result.R >= 128 {
+		t.Errorf("should be darker than original, got %+v", result)
+	}
+}
+
+func validateMidRangeMask(t *testing.T, result color.NRGBA) {
+	t.Helper()
+
+	// Should be somewhat darker but not as much as black mask
+	if result.R >= 200 {
+		t.Errorf("should be somewhat darker, got %+v", result)
+	}
+	// Quadratic falloff: maskVal=128 -> normalized=0.5 -> effect=(1-0.25)*1.0=0.75
+	// So should be significantly darkened
+	if result.R > 100 {
+		t.Errorf("should be significantly darkened with mid mask, got %+v", result)
+	}
+}
+
+func validateReducedStrength(t *testing.T, result color.NRGBA) {
+	t.Helper()
+
+	// Should be darker but less than with strength 1.0
+	if result.R >= 200 {
+		t.Errorf("should be darker, got %+v", result)
+	}
+	// With strength=0.5, effect should be half as strong
+	// So result should be lighter than with strength=1.0
+}
+
+func validateAlphaPreserved(t *testing.T, result color.NRGBA) {
+	t.Helper()
+
+	if result.A != 128 {
+		t.Errorf("alpha should be preserved at 128, got %d", result.A)
+	}
+}
+
 func TestApplySoftEdgeMask(t *testing.T) {
 	tests := []struct {
+		validate func(t *testing.T, result color.NRGBA)
 		name     string
+		strength float64
 		color    color.NRGBA
 		maskVal  uint8
-		strength float64
-		validate func(t *testing.T, result color.NRGBA)
 	}{
 		{
 			name:     "white mask (center) - no change",
 			color:    color.NRGBA{R: 200, G: 100, B: 50, A: 255},
 			maskVal:  255,
 			strength: 1.0,
-			validate: func(t *testing.T, result color.NRGBA) {
-				if result.R != 200 || result.G != 100 || result.B != 50 || result.A != 255 {
-					t.Errorf("expected no change at white mask, got %+v", result)
-				}
-			},
+			validate: validateNoChangeAtWhiteMask,
 		},
 		{
 			name:     "black mask (edge) - maximum darkening",
 			color:    color.NRGBA{R: 200, G: 100, B: 50, A: 255},
 			maskVal:  0,
 			strength: 1.0,
-			validate: func(t *testing.T, result color.NRGBA) {
-				// Should be significantly darker but preserve hue
-				if result.R >= 200 || result.G >= 100 || result.B >= 50 {
-					t.Errorf("expected darkening at black mask, got %+v", result)
-				}
-				if result.A != 255 {
-					t.Errorf("alpha should be preserved, got %d", result.A)
-				}
-				// Check that relative color ratios are maintained (hue preservation)
-				// Original ratio: R:G:B = 4:2:1
-				if result.R == 0 || result.G == 0 {
-					return // Too dark to check ratios
-				}
-				ratio := float64(result.R) / float64(result.G)
-				expectedRatio := 200.0 / 100.0
-				if ratio < expectedRatio*0.9 || ratio > expectedRatio*1.1 {
-					t.Errorf("hue not preserved: R/G ratio = %.2f, expected ~%.2f", ratio, expectedRatio)
-				}
-			},
+			validate: validateMaxDarkeningAtBlackMask,
 		},
 		{
 			name:     "gray color (achromatic)",
 			color:    color.NRGBA{R: 128, G: 128, B: 128, A: 255},
 			maskVal:  0,
 			strength: 1.0,
-			validate: func(t *testing.T, result color.NRGBA) {
-				// Should remain gray (R=G=B) but darker
-				if result.R != result.G || result.G != result.B {
-					t.Errorf("gray should stay gray, got %+v", result)
-				}
-				if result.R >= 128 {
-					t.Errorf("should be darker than original, got %+v", result)
-				}
-			},
+			validate: validateGrayStaysGray,
 		},
 		{
 			name:     "mid-range mask - partial effect",
 			color:    color.NRGBA{R: 200, G: 100, B: 50, A: 255},
 			maskVal:  128,
 			strength: 1.0,
-			validate: func(t *testing.T, result color.NRGBA) {
-				// Should be somewhat darker but not as much as black mask
-				if result.R >= 200 {
-					t.Errorf("should be somewhat darker, got %+v", result)
-				}
-				// Quadratic falloff: maskVal=128 -> normalized=0.5 -> effect=(1-0.25)*1.0=0.75
-				// So should be significantly darkened
-				if result.R > 100 {
-					t.Errorf("should be significantly darkened with mid mask, got %+v", result)
-				}
-			},
+			validate: validateMidRangeMask,
 		},
 		{
 			name:     "strength 0.5 reduces effect",
 			color:    color.NRGBA{R: 200, G: 100, B: 50, A: 255},
 			maskVal:  0,
 			strength: 0.5,
-			validate: func(t *testing.T, result color.NRGBA) {
-				// Should be darker but less than with strength 1.0
-				if result.R >= 200 {
-					t.Errorf("should be darker, got %+v", result)
-				}
-				// With strength=0.5, effect should be half as strong
-				// So result should be lighter than with strength=1.0
-			},
+			validate: validateReducedStrength,
 		},
 		{
 			name:     "alpha preservation",
 			color:    color.NRGBA{R: 200, G: 100, B: 50, A: 128},
 			maskVal:  0,
 			strength: 1.0,
-			validate: func(t *testing.T, result color.NRGBA) {
-				if result.A != 128 {
-					t.Errorf("alpha should be preserved at 128, got %d", result.A)
-				}
-			},
+			validate: validateAlphaPreserved,
 		},
 	}
 

@@ -24,7 +24,9 @@ func LoadDefaultTextures(dir string) (map[geojson.LayerType]image.Image, error) 
 		}
 
 		img, _, err := image.Decode(file)
-		file.Close()
+		if cerr := file.Close(); cerr != nil && err == nil {
+			return nil, fmt.Errorf("failed to close texture %s: %w", path, cerr)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode texture %s: %w", path, err)
 		}

@@ -16,7 +16,7 @@ on:
       - .github/workflows/wasm-deploy.yml
   workflow_dispatch:
   schedule:
-    - cron: 0 2 * * 0  # Weekly on Sunday at 2 AM UTC
+    - cron: 0 2 * * 0 # Weekly on Sunday at 2 AM UTC
 
 permissions:
   contents: read
@@ -38,7 +38,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: "1.25"
 
       - name: Build WASM
         run: |
@@ -57,8 +57,13 @@ jobs:
             python3-mapnik
 
       - name: Build watercolormap binary
+        # Link-time Mapnik paths: go-mapnik defaults to /usr/local/lib/mapnik/{fonts,input},
+        # which does not exist on the runner, so without these the tiles generated below
+        # render with no fonts and no input plugins registered.
         run: |
-          go build -o ./bin/watercolormap ./cmd/watercolormap
+          go build \
+            -ldflags "-X github.com/omniscale/go-mapnik/v2.fontPath=$(mapnik-config --fonts) -X github.com/omniscale/go-mapnik/v2.pluginPath=$(mapnik-config --input-plugins)" \
+            -o ./bin/watercolormap ./cmd/watercolormap
 
       - name: Generate static tiles
         run: |
@@ -86,7 +91,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: 'docs/wasm-playground'
+          path: "docs/wasm-playground"
 
   deploy:
     needs: build

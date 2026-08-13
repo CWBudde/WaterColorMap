@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -50,21 +51,18 @@ func New(path string, metadata Metadata) (*Writer, error) {
 	}
 	for _, pragma := range pragmas {
 		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to set pragma %q: %w", pragma, err)
+			return nil, errors.Join(fmt.Errorf("failed to set pragma %q: %w", pragma, err), db.Close())
 		}
 	}
 
 	// Create schema
 	if err := createSchema(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create schema: %w", err)
+		return nil, errors.Join(fmt.Errorf("failed to create schema: %w", err), db.Close())
 	}
 
 	// Insert metadata
 	if err := insertMetadata(db, metadata); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to insert metadata: %w", err)
+		return nil, errors.Join(fmt.Errorf("failed to insert metadata: %w", err), db.Close())
 	}
 
 	return &Writer{
@@ -102,7 +100,7 @@ func createSchema(db *sql.DB) error {
 }
 
 // insertMetadata inserts metadata into the database.
-func insertMetadata(db *sql.DB, meta Metadata) error {
+func insertMetadata(db *sql.DB, meta Metadata) (err error) {
 	// Clear existing metadata
 	if _, err := db.Exec("DELETE FROM metadata"); err != nil {
 		return fmt.Errorf("failed to clear metadata: %w", err)
@@ -112,7 +110,11 @@ func insertMetadata(db *sql.DB, meta Metadata) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare metadata insert: %w", err)
 	}
-	defer stmt.Close()
+	defer func() {
+		if closeErr := stmt.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to close metadata insert statement: %w", closeErr)
+		}
+	}()
 
 	metadata := meta.ToMap()
 
@@ -153,7 +155,7 @@ func (w *Writer) Flush() error {
 }
 
 // flushLocked writes buffered tiles to the database. Must be called with lock held.
-func (w *Writer) flushLocked() error {
+func (w *Writer) flushLocked() (err error) {
 	if len(w.batch) == 0 {
 		return nil
 	}
@@ -168,7 +170,11 @@ func (w *Writer) flushLocked() error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert: %w", err)
 	}
-	defer stmt.Close()
+	defer func() {
+		if closeErr := stmt.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to close tile insert statement: %w", closeErr)
+		}
+	}()
 
 	for _, tile := range w.batch {
 		// Convert XYZ to TMS coordinates
@@ -196,8 +202,7 @@ func (w *Writer) flushLocked() error {
 // Close flushes any remaining tiles and closes the database.
 func (w *Writer) Close() error {
 	if err := w.Flush(); err != nil {
-		w.db.Close()
-		return err
+		return errors.Join(err, w.db.Close())
 	}
 
 	if err := w.db.Close(); err != nil {
@@ -213,8 +218,7 @@ func gzipCompress(data []byte) ([]byte, error) {
 	gw := gzip.NewWriter(&buf)
 
 	if _, err := gw.Write(data); err != nil {
-		gw.Close()
-		return nil, err
+		return nil, errors.Join(err, gw.Close())
 	}
 
 	if err := gw.Close(); err != nil {

@@ -4,8 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb/geojson"
+
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // LayerType represents the different map layers we render
@@ -104,7 +105,11 @@ func GetLayerFeatures(fc types.FeatureCollection, layer LayerType) []types.Featu
 		// We keep this as a view rather than adding a separate collection bucket.
 		out := make([]types.Feature, 0, len(fc.Roads))
 		for _, f := range fc.Roads {
-			hw, _ := f.Properties["highway"].(string)
+			hw, isString := f.Properties["highway"].(string)
+			if !isString {
+				continue
+			}
+
 			switch hw {
 			case "motorway", "motorway_link", "trunk", "trunk_link", "primary", "primary_link", "secondary", "secondary_link":
 				out = append(out, f)

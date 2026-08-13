@@ -11,8 +11,9 @@ import (
 	"math"
 	"os"
 
-	"github.com/cwbudde/watercolormap/internal/types"
 	mapnik "github.com/omniscale/go-mapnik/v2"
+
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // MapnikRenderer wraps Mapnik for tile rendering
