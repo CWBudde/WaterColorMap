@@ -18,18 +18,33 @@ type OverpassConfig struct {
 	Workers int
 	// RetryConfig configures retry behavior with exponential backoff
 	RetryConfig *overpass.RetryConfig
-	// HTTPClient allows custom HTTP client (default: http.DefaultClient)
+	// HTTPClient allows custom HTTP client (default: a client with Timeout set)
 	HTTPClient *http.Client
+	// MaxResponseBytes caps a single Overpass response body. Zero means
+	// "unset" and is defaulted to DefaultMaxResponseBytes; a negative value
+	// is an explicit opt-out that disables the cap.
+	MaxResponseBytes int64
+}
+
+// defaultHTTPTimeout bounds a single Overpass request. http.DefaultClient has
+// no timeout at all, so a hung upstream previously pinned a fetch worker
+// indefinitely — and with only two workers by default, two hung requests
+// stalled all tile generation.
+const defaultHTTPTimeout = 3 * time.Minute
+
+func defaultHTTPClient() *http.Client {
+	return &http.Client{Timeout: defaultHTTPTimeout}
 }
 
 // DefaultOverpassConfig returns sensible defaults for public Overpass API.
 func DefaultOverpassConfig() OverpassConfig {
 	retryConfig := overpass.DefaultRetryConfig()
 	return OverpassConfig{
-		Endpoint:    "https://overpass-api.de/api/interpreter",
-		Workers:     2,
-		RetryConfig: &retryConfig,
-		HTTPClient:  http.DefaultClient,
+		Endpoint:         "https://overpass-api.de/api/interpreter",
+		Workers:          2,
+		RetryConfig:      &retryConfig,
+		HTTPClient:       defaultHTTPClient(),
+		MaxResponseBytes: DefaultMaxResponseBytes,
 	}
 }
 
@@ -46,7 +61,8 @@ func PrivateInstanceConfig(endpoint string) OverpassConfig {
 			BackoffMultiplier: 1.5,
 			Jitter:            true, // Prevents thundering herd
 		},
-		HTTPClient: http.DefaultClient,
+		HTTPClient:       defaultHTTPClient(),
+		MaxResponseBytes: DefaultMaxResponseBytes,
 	}
 }
 
@@ -87,8 +103,15 @@ func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 		cfg.Workers = 2
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = http.DefaultClient
+		cfg.HTTPClient = defaultHTTPClient()
 	}
+	// An omitted cap must not mean "unbounded": callers that build an
+	// OverpassConfig literal (the multi-server path does) would otherwise lose
+	// the OOM protection silently. Opting out stays possible via a negative value.
+	if cfg.MaxResponseBytes == 0 {
+		cfg.MaxResponseBytes = DefaultMaxResponseBytes
+	}
+	httpClient := withResponseLimit(cfg.HTTPClient, cfg.MaxResponseBytes)
 
 	var client overpass.Client
 	if cfg.RetryConfig != nil {
@@ -96,7 +119,7 @@ func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 		client = overpass.NewWithRetry(
 			cfg.Endpoint,
 			cfg.Workers,
-			cfg.HTTPClient,
+			httpClient,
 			*cfg.RetryConfig,
 		)
 	} else {
@@ -104,7 +127,7 @@ func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 		client = overpass.NewWithSettings(
 			cfg.Endpoint,
 			cfg.Workers,
-			cfg.HTTPClient,
+			httpClient,
 		)
 	}
 
@@ -150,8 +173,10 @@ func (ds *OverpassDataSource) FetchTileDataWithBounds(ctx context.Context, tile 
 	// Build Overpass QL query with zoom-based filtering
 	query := ds.buildTileQuery(bounds, tile.Zoom)
 
-	// Execute query (note: this version doesn't support context)
-	result, err := ds.client.Query(query)
+	// Execute the query under the caller's context, so a cancelled or
+	// timed-out request actually aborts the in-flight Overpass fetch instead
+	// of pinning a fetch worker until the upstream answers.
+	result, err := ds.client.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("overpass query failed: %w", err)
 	}
@@ -509,6 +534,10 @@ type ServerConfig struct {
 	RetryConfig *overpass.RetryConfig
 	// HTTPClient allows custom HTTP client
 	HTTPClient *http.Client
+	// MaxResponseBytes caps a single Overpass response body. Zero means
+	// "unset" and is defaulted to DefaultMaxResponseBytes; a negative value
+	// disables the cap.
+	MaxResponseBytes int64
 	// Coverage defines the geographic area this server covers (nil = covers everything)
 	Coverage *types.BoundingBox
 	// Name is an optional human-readable name for logging (e.g., "Niedersachsen", "Public")
@@ -553,10 +582,11 @@ func NewMultiOverpassDataSource(configs ...ServerConfig) *MultiOverpassDataSourc
 	for _, cfg := range configs {
 		// Build OverpassConfig from ServerConfig
 		ovConfig := OverpassConfig{
-			Endpoint:    cfg.Endpoint,
-			Workers:     cfg.Workers,
-			RetryConfig: cfg.RetryConfig,
-			HTTPClient:  cfg.HTTPClient,
+			Endpoint:         cfg.Endpoint,
+			Workers:          cfg.Workers,
+			RetryConfig:      cfg.RetryConfig,
+			HTTPClient:       cfg.HTTPClient,
+			MaxResponseBytes: cfg.MaxResponseBytes,
 		}
 
 		// Apply defaults if needed
