@@ -145,6 +145,43 @@ func TestPool_ErrorHandling(t *testing.T) {
 	}
 }
 
+// makeTasks builds n distinct tasks.
+func makeTasks(n int) []Task {
+	tasks := make([]Task, n)
+	for i := range tasks {
+		tasks[i] = Task{Coords: tile.NewCoords(13, 4297+uint32(i), 2754)}
+	}
+
+	return tasks
+}
+
+// assertOneResultPerTask verifies the core Run contract: exactly one Result per
+// input task, no drops and no duplicates.
+func assertOneResultPerTask(t *testing.T, tasks []Task, results []Result) {
+	t.Helper()
+
+	if len(results) != len(tasks) {
+		t.Fatalf("Expected %d results, got %d", len(tasks), len(results))
+	}
+
+	seen := make(map[string]int, len(tasks))
+	for _, r := range results {
+		seen[r.Task.Coords.String()]++
+	}
+
+	for _, task := range tasks {
+		key := task.Coords.String()
+		if seen[key] != 1 {
+			t.Errorf("Expected exactly 1 result for %s, got %d", key, seen[key])
+		}
+		delete(seen, key)
+	}
+
+	for key, count := range seen {
+		t.Errorf("Unexpected result for unknown task %s (%d times)", key, count)
+	}
+}
+
 func TestPool_Cancellation(t *testing.T) {
 	gen := &mockGenerator{delay: 100 * time.Millisecond}
 
@@ -153,10 +190,7 @@ func TestPool_Cancellation(t *testing.T) {
 		Generator: gen,
 	})
 
-	tasks := make([]Task, 10)
-	for i := range tasks {
-		tasks[i] = Task{Coords: tile.NewCoords(13, 4297+uint32(i), 2754)}
-	}
+	tasks := makeTasks(10)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -175,7 +209,10 @@ func TestPool_Cancellation(t *testing.T) {
 		t.Errorf("Expected early cancellation, took %v", elapsed)
 	}
 
-	// Some results may have errors due to cancellation
+	// Cancellation must not change the number of results: every task yields
+	// exactly one Result, successful or cancelled.
+	assertOneResultPerTask(t, tasks, results)
+
 	var cancelledCount int
 	for _, r := range results {
 		if r.Err != nil && errors.Is(r.Err, context.Canceled) {
@@ -183,7 +220,49 @@ func TestPool_Cancellation(t *testing.T) {
 		}
 	}
 
+	if cancelledCount == 0 {
+		t.Errorf("Expected at least one cancelled result, got none")
+	}
+
 	t.Logf("Completed with %d results (%d cancelled) in %v", len(results), cancelledCount, elapsed)
+}
+
+func TestPool_CancelledBeforeRun(t *testing.T) {
+	tests := []struct {
+		name      string
+		workers   int
+		taskCount int
+	}{
+		{name: "single worker", workers: 1, taskCount: 5},
+		{name: "more workers than tasks", workers: 8, taskCount: 3},
+		{name: "many tasks", workers: 4, taskCount: 64},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gen := &mockGenerator{delay: 10 * time.Millisecond}
+
+			pool := New(Config{
+				Workers:   tt.workers,
+				Generator: gen,
+			})
+
+			tasks := makeTasks(tt.taskCount)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			results := pool.Run(ctx, tasks)
+
+			assertOneResultPerTask(t, tasks, results)
+
+			for _, r := range results {
+				if !errors.Is(r.Err, context.Canceled) {
+					t.Errorf("Expected context.Canceled for %s, got %v", r.Task.Coords.String(), r.Err)
+				}
+			}
+		})
+	}
 }
 
 func TestPool_ProgressCallback(t *testing.T) {
