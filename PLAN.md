@@ -688,10 +688,15 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
 
 ### 7.2 Security & robustness of the tile server (P0/P1 — not internet-safe)
 
-- [ ] **[P0]** Validate tile coordinates at parse time (`tile/coords.go:106` `ParseCoords`): enforce
-  `z ≤ 22` and `x,y < 2^z`, reject with 400. Without this, `serveTile` (`server/ondemand_tiles.go`)
-  will fetch+render+cache for **any** coordinate → trivial DoS that also gets the server IP-banned
-  by the public Overpass endpoint, and fills disk unbounded.
+- [x] **[P0]** Validate tile coordinates at parse time (`tile/coords.go` `ParseCoords`): added
+  `MaxZoom = 22` plus a `Coords.Validate()` enforcing `z ≤ 22` and `x,y < 2^z`, with distinct
+  sentinels `ErrCoordsFormat` / `ErrCoordsOutOfRange` so handlers can answer 404 vs **400**.
+  `parseTilePath` now returns the error instead of swallowing it into a bool, and both tile backends
+  map it via the shared `writeTilePathError`. Also found that `fmt.Sscanf` silently ignores trailing
+  input, so `z13_x1_y2JUNK` parsed cleanly — closed with a `c.String() != s` round-trip check (which
+  also rejects zero-padded aliases like `z013_x1_y2` that would have split the disk cache).
+  Deleted the dead duplicate `parseTilePathMBTiles`, and moved the MBTiles `Content-Type: image/png`
+  below its error branch so 404 bodies are no longer served as PNG.
 - [ ] **[P0]** Add `recover()` to background workers — `fetch_queue.go:190`, `ondemand_tiles.go:158,522`
   run in bare goroutines with no panic recovery; one malformed Overpass response crashes the whole
   process (net/http only recovers handler goroutines).
