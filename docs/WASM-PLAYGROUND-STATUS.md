@@ -119,7 +119,7 @@ $ just build-wasm-local
 
 ```bash
 $ go build -v ./cmd/watercolormap
-github.com/MeKo-Tech/watercolormap/cmd/watercolormap
+github.com/cwbudde/watercolormap/cmd/watercolormap
 ```
 
 - Main program still compiles

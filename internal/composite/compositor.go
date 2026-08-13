@@ -14,9 +14,11 @@ var DefaultOrder = []geojson.LayerType{
 	geojson.LayerWater,
 	geojson.LayerLand,
 	geojson.LayerParks,
-	geojson.LayerUrban,     // Civic areas (lighter lavender)
+	geojson.LayerUrban,     // Urban landuse areas (lighter lavender)
+	geojson.LayerCivic,     // Civic areas (schools, hospitals, universities)
 	geojson.LayerBuildings, // Buildings on top of urban (darker lavender)
 	geojson.LayerRoads,
+	geojson.LayerRailroads,
 	geojson.LayerHighways,
 }
 

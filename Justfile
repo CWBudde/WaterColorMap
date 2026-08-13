@@ -16,7 +16,7 @@ build:
 
 # Build with version information
 build-release version:
-    CGO_ENABLED=1 go build -ldflags "-X github.com/MeKo-Tech/watercolormap/internal/cmd.version={{version}} -X github.com/MeKo-Tech/watercolormap/internal/cmd.commit=$(git rev-parse HEAD) -X github.com/MeKo-Tech/watercolormap/internal/cmd.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/watercolormap ./cmd/watercolormap
+    CGO_ENABLED=1 go build -ldflags "-X github.com/cwbudde/watercolormap/internal/cmd.version={{version}} -X github.com/cwbudde/watercolormap/internal/cmd.commit=$(git rev-parse HEAD) -X github.com/cwbudde/watercolormap/internal/cmd.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/watercolormap ./cmd/watercolormap
 
 # Run the application
 run *args:

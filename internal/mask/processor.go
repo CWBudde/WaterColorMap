@@ -125,10 +125,11 @@ func SubtractMask(a, b *image.Gray) *image.Gray {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			av := int(a.GrayAt(x, y).Y)
 			bv := int(b.GrayAt(x, y).Y)
-			// Subtract: where b is opaque, result is transparent
-			result := av - bv
-			if result < 0 {
-				result = 0
+			// AND NOT: where b is opaque, result is transparent; partial
+			// coverage in b caps a instead of eroding it by the full amount.
+			result := av
+			if inv := 255 - bv; inv < result {
+				result = inv
 			}
 			out.SetGray(x, y, color.Gray{Y: uint8(result)})
 		}

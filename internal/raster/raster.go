@@ -44,6 +44,7 @@ func (r *Renderer) RenderLayers(fc types.FeatureCollection) map[geojson.LayerTyp
 	civic := image.NewNRGBA(b)
 	buildings := image.NewNRGBA(b)
 	roads := image.NewNRGBA(b)
+	railroads := image.NewNRGBA(b)
 	highways := image.NewNRGBA(b)
 
 	// Water polygons (lakes, ponds, coastlines)
@@ -92,6 +93,11 @@ func (r *Renderer) RenderLayers(fc types.FeatureCollection) map[geojson.LayerTyp
 		}
 	}
 
+	// Railway lines (rail, light_rail, subway, tram)
+	for i := range fc.Railroads {
+		r.renderFeature(railroads, &fc.Railroads[i], r.getRailroadStrokeWidth())
+	}
+
 	return map[geojson.LayerType]*image.NRGBA{
 		geojson.LayerWater:     water,
 		geojson.LayerRivers:    rivers,
@@ -100,6 +106,7 @@ func (r *Renderer) RenderLayers(fc types.FeatureCollection) map[geojson.LayerTyp
 		geojson.LayerCivic:     civic,
 		geojson.LayerBuildings: buildings,
 		geojson.LayerRoads:     roads,
+		geojson.LayerRailroads: railroads,
 		geojson.LayerHighways:  highways,
 	}
 }
@@ -187,6 +194,19 @@ func (r *Renderer) getRoadStrokeWidth() int {
 		return 2 // Medium-high zoom
 	default:
 		return 3 // High zoom (original width)
+	}
+}
+
+// getRailroadStrokeWidth returns the stroke width for railway lines based on zoom level.
+// Railroads are rendered slightly thinner than regular roads.
+func (r *Renderer) getRailroadStrokeWidth() int {
+	switch {
+	case r.zoom <= 11:
+		return 1 // Minimum visibility at low zoom
+	case r.zoom <= 15:
+		return 2 // Medium and medium-high zoom
+	default:
+		return 3 // High zoom
 	}
 }
 

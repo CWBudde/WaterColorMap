@@ -464,15 +464,24 @@ func (ds *OverpassDataSource) buildBuildingsQuery(bbox string, zoom int) []strin
 	}
 
 	// Civic buildings - z14+ (as areas at z14-15, as buildings at z16+)
+	// Campuses (schools, hospitals, universities) are frequently mapped as
+	// multipolygon relations, so query relations alongside ways.
 	if zoom >= 14 {
 		parts = append(parts,
 			fmt.Sprintf(`way["amenity"="school"](%s);`, bbox),
+			fmt.Sprintf(`relation["amenity"="school"](%s);`, bbox),
 			fmt.Sprintf(`way["amenity"="hospital"](%s);`, bbox),
+			fmt.Sprintf(`relation["amenity"="hospital"](%s);`, bbox),
 			fmt.Sprintf(`way["amenity"="university"](%s);`, bbox),
+			fmt.Sprintf(`relation["amenity"="university"](%s);`, bbox),
 			fmt.Sprintf(`way["amenity"="college"](%s);`, bbox),
+			fmt.Sprintf(`relation["amenity"="college"](%s);`, bbox),
 			fmt.Sprintf(`way["amenity"="library"](%s);`, bbox),
+			fmt.Sprintf(`relation["amenity"="library"](%s);`, bbox),
 			fmt.Sprintf(`way["amenity"="town_hall"](%s);`, bbox),
+			fmt.Sprintf(`relation["amenity"="town_hall"](%s);`, bbox),
 			fmt.Sprintf(`way["leisure"="stadium"](%s);`, bbox),
+			fmt.Sprintf(`relation["leisure"="stadium"](%s);`, bbox),
 		)
 	}
 
@@ -659,7 +668,8 @@ var ErrEmptyOverpassResponse = fmt.Errorf("overpass returned empty response")
 func validateFeatureResponse(features types.FeatureCollection, zoom int) error {
 	// Count all features including rivers
 	totalFeatures := len(features.Water) + len(features.Rivers) + len(features.Parks) +
-		len(features.Roads) + len(features.Buildings) + len(features.Urban) + len(features.Civic)
+		len(features.Roads) + len(features.Railroads) + len(features.Buildings) +
+		len(features.Urban) + len(features.Civic)
 
 	// At zoom 8-13, if we have ZERO features of any kind, it's suspicious.
 	// Real land tiles should have at least forests, parks, water, or roads.

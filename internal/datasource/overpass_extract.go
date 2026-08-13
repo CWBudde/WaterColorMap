@@ -100,6 +100,12 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 			features.Rivers = append(features.Rivers, *feature)
 		case isGreen(rel.Tags):
 			features.Parks = append(features.Parks, *feature)
+		case isCivic(rel.Tags):
+			// Civic campuses (schools, hospitals, universities) are often mapped
+			// as multipolygon relations - classify them before urban landuse.
+			features.Civic = append(features.Civic, *feature)
+		case isUrban(rel.Tags):
+			features.Urban = append(features.Urban, *feature)
 		}
 	}
 

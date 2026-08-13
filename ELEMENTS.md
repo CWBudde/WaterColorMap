@@ -8,13 +8,15 @@ This document provides a comprehensive breakdown of all rendering elements acros
 
 1. **Paper** - White textured base layer
 2. **Land** - Tan/beige background (`#C4A574`)
-3. **Parks** - Green spaces rendered in pure green (`#00FF00`)
-4. **Rivers** - Waterways rendered in pure blue (`#0000FF`)
-5. **Water** - Water bodies rendered in pure blue (`#0000FF`)
-6. **Roads** - Secondary roads in white (`#FFFFFF`)
-7. **Highways** - Major roads in yellow (`#FFFF00`)
-8. **Urban** - Urban landuse areas (residential/commercial/industrial) and civic buildings in lilac (`#C080C0`)
-9. **Buildings** - Individual building footprints in darker lilac (`#A060A0`)
+3. **Urban** - Urban landuse areas (residential/commercial/industrial/retail) in lilac (`#C080C0`)
+4. **Civic** - Civic areas (schools, hospitals, universities, libraries, town halls, stadiums) in lilac (`#C080C0`)
+5. **Parks** - Green spaces rendered in pure green (`#00FF00`)
+6. **Rivers** - Waterways rendered in pure blue (`#0000FF`)
+7. **Water** - Water bodies rendered in pure blue (`#0000FF`)
+8. **Roads** - Secondary roads in white (`#FFFFFF`)
+9. **Railroads** - Railway lines in white (`#FFFFFF`)
+10. **Highways** - Major roads in yellow (`#FFFF00`)
+11. **Buildings** - Individual building footprints in darker lilac (`#A060A0`)
 
 ### Mask Colors (Before Watercolor Processing)
 
@@ -22,8 +24,10 @@ This document provides a comprehensive breakdown of all rendering elements acros
 - **Water/Rivers**: `#0000FF` (pure blue)
 - **Parks**: `#00FF00` (pure green)
 - **Roads**: `#FFFFFF` (pure white)
+- **Railroads**: `#FFFFFF` (pure white) - railway lines
 - **Highways**: `#FFFF00` (pure yellow)
-- **Urban**: `#C080C0` (lighter lilac) - includes landuse areas and civic buildings
+- **Urban**: `#C080C0` (lighter lilac) - landuse areas only
+- **Civic**: `#C080C0` (lighter lilac) - civic areas, own layer/texture
 - **Buildings**: `#A060A0` (darker lilac) - individual building footprints
 
 ---
@@ -65,6 +69,14 @@ This document provides a comprehensive breakdown of all rendering elements acros
 
 - ❌ No urban areas at z5-7
 
+### Civic Areas
+
+- ❌ No civic areas at z5-7
+
+### Railroads
+
+- ❌ No railroads at z5-8
+
 ### Buildings
 
 - ❌ No individual buildings at z5-7
@@ -104,6 +116,14 @@ This document provides a comprehensive breakdown of all rendering elements acros
 
 - ❌ No urban areas at z8-9
 
+### Civic Areas
+
+- ❌ No civic areas at z8-9
+
+### Railroads
+
+- ✅ **z9+**: Main rail lines (`railway=rail`)
+
 ### Buildings
 
 - ❌ No buildings at z8-9
@@ -142,8 +162,15 @@ This document provides a comprehensive breakdown of all rendering elements acros
 ### Urban Areas
 
 - ✅ **z11+**: Urban landuse areas (residential, commercial, industrial, retail)
-- ✅ **z11+**: Civic buildings (schools, hospitals, universities, libraries, town halls)
 - Helps identify towns and built-up areas
+
+### Civic Areas
+
+- ❌ Civic areas not shown until z14+
+
+### Railroads
+
+- ✅ Main rail lines (`railway=rail`)
 
 ### Buildings
 
@@ -184,7 +211,14 @@ This document provides a comprehensive breakdown of all rendering elements acros
 ### Urban Areas
 
 - ✅ Urban landuse areas (residential, commercial, industrial, retail)
-- ✅ Civic buildings (schools, hospitals, universities, libraries, town halls)
+
+### Civic Areas
+
+- ❌ Civic areas not shown until z14+
+
+### Railroads
+
+- ✅ Main rail lines (`railway=rail`)
 
 ### Buildings
 
@@ -226,7 +260,14 @@ This document provides a comprehensive breakdown of all rendering elements acros
 ### Urban Areas
 
 - ✅ Urban landuse areas (residential, commercial, industrial, retail)
-- ✅ Civic buildings (schools, hospitals, universities, libraries, town halls)
+
+### Civic Areas
+
+- ❌ Civic areas not shown until z14+
+
+### Railroads
+
+- ✅ Main rail lines (`railway=rail`)
 
 ### Buildings
 
@@ -272,7 +313,14 @@ This document provides a comprehensive breakdown of all rendering elements acros
 ### Urban Areas
 
 - ✅ Urban landuse areas (residential, commercial, industrial, retail)
-- ✅ Civic buildings (schools, hospitals, universities, libraries, town halls)
+
+### Civic Areas
+
+- ✅ Civic areas (schools, hospitals, universities, colleges, libraries, town halls, stadiums)
+
+### Railroads
+
+- ✅ Main rail lines (`railway=rail`)
 
 ### Buildings
 
@@ -320,7 +368,14 @@ This document provides a comprehensive breakdown of all rendering elements acros
 ### Urban Areas
 
 - ✅ Urban landuse areas (residential, commercial, industrial, retail)
-- ✅ Civic buildings (schools, hospitals, universities, libraries, town halls)
+
+### Civic Areas
+
+- ✅ Civic areas (schools, hospitals, universities, colleges, libraries, town halls, stadiums)
+
+### Railroads
+
+- ✅ Main rail lines (`railway=rail`)
 
 ### Buildings
 
@@ -365,8 +420,16 @@ This document provides a comprehensive breakdown of all rendering elements acros
 
 ### Urban Areas
 
-- ✅ Urban landuse areas (residential, commercial, industrial, retail)
-- ✅ Civic buildings (schools, hospitals, universities, libraries, town halls)
+- ❌ Urban landuse areas not queried at z16+ (individual buildings replace them)
+
+### Civic Areas
+
+- ✅ Civic areas (schools, hospitals, universities, colleges, libraries, town halls, stadiums)
+
+### Railroads
+
+- ✅ Main rail lines (`railway=rail`)
+- ✅ Light rail (`railway=light_rail`)
 
 ### Buildings
 
@@ -411,8 +474,17 @@ This document provides a comprehensive breakdown of all rendering elements acros
 
 ### Urban Areas
 
-- ✅ Urban landuse areas (residential, commercial, industrial, retail)
-- ✅ Civic buildings (schools, hospitals, universities, libraries, town halls)
+- ❌ Urban landuse areas not queried at z16+ (individual buildings replace them)
+
+### Civic Areas
+
+- ✅ Civic areas (schools, hospitals, universities, colleges, libraries, town halls, stadiums)
+
+### Railroads
+
+- ✅ Main rail lines (`railway=rail`)
+- ✅ Light rail (`railway=light_rail`)
+- ✅ Subway and tram (`railway=subway`, `railway=tram`)
 
 ### Buildings
 
@@ -457,8 +529,17 @@ This document provides a comprehensive breakdown of all rendering elements acros
 
 ### Urban Areas
 
-- ✅ Urban landuse areas (residential, commercial, industrial, retail)
-- ✅ Civic buildings (schools, hospitals, universities, libraries, town halls)
+- ❌ Urban landuse areas not queried at z16+ (individual buildings replace them)
+
+### Civic Areas
+
+- ✅ Civic areas (schools, hospitals, universities, colleges, libraries, town halls, stadiums)
+
+### Railroads
+
+- ✅ Main rail lines (`railway=rail`)
+- ✅ Light rail (`railway=light_rail`)
+- ✅ Subway and tram (`railway=subway`, `railway=tram`)
 
 ### Buildings
 
@@ -503,8 +584,17 @@ This document provides a comprehensive breakdown of all rendering elements acros
 
 ### Urban Areas
 
-- ✅ Urban landuse areas (residential, commercial, industrial, retail)
-- ✅ Civic buildings (schools, hospitals, universities, libraries, town halls)
+- ❌ Urban landuse areas not queried at z16+ (individual buildings replace them)
+
+### Civic Areas
+
+- ✅ Civic areas (schools, hospitals, universities, colleges, libraries, town halls, stadiums)
+
+### Railroads
+
+- ✅ Main rail lines (`railway=rail`)
+- ✅ Light rail (`railway=light_rail`)
+- ✅ Subway and tram (`railway=subway`, `railway=tram`)
 
 ### Buildings
 
@@ -558,12 +648,13 @@ This document provides a comprehensive breakdown of all rendering elements acros
   - `rivers.xml` - Rivers and streams (blue)
   - `parks.xml` - Green spaces (green)
   - `roads.xml` - Secondary roads (white)
+  - `railroads.xml` - Railway lines (white)
   - `highways.xml` - Major roads (yellow)
   - `buildings.xml` - Individual buildings (darker lilac)
   - `civic.xml` - Civic areas (lighter lilac)
 
 - **Pipeline Processing**: `internal/pipeline/generator.go`
-  - Compositing order: Land → Parks → Rivers → Water → Roads → Highways → Buildings → Civic
+  - Compositing order: Land → Urban → Civic → Parks → Rivers → Water → Roads → Railroads → Highways → Buildings
 
 - **Watercolor Effects**: `internal/watercolor/processor.go`
   - Inset shadow effects

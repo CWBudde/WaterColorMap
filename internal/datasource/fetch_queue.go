@@ -297,6 +297,7 @@ func estimateDataSize(data *types.TileData) int64 {
 	featureCount := len(data.Features.Water) +
 		len(data.Features.Rivers) +
 		len(data.Features.Roads) +
+		len(data.Features.Railroads) +
 		len(data.Features.Parks) +
 		len(data.Features.Buildings) +
 		len(data.Features.Urban) +
