@@ -784,10 +784,15 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
       reuse, then corrupting), and because `EnsureCapacity` grows but never shrinks while the result bounds
       are read back off the buffers, an oversized pooled context would have returned an oversized image —
       such contexts are now dropped instead of reused. (PR #19)
-- [x] **[P2]** `worker/pool.go` `break` inside `select` — already fixed during the 7.1 lint cleanup (PR #10,
-      commit `cc7acca`). The cancellation case is now deliberately empty with a comment explaining why:
-      `taskCh` is buffered to `len(tasks)`, so a send is always ready and exiting the loop early would change
-      how many `Result`s a cancelled run returns.
+- [x] **[P2]** `worker/pool.go` `break` inside `select` — the lint finding (staticcheck SA4011) was removed
+      during the 7.1 lint cleanup (PR #10, commit `cc7acca`): the `break` never left the feeder loop, so it
+      was deleted without changing behaviour. What was **not** fixed is the cancellation semantics behind it.
+      `taskCh` is buffered to `len(tasks)`, so a send is always ready; once `ctx` is done both `select` arms
+      are ready and Go picks at random, which means a cancelled run still drops an arbitrary subset of the
+      remaining tasks and returns a nondeterministic number of `Result`s. The empty cancellation arm now
+      documents that behaviour instead of hiding it. A real fix (deciding whether a cancelled run should
+      report a cancellation `Result` per unfed task or stop feeding deterministically) is still open and is
+      tracked separately — this item covers the lint cleanup only.
 - [x] **[P2]** Consolidated duplicated Web-Mercator math — there were six implementations, not the three the
       review found: forward in `tile/coords.go`, `renderer/mapnik.go` and `raster/raster.go`, plus two
       different inverses (`tile.mercatorToLonLat`, and `types.mercatorToLat` via `Sinh`) and an unshared clamp
