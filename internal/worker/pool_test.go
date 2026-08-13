@@ -17,7 +17,7 @@ type mockGenerator struct {
 	callCount atomic.Int32
 }
 
-func (m *mockGenerator) Generate(ctx context.Context, coords tile.Coords, force bool, suffix string, debugCtx interface{}) (string, string, error) {
+func (m *mockGenerator) Generate(ctx context.Context, coords tile.Coords, force bool, suffix string) (string, string, error) {
 	m.callCount.Add(1)
 
 	select {

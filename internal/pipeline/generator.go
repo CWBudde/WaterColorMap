@@ -136,22 +136,22 @@ func NewGenerator(ds DataSource, stylesDir, texturesDir, outputDir string, tileS
 
 // Generate renders, paints, composites, and writes the final tile PNG.
 // Returns the final tile path and (optionally) the layer directory when kept.
-// debugCtx can be *DebugContext or nil; pass nil in production for zero overhead.
-func (g *Generator) Generate(ctx context.Context, coords tile.Coords, force bool, filenameSuffix string, debugCtx interface{}) (string, string, error) {
-	return g.GenerateWithData(ctx, coords, force, filenameSuffix, debugCtx, nil)
+// It satisfies worker.Generator; use GenerateWithDebug to capture intermediate stages.
+func (g *Generator) Generate(ctx context.Context, coords tile.Coords, force bool, filenameSuffix string) (string, string, error) {
+	return g.GenerateWithData(ctx, coords, force, filenameSuffix, nil, nil)
+}
+
+// GenerateWithDebug is Generate with stage capturing.
+// dc may be nil; pass nil in production for zero overhead.
+func (g *Generator) GenerateWithDebug(ctx context.Context, coords tile.Coords, force bool, filenameSuffix string, dc *DebugContext) (string, string, error) {
+	return g.GenerateWithData(ctx, coords, force, filenameSuffix, dc, nil)
 }
 
 // GenerateWithData renders a tile with optionally pre-fetched data.
 // If prefetchedData is nil, data will be fetched from the datasource.
 // This allows decoupling data fetching from rendering for better error handling and retry logic.
-func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, force bool, filenameSuffix string, debugCtx interface{}, prefetchedData *types.TileData) (string, string, error) {
-	// Type-assert debugCtx to *DebugContext if provided
-	var dc *DebugContext
-	if debugCtx != nil {
-		if typed, ok := debugCtx.(*DebugContext); ok {
-			dc = typed
-		}
-	}
+// dc may be nil; pass nil in production for zero overhead.
+func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, force bool, filenameSuffix string, dc *DebugContext, prefetchedData *types.TileData) (string, string, error) {
 	suffix := strings.TrimSpace(filenameSuffix)
 
 	// Compute final path based on folder structure setting
