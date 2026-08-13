@@ -17,6 +17,7 @@ import (
 
 	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
+	"github.com/cwbudde/watercolormap/internal/safe"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/types"
 )
@@ -45,7 +46,6 @@ type OnDemandTiles struct {
 	fetchQueue  *datasource.FetchQueue
 	logger      *slog.Logger
 	sem         chan struct{}
-	locks       sync.Map
 	gens        sync.Map
 	cfg         OnDemandTilesConfig
 	retryQueue  chan retryJob
@@ -62,6 +62,18 @@ type OnDemandTiles struct {
 	// Queue tracking - tiles waiting for semaphore
 	queuedRenders atomic.Int32
 	queuedTiles   sync.Map // map[string]time.Time - tile coord string -> queue time
+
+	// Per-tile locks, refcounted so entries can be dropped once nobody holds
+	// or waits for them. See tileLock.
+	locksMu sync.Mutex
+	locks   map[string]*tileLock
+}
+
+// tileLock serializes generation of a single tile. refs counts holders plus
+// waiters, so the entry can be removed from the map when it reaches zero.
+type tileLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // TileStatus represents the current status of the tile generation system.
@@ -155,8 +167,9 @@ func NewOnDemandTiles(ds pipeline.DataSource, cfg OnDemandTilesConfig, logger *s
 		retryCancel: cancel,
 	}
 
-	// Start retry worker
-	go t.retryWorker()
+	// Start retry worker. safe.Go is a backstop for the loop itself; each
+	// individual job is additionally recovered inside retryWorker.
+	safe.Go(t.log(), "retry worker", t.retryWorker)
 
 	return t, nil
 }
@@ -292,28 +305,24 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 	filename := coords.String() + suffix + ".png"
 	fullPath := filepath.Join(t.cfg.TilesDir, filename)
 
-	w.Header().Set("Cache-Control", t.cfg.CacheControl)
-
 	if !t.cfg.DisableCache {
 		if fileExists(fullPath) {
-			http.ServeFile(w, r, fullPath)
+			t.serveTileFile(w, r, fullPath)
 			return
 		}
 	}
 
 	if !t.cfg.GenerateMissing {
-		http.Error(w, fmt.Sprintf("tile not found: %s", filename), http.StatusNotFound)
+		writeTileError(w, "tile not found", http.StatusNotFound)
 		return
 	}
 
-	lockKey := filename
-	mu := t.getLock(lockKey)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := t.lockTile(filename)
+	defer unlock()
 
 	if !t.cfg.DisableCache {
 		if fileExists(fullPath) {
-			http.ServeFile(w, r, fullPath)
+			t.serveTileFile(w, r, fullPath)
 			return
 		}
 	}
@@ -333,7 +342,7 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 		// Request cancelled - remove from queue
 		t.queuedRenders.Add(-1)
 		t.queuedTiles.Delete(queueKey)
-		http.Error(w, "request cancelled", http.StatusRequestTimeout)
+		writeTileError(w, "request cancelled", http.StatusRequestTimeout)
 		return
 	}
 
@@ -345,7 +354,7 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 	gen, err := t.getGenerator(tileSize)
 	if err != nil {
 		t.log().Error("failed to init generator", "error", err)
-		http.Error(w, "failed to init generator", http.StatusInternalServerError)
+		writeTileError(w, "failed to init generator", http.StatusInternalServerError)
 		return
 	}
 
@@ -365,7 +374,7 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 		fetchResult, fetchErr := t.fetchQueue.SubmitAndWait(ctx, tileCoord, bounds)
 		if fetchErr != nil {
 			t.log().Error("fetch queue error", "coords", coords.String(), "error", fetchErr)
-			http.Error(w, fmt.Sprintf("failed to fetch tile data: %v", fetchErr), http.StatusBadGateway)
+			writeTileError(w, "upstream data fetch failed", http.StatusBadGateway)
 			return
 		}
 		if fetchResult.Error != nil {
@@ -376,7 +385,7 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 			} else {
 				t.log().Error("failed to fetch tile data", "coords", coords.String(), "suffix", suffix, "error", fetchResult.Error)
 			}
-			http.Error(w, fmt.Sprintf("failed to fetch tile data: %v", fetchResult.Error), http.StatusBadGateway)
+			writeTileError(w, "upstream data fetch failed", http.StatusBadGateway)
 			return
 		}
 		tileData = fetchResult.Data
@@ -404,18 +413,36 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 			t.log().Error("failed to generate tile", "coords", coords.String(), "suffix", suffix, "error", err)
 		}
 
-		http.Error(w, fmt.Sprintf("failed to generate tile %s: %v", coords.String()+suffix, err), http.StatusBadGateway)
+		writeTileError(w, "tile generation failed", http.StatusBadGateway)
 		return
 	}
 	t.totalRendered.Add(1)
 	t.log().Info("tile generated on-demand", "coords", coords.String(), "suffix", suffix, "ms", time.Since(start).Milliseconds())
 
 	if !fileExists(fullPath) {
-		http.Error(w, "tile generation completed but file missing on disk", http.StatusInternalServerError)
+		t.log().Error("tile generation reported success but no file on disk", "path", fullPath)
+		writeTileError(w, "tile generation failed", http.StatusInternalServerError)
 		return
 	}
 
+	t.serveTileFile(w, r, fullPath)
+}
+
+// serveTileFile serves a rendered tile with the configured cache policy.
+func (t *OnDemandTiles) serveTileFile(w http.ResponseWriter, r *http.Request, fullPath string) {
+	w.Header().Set("Cache-Control", t.cfg.CacheControl)
 	http.ServeFile(w, r, fullPath)
+}
+
+// writeTileError responds with a generic message and, critically, forbids
+// caching it. Error bodies used to inherit the tile Cache-Control header, so a
+// cacheable failure could pin a tile to "broken" in browsers and proxies.
+//
+// Messages here are deliberately generic: the detail (Overpass endpoint names,
+// filesystem paths, Mapnik XML errors) goes to the log, not to the client.
+func writeTileError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Cache-Control", "no-store")
+	http.Error(w, msg, code)
 }
 
 func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) {
@@ -442,13 +469,49 @@ func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) 
 	return actual.(*pipeline.Generator), nil
 }
 
-func (t *OnDemandTiles) getLock(key string) *sync.Mutex {
-	if v, ok := t.locks.Load(key); ok {
-		return v.(*sync.Mutex)
+// lockTile serializes generation of one tile, returning the function that
+// releases it.
+//
+// The previous implementation stored a mutex per tile in a sync.Map and never
+// removed it, so a crawler walking the z18 grid leaked a mutex per tile for the
+// lifetime of the process. Entries are now refcounted and dropped once the last
+// holder or waiter is gone, which keeps steady-state memory proportional to
+// concurrent requests rather than to distinct tiles ever requested.
+func (t *OnDemandTiles) lockTile(key string) func() {
+	t.locksMu.Lock()
+	if t.locks == nil {
+		t.locks = make(map[string]*tileLock)
 	}
-	mu := &sync.Mutex{}
-	actual, _ := t.locks.LoadOrStore(key, mu)
-	return actual.(*sync.Mutex)
+	l, ok := t.locks[key]
+	if !ok {
+		l = &tileLock{}
+		t.locks[key] = l
+	}
+	// Counted before releasing locksMu so the entry cannot be evicted by a
+	// concurrent release while this caller is still waiting for it.
+	l.refs++
+	t.locksMu.Unlock()
+
+	l.mu.Lock()
+
+	return func() {
+		l.mu.Unlock()
+
+		t.locksMu.Lock()
+		defer t.locksMu.Unlock()
+		l.refs--
+		if l.refs == 0 {
+			delete(t.locks, key)
+		}
+	}
+}
+
+// lockCount reports how many per-tile locks are currently retained. Test hook
+// for the eviction behaviour.
+func (t *OnDemandTiles) lockCount() int {
+	t.locksMu.Lock()
+	defer t.locksMu.Unlock()
+	return len(t.locks)
 }
 
 func (t *OnDemandTiles) log() *slog.Logger {
@@ -491,7 +554,7 @@ func parseTilePath(requestPath string) (tile.Coords, string, error) {
 func writeTilePathError(w http.ResponseWriter, r *http.Request, logger *slog.Logger, err error) {
 	if errors.Is(err, tile.ErrCoordsOutOfRange) {
 		logger.Debug("rejected out-of-range tile request", "path", r.URL.Path, "error", err)
-		http.Error(w, "tile coordinate out of range", http.StatusBadRequest)
+		writeTileError(w, "tile coordinate out of range", http.StatusBadRequest)
 		return
 	}
 	logger.Debug("rejected malformed tile request", "path", r.URL.Path, "error", err)
@@ -537,109 +600,146 @@ func (t *OnDemandTiles) queueRetry(coords tile.Coords, suffix string, attempt in
 	}
 }
 
-func (t *OnDemandTiles) retryWorker() {
-	const maxRetries = 3
+const maxRetries = 3
 
+func (t *OnDemandTiles) retryWorker() {
 	for {
 		select {
 		case <-t.retryCtx.Done():
 			return
 		case job := <-t.retryQueue:
 			t.pendingRetries.Add(-1)
-			// Base delay depends on zoom level - low zoom tiles hit rate limits harder
-			// z0-7: 30s base (huge tiles, heavy queries)
-			// z8-10: 15s base (large tiles)
-			// z11+: 5s base (normal tiles)
-			var baseDelay time.Duration
-			switch {
-			case job.coords.Z <= 7:
-				baseDelay = 30 * time.Second
-			case job.coords.Z <= 10:
-				baseDelay = 15 * time.Second
-			default:
-				baseDelay = 5 * time.Second
-			}
 
-			// Exponential backoff from base delay
-			delay := baseDelay * time.Duration(1<<job.attempt)
-			t.log().Info("waiting before retry", "coords", job.coords.String(), "suffix", job.suffix, "delay", delay)
-
-			select {
-			case <-t.retryCtx.Done():
-				return
-			case <-time.After(delay):
-			}
-
-			// Acquire semaphore
-			select {
-			case t.sem <- struct{}{}:
-			case <-t.retryCtx.Done():
-				return
-			}
-
-			ctx, cancel := context.WithTimeout(t.retryCtx, t.cfg.GenerationTimeout)
-			tileSize := tileSizeForSuffix(t.cfg.BaseTileSize, job.suffix)
-			gen, err := t.getGenerator(tileSize)
-			if err != nil {
-				t.log().Error("retry: failed to init generator", "error", err)
-				<-t.sem
-				cancel()
-				continue
-			}
-
-			start := time.Now()
-
-			// Use pre-fetched data if available, otherwise fetch first
-			tileData := job.data
-			if tileData == nil && t.fetchQueue != nil {
-				tileCoord := types.TileCoordinate{
-					Zoom: int(job.coords.Z),
-					X:    int(job.coords.X),
-					Y:    int(job.coords.Y),
-				}
-				bounds := gen.CalculateFetchBounds(job.coords)
-
-				fetchResult, fetchErr := t.fetchQueue.SubmitAndWait(ctx, tileCoord, bounds)
-				if fetchErr != nil || fetchResult.Error != nil {
-					fetchError := fetchErr
-					if fetchError == nil {
-						fetchError = fetchResult.Error
-					}
-					t.log().Error("retry: failed to fetch tile data", "coords", job.coords.String(), "suffix", job.suffix, "attempt", job.attempt+1, "error", fetchError)
-					if isTransientError(fetchError) && job.attempt+1 < maxRetries {
-						t.queueRetry(job.coords, job.suffix, job.attempt+1, nil)
-					}
-					<-t.sem
-					cancel()
-					continue
-				}
-				tileData = fetchResult.Data
-				t.log().Info("retry: fetch completed", "coords", job.coords.String(), "data_size_mb", fmt.Sprintf("%.2f", float64(fetchResult.DataSize)/(1024*1024)))
-			}
-
-			// Track retry render in status
-			tileKey := job.coords.String() + job.suffix
-			t.activeRenders.Add(1)
-			t.currentRenders.Store(tileKey, time.Now())
-
-			_, _, err = gen.GenerateWithData(ctx, job.coords, false, job.suffix, nil, tileData)
-
-			t.activeRenders.Add(-1)
-			t.currentRenders.Delete(tileKey)
-			cancel()
-			<-t.sem
-
-			if err != nil {
+			// Recover per job. A panic here used to kill the only retry
+			// worker and permanently leak the semaphore slot it held.
+			var keepGoing bool
+			if err := safe.Do(t.log(), "tile retry", func() {
+				keepGoing = t.runRetryJob(job)
+			}); err != nil {
 				t.totalFailed.Add(1)
-				t.log().Error("retry: failed to generate tile", "coords", job.coords.String(), "suffix", job.suffix, "attempt", job.attempt+1, "error", err)
-				// Only retry if we didn't have pre-fetched data (fetch-related error)
-				if tileData == nil && isTransientError(err) && job.attempt+1 < maxRetries {
-					t.queueRetry(job.coords, job.suffix, job.attempt+1, nil)
-				}
-			} else {
-				t.totalRendered.Add(1)
-				t.log().Info("retry: tile generated successfully", "coords", job.coords.String(), "suffix", job.suffix, "attempt", job.attempt+1, "ms", time.Since(start).Milliseconds())
+				keepGoing = true
+			}
+			if !keepGoing {
+				return
 			}
 		}
 	}
+}
+
+// retryDelay returns the backoff before a retry attempt. Low zoom levels cover
+// far more ground per tile, so their Overpass queries are heavier and hit rate
+// limits harder — they wait longer before trying again.
+func retryDelay(zoom uint32, attempt int) time.Duration {
+	var baseDelay time.Duration
+	switch {
+	case zoom <= 7:
+		baseDelay = 30 * time.Second
+	case zoom <= 10:
+		baseDelay = 15 * time.Second
+	default:
+		baseDelay = 5 * time.Second
+	}
+	return baseDelay * time.Duration(1<<attempt)
+}
+
+// runRetryJob performs one retry attempt. It reports whether the worker should
+// keep running; false means the retry context was cancelled mid-job.
+//
+// Every exit path releases the semaphore and cancels the context via defer.
+// These used to be released by hand on each branch, so a panic — or a future
+// early return — leaked a generation slot for the lifetime of the process.
+func (t *OnDemandTiles) runRetryJob(job retryJob) bool {
+	delay := retryDelay(job.coords.Z, job.attempt)
+	t.log().Info("waiting before retry", "coords", job.coords.String(), "suffix", job.suffix, "delay", delay)
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-t.retryCtx.Done():
+		return false
+	case <-timer.C:
+	}
+
+	select {
+	case t.sem <- struct{}{}:
+	case <-t.retryCtx.Done():
+		return false
+	}
+	defer func() { <-t.sem }()
+
+	ctx, cancel := context.WithTimeout(t.retryCtx, t.cfg.GenerationTimeout)
+	defer cancel()
+
+	tileSize := tileSizeForSuffix(t.cfg.BaseTileSize, job.suffix)
+	gen, err := t.getGenerator(tileSize)
+	if err != nil {
+		t.log().Error("retry: failed to init generator", "error", err)
+		return true
+	}
+
+	tileData, ok := t.retryFetchData(ctx, job, gen)
+	if !ok {
+		return true
+	}
+
+	start := time.Now()
+	tileKey := job.coords.String() + job.suffix
+	t.activeRenders.Add(1)
+	t.currentRenders.Store(tileKey, time.Now())
+	// Deferred, not unwound by hand: a panic inside GenerateWithData is
+	// recovered further up the stack, so a manual decrement here would be
+	// skipped and permanently inflate active_renders while leaving a phantom
+	// entry in current_tiles.
+	defer func() {
+		t.activeRenders.Add(-1)
+		t.currentRenders.Delete(tileKey)
+	}()
+
+	_, _, err = gen.GenerateWithData(ctx, job.coords, false, job.suffix, nil, tileData)
+
+	if err != nil {
+		t.totalFailed.Add(1)
+		t.log().Error("retry: failed to generate tile", "coords", job.coords.String(), "suffix", job.suffix, "attempt", job.attempt+1, "error", err)
+		// Only retry if we didn't have pre-fetched data (fetch-related error)
+		if tileData == nil && isTransientError(err) && job.attempt+1 < maxRetries {
+			t.queueRetry(job.coords, job.suffix, job.attempt+1, nil)
+		}
+		return true
+	}
+
+	t.totalRendered.Add(1)
+	t.log().Info("retry: tile generated successfully", "coords", job.coords.String(), "suffix", job.suffix, "attempt", job.attempt+1, "ms", time.Since(start).Milliseconds())
+	return true
+}
+
+// retryFetchData resolves the tile data for a retry, fetching it when the job
+// carries none. It reports false when the fetch failed and the job should be
+// abandoned for this attempt.
+func (t *OnDemandTiles) retryFetchData(ctx context.Context, job retryJob, gen *pipeline.Generator) (*types.TileData, bool) {
+	if job.data != nil || t.fetchQueue == nil {
+		return job.data, true
+	}
+
+	tileCoord := types.TileCoordinate{
+		Zoom: int(job.coords.Z),
+		X:    int(job.coords.X),
+		Y:    int(job.coords.Y),
+	}
+	bounds := gen.CalculateFetchBounds(job.coords)
+
+	fetchResult, fetchErr := t.fetchQueue.SubmitAndWait(ctx, tileCoord, bounds)
+	if fetchErr != nil || fetchResult.Error != nil {
+		fetchError := fetchErr
+		if fetchError == nil {
+			fetchError = fetchResult.Error
+		}
+		t.log().Error("retry: failed to fetch tile data", "coords", job.coords.String(), "suffix", job.suffix, "attempt", job.attempt+1, "error", fetchError)
+		if isTransientError(fetchError) && job.attempt+1 < maxRetries {
+			t.queueRetry(job.coords, job.suffix, job.attempt+1, nil)
+		}
+		return nil, false
+	}
+
+	t.log().Info("retry: fetch completed", "coords", job.coords.String(), "data_size_mb", fmt.Sprintf("%.2f", float64(fetchResult.DataSize)/(1024*1024)))
+	return fetchResult.Data, true
 }

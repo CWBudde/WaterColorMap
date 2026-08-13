@@ -697,24 +697,40 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
   also rejects zero-padded aliases like `z013_x1_y2` that would have split the disk cache).
   Deleted the dead duplicate `parseTilePathMBTiles`, and moved the MBTiles `Content-Type: image/png`
   below its error branch so 404 bodies are no longer served as PNG.
-- [ ] **[P0]** Add `recover()` to background workers — `fetch_queue.go:190`, `ondemand_tiles.go:158,522`
-  run in bare goroutines with no panic recovery; one malformed Overpass response crashes the whole
-  process (net/http only recovers handler goroutines).
+- [x] **[P0]** Add `recover()` to background workers — added `internal/safe` (`Do`/`Go`), the repo's
+  first panic recovery of any kind, and applied it to the fetch workers and the retry worker.
+  Recovery is deliberately **per job**, not per goroutine: a goroutine-level recover would leave the
+  worker dead and silently shrink the pool. Two things this surfaced: a panicking fetch job must
+  still deliver a `FetchResult`, or the caller blocked in `SubmitAndWait` is stranded until its own
+  context expires; and `retryWorker` released the semaphore by hand on each branch, so a panic
+  leaked a generation slot for the life of the process — the job body is now extracted into
+  `runRetryJob` with `defer`ed release.
 - [ ] **[P1]** Add per-IP rate limiting + bounded request-admission queue on `/tiles/`; return 503
   when the render backlog is deep (backpressure — nothing bounds queued goroutines today).
-- [ ] **[P1]** Use `QueryContext(ctx, query)` in `datasource/overpass.go:154` — the threaded `ctx` is
-  currently ignored, so request timeouts/cancellation cannot abort an in-flight Overpass fetch and
-  hung upstreams pin the (only 2) fetch workers.
+- [x] **[P1]** Use `QueryContext(ctx, query)` in `datasource/overpass.go` — the fork already exposes
+  a context-aware `Client.QueryContext`, so this was a one-line swap off the deprecated `Query`.
+  Also gave the default HTTP client an actual `Timeout` (3m): it was `http.DefaultClient`, which has
+  none, so a hung upstream pinned a fetch worker even with the context now threaded.
 - [ ] **[P1]** Set `ReadTimeout`, `IdleTimeout`, and a per-route write timeout on the `http.Server`
   (`cmd/serve.go:178`, currently only `ReadHeaderTimeout`); keep the SSE route on a separate handler.
   Add graceful shutdown that calls `od.Stop()` on SIGINT/SIGTERM (`serve.go` never does; `generate.go`
   does — fix the inconsistency).
-- [ ] **[P2]** Bound Overpass response reads with `io.LimitReader`/`MaxBytesReader` (unbounded
-  `io.ReadAll` today → OOM risk).
-- [ ] **[P2]** Stop leaking raw internal error strings (incl. backend server names) to HTTP clients
-  (`ondemand_tiles.go:304,367,378,406,413`); log detail, return generic messages.
-- [ ] **[P2]** Evict from the per-tile `locks sync.Map` (`ondemand_tiles.go:444`) — it stores one
-  mutex per distinct tile forever → unbounded memory on a long-running server.
+- [x] **[P2]** Bound Overpass response reads — the unbounded `io.ReadAll` is *inside* the go-overpass
+  dependency (`query.go:84`), not this repo, so it cannot be fixed at the call site. Capped instead
+  at the transport: a `limitedTransport` RoundTripper wraps the injectable `OverpassConfig.HTTPClient`
+  and enforces `MaxResponseBytes` (default 64 MiB), rejecting an oversized `Content-Length` before
+  reading a byte and failing mid-stream for chunked responses. It errors rather than truncating —
+  a silently truncated body would either fail to parse confusingly or parse into a partial result
+  that renders as a plausible but wrong tile.
+- [x] **[P2]** Stop leaking raw internal error strings (incl. backend server names) to HTTP clients —
+  all five sites now log the detail and return a generic message via the new `writeTileError`, which
+  also sets `Cache-Control: no-store`. Error bodies previously inherited the tile `Cache-Control`
+  header, so a cacheable failure could pin a tile to "broken" in browsers and proxies.
+- [x] **[P2]** Evict from the per-tile lock map — replaced the never-pruned `sync.Map` with a
+  refcounted `map[string]*tileLock` behind a small mutex (`lockTile` returns its unlock func).
+  Entries are dropped once the last holder *or waiter* is gone; the refcount is taken before
+  releasing the map lock so a concurrent release cannot evict an entry someone is still waiting on.
+  Steady-state memory is now proportional to concurrent requests, not to distinct tiles ever seen.
 
 ### 7.3 Code quality & correctness (P1/P2)
 
