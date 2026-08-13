@@ -141,7 +141,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ok"))
+		if _, err := w.Write([]byte("ok")); err != nil {
+			logger.Debug("healthz response write failed", "error", err)
+		}
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -165,7 +167,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create MBTiles handler: %w", err)
 		}
-		defer mbHandler.Close()
+		defer func() {
+			if err := mbHandler.Close(); err != nil {
+				logger.Error("failed to close MBTiles handler", "error", err)
+			}
+		}()
 
 		mux.Handle("/tiles/", withCORS(rateLimiter.Middleware(mbHandler.Handler())))
 	} else {
@@ -337,10 +343,10 @@ func createMultiServerDataSource(configs []map[string]interface{}, logger *slog.
 
 		// Parse coverage area if specified
 		if coverageMap, ok := cfg["coverage"].(map[string]interface{}); ok {
-			minLat := getFloat64OrDefault(coverageMap, "min_lat", 0)
-			maxLat := getFloat64OrDefault(coverageMap, "max_lat", 0)
-			minLon := getFloat64OrDefault(coverageMap, "min_lon", 0)
-			maxLon := getFloat64OrDefault(coverageMap, "max_lon", 0)
+			minLat := getFloat64(coverageMap, "min_lat")
+			maxLat := getFloat64(coverageMap, "max_lat")
+			minLon := getFloat64(coverageMap, "min_lon")
+			maxLon := getFloat64(coverageMap, "max_lon")
 
 			if minLat != 0 || maxLat != 0 || minLon != 0 || maxLon != 0 {
 				sc.Coverage = &types.BoundingBox{
@@ -391,14 +397,16 @@ func getIntOrDefault(m map[string]interface{}, key string, defaultVal int) int {
 	return defaultVal
 }
 
-func getFloat64OrDefault(m map[string]interface{}, key string, defaultVal float64) float64 {
+// getFloat64 returns the numeric value stored under key, or 0 when the key is
+// missing or holds a non-numeric value.
+func getFloat64(m map[string]interface{}, key string) float64 {
 	if v, ok := m[key].(float64); ok {
 		return v
 	}
 	if v, ok := m[key].(int); ok {
 		return float64(v)
 	}
-	return defaultVal
+	return 0
 }
 
 func withCORS(next http.Handler) http.Handler {

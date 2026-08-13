@@ -124,7 +124,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create MBTiles writer: %w", err)
 	}
-	defer writer.Close()
+	defer closeMBTilesWriters(writer)
 
 	// Convert tiles
 	logger.Info("Converting tiles...")
@@ -154,6 +154,22 @@ func runConvert(cmd *cobra.Command, args []string) error {
 
 	logger.Info("Conversion complete", "output", outputFile, "tiles", len(tiles))
 	return nil
+}
+
+// parseTileCoords converts the z/x/y capture groups of the tile filename
+// pattern into ints. It reports false when any of them is not representable.
+func parseTileCoords(matches []string) (z, x, y int, ok bool) {
+	var err error
+	if z, err = strconv.Atoi(matches[1]); err != nil {
+		return 0, 0, 0, false
+	}
+	if x, err = strconv.Atoi(matches[2]); err != nil {
+		return 0, 0, 0, false
+	}
+	if y, err = strconv.Atoi(matches[3]); err != nil {
+		return 0, 0, 0, false
+	}
+	return z, x, y, true
 }
 
 type tileInfo struct {
@@ -188,10 +204,13 @@ func scanTilesDirectory(dir string) ([]tileInfo, int, int, error) {
 			return nil
 		}
 
-		// Parse coordinates
-		z, _ := strconv.Atoi(matches[1])
-		x, _ := strconv.Atoi(matches[2])
-		y, _ := strconv.Atoi(matches[3])
+		// Parse coordinates. The regexp only matches digits, so a failure here
+		// means the number does not fit an int; skip such a file.
+		z, x, y, ok := parseTileCoords(matches)
+		if !ok {
+			logger.Warn("Skipping tile with out-of-range coordinates", "path", path)
+			return nil
+		}
 
 		tiles = append(tiles, tileInfo{
 			z:    z,

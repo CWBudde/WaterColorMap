@@ -78,7 +78,7 @@ func initConfig() {
 
 func initLogging() {
 	levelStr := strings.ToLower(viper.GetString("log-level"))
-	level := slog.LevelInfo
+	var level slog.Level
 	switch levelStr {
 	case "debug":
 		level = slog.LevelDebug
