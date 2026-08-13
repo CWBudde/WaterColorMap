@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"sync"
 
 	"github.com/cwbudde/watercolormap/internal/geojson"
 	"github.com/cwbudde/watercolormap/internal/mask"
@@ -294,9 +295,22 @@ func processMask(baseMask *image.Gray, layer geojson.LayerType, params Params) (
 	return finalMask, nil
 }
 
+// processorContextPool recycles ProcessorContext buffers across paint calls.
+// A context holds three NRGBA buffers plus a Gray buffer sized for the padded
+// metatile, so a fresh one per layer per tile was several megabytes of garbage.
+var processorContextPool sync.Pool
+
 func paintFromFinalMask(finalMask *image.Gray, layer geojson.LayerType, params Params) (*image.NRGBA, error) {
-	// Create a temporary context for this call
-	ctx := NewProcessorContext(params.TileSize)
+	// Borrow a context from the pool. EnsureCapacity (called by the WithContext
+	// variant) grows undersized buffers, but it never shrinks them, and the
+	// result bounds are taken from the buffers - so a pooled context that is
+	// larger than the requested tile must be replaced rather than reused.
+	ctx, ok := processorContextPool.Get().(*ProcessorContext)
+	if !ok || ctx == nil || ctx.tileSize > params.TileSize {
+		ctx = NewProcessorContext(params.TileSize)
+	}
+	defer processorContextPool.Put(ctx)
+
 	return paintFromFinalMaskWithContext(finalMask, layer, params, ctx)
 }
 
@@ -332,8 +346,11 @@ func paintFromFinalMaskWithContext(finalMask *image.Gray, layer geojson.LayerTyp
 		// ApplySoftEdgeMask expects 255=no change, 0=darken, so invert the blurred mask
 		mask.InvertMaskInto(shade, ctx.tempGray)
 		mask.ApplySoftEdgeMaskInto(result, ctx.tempGray, style.ShadeStrength, ctx.tempNRGBA)
-		// Swap buffers
-		result, ctx.tempNRGBA = ctx.tempNRGBA, result
+		// Swap the context's own buffers so painted and tempNRGBA stay distinct;
+		// swapping only the local `result` would leave both fields pointing at the
+		// same buffer once the context is recycled.
+		ctx.painted, ctx.tempNRGBA = ctx.tempNRGBA, ctx.painted
+		result = ctx.painted
 	}
 
 	// Edge darkening using distance-based edge mask

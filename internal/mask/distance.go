@@ -4,7 +4,14 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"sync"
 )
+
+// distanceContextPool recycles DistanceContext buffers across calls to
+// EuclideanDistanceTransform. The transform is called once per layer per tile
+// (and once more per adaptive-noise layer), so allocating a fresh context each
+// time dominated the allocation profile of tile generation.
+var distanceContextPool sync.Pool
 
 // DistanceContext holds reusable buffers for distance transform operations.
 // Reusing these buffers across multiple calls significantly reduces allocations.
@@ -79,8 +86,16 @@ func EuclideanDistanceTransform(mask *image.Gray, maxDistance float64) *image.Gr
 	width := bounds.Dx()
 	height := bounds.Dy()
 
-	// Create temporary context for this call
-	ctx := NewDistanceContext(max(width, height))
+	// Borrow a context from the pool; EnsureCapacity (called by the WithContext
+	// variant) grows the buffers when the pooled ones are too small. Oversized
+	// buffers are harmless because every loop is bounded by width/height.
+	// Nothing from the context escapes: the result image is freshly allocated.
+	ctx, ok := distanceContextPool.Get().(*DistanceContext)
+	if !ok || ctx == nil {
+		ctx = NewDistanceContext(max(width, height))
+	}
+	defer distanceContextPool.Put(ctx)
+
 	return EuclideanDistanceTransformWithContext(mask, maxDistance, ctx)
 }
 
