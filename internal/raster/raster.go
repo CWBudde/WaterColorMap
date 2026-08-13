@@ -387,7 +387,8 @@ func (r *Renderer) lonLatToLocalPx(lon, lat float64) (float64, float64) {
 	// Global pixel space (at this zoom) in [0, n*tileSize)
 	globalX := (lon + 180.0) / 360.0 * n * float64(r.tileSize)
 
-	// Clamping keeps the poles finite: MercatorY(+-90) diverges to +-Inf.
+	// Clamping keeps the ordinate inside the usable band: near the poles MercatorY
+	// blows up (huge magnitudes, -Inf at lat=-90, NaN beyond +-90).
 	mercY := geo.MercatorY(geo.ClampLat(lat))
 	globalY := (1.0 - mercY/math.Pi) / 2.0 * n * float64(r.tileSize)
 
