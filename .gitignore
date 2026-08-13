@@ -47,6 +47,9 @@ local.yaml
 
 # Build artifacts
 dist/
+# `go build ./cmd/wasm` writes its output binary here as `wasm`
+/wasm
+*.wasm
 
 # Profiling data
 *.prof
