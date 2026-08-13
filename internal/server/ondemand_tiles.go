@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -282,9 +283,9 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	coords, suffix, ok := parseTilePath(r.URL.Path)
-	if !ok {
-		http.NotFound(w, r)
+	coords, suffix, err := parseTilePath(r.URL.Path)
+	if err != nil {
+		writeTilePathError(w, r, t.log(), err)
 		return
 	}
 
@@ -457,14 +458,18 @@ func (t *OnDemandTiles) log() *slog.Logger {
 	return slog.Default()
 }
 
-func parseTilePath(requestPath string) (tile.Coords, string, bool) {
+// parseTilePath extracts tile coordinates and the optional "@2x" suffix from a
+// request path. It returns tile.ErrCoordsFormat for anything that is not a tile
+// URL at all, and tile.ErrCoordsOutOfRange for a well-formed but impossible
+// tile — callers map those to 404 and 400 respectively.
+func parseTilePath(requestPath string) (tile.Coords, string, error) {
 	// Expect: /tiles/z13_x4317_y2692.png or /tiles/z13_x4317_y2692@2x.png
 	if !strings.HasPrefix(requestPath, "/tiles/") {
-		return tile.Coords{}, "", false
+		return tile.Coords{}, "", fmt.Errorf("%w: %s", tile.ErrCoordsFormat, requestPath)
 	}
 	base := path.Base(requestPath)
 	if !strings.HasSuffix(base, ".png") {
-		return tile.Coords{}, "", false
+		return tile.Coords{}, "", fmt.Errorf("%w: %s", tile.ErrCoordsFormat, base)
 	}
 	name := strings.TrimSuffix(base, ".png")
 	suffix := ""
@@ -475,9 +480,22 @@ func parseTilePath(requestPath string) (tile.Coords, string, bool) {
 
 	coords, err := tile.ParseCoords(name)
 	if err != nil {
-		return tile.Coords{}, "", false
+		return tile.Coords{}, "", err
 	}
-	return coords, suffix, true
+	return coords, suffix, nil
+}
+
+// writeTilePathError maps a parseTilePath error to a response. An impossible
+// coordinate is a client error (400) and must be rejected before any fetch or
+// render is queued; anything else is simply not a tile URL (404).
+func writeTilePathError(w http.ResponseWriter, r *http.Request, logger *slog.Logger, err error) {
+	if errors.Is(err, tile.ErrCoordsOutOfRange) {
+		logger.Debug("rejected out-of-range tile request", "path", r.URL.Path, "error", err)
+		http.Error(w, "tile coordinate out of range", http.StatusBadRequest)
+		return
+	}
+	logger.Debug("rejected malformed tile request", "path", r.URL.Path, "error", err)
+	http.NotFound(w, r)
 }
 
 func tileSizeForSuffix(base int, suffix string) int {
