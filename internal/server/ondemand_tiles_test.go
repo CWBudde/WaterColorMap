@@ -93,15 +93,17 @@ func TestWriteTilePathErrorStatus(t *testing.T) {
 }
 
 // An out-of-range coordinate must be rejected by the handler itself, before
-// any generator, fetch queue or datasource is touched. The zero-valued
-// OnDemandTiles here has a nil datasource, so reaching the generate path at
-// all would panic rather than quietly succeed.
+// any generator, fetch queue or datasource is touched. The OnDemandTiles here
+// has a nil datasource, so reaching the generate path at all would panic
+// rather than quietly succeed. The semaphore is initialized so that a
+// regression fails fast instead of blocking forever on a nil channel.
 func TestServeTileRejectsOutOfRangeBeforeGenerating(t *testing.T) {
 	od := &OnDemandTiles{
 		cfg: OnDemandTilesConfig{
 			TilesDir:        t.TempDir(),
 			GenerateMissing: true,
 		},
+		sem: make(chan struct{}, 1),
 	}
 
 	rec := httptest.NewRecorder()

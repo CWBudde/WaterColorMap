@@ -11,7 +11,7 @@ import (
 
 // Coords represents a tile coordinate in the Web Mercator tile system (z/x/y)
 type Coords struct {
-	Z uint32 // Zoom level (0-18)
+	Z uint32 // Zoom level (0-MaxZoom when validated; see Validate)
 	X uint32 // X coordinate (column)
 	Y uint32 // Y coordinate (row)
 }
@@ -103,9 +103,10 @@ func NewCoords(z, x, y uint32) Coords {
 	return Coords{Z: z, X: x, Y: y}
 }
 
-// MaxZoom is the highest zoom level accepted by ParseCoords. Web Mercator
-// tile schemes conventionally stop at 22; beyond that 1<<z stops being a
-// meaningful tile count and rendering a tile is pure wasted work.
+// MaxZoom is the highest zoom level accepted by ParseCoords. This is an
+// application resource policy, not a limit of the Web Mercator tile scheme:
+// z=23 and beyond are perfectly well-defined grids, but this renderer has no
+// data at that detail, so serving them would only burn fetch and render time.
 const MaxZoom = 22
 
 // ErrCoordsFormat indicates the input did not have the form "z{z}_x{x}_y{y}".
