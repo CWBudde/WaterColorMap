@@ -792,7 +792,7 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
       remaining tasks and returns a nondeterministic number of `Result`s. The empty cancellation arm now
       documents that behaviour instead of hiding it. A real fix (deciding whether a cancelled run should
       report a cancellation `Result` per unfed task or stop feeding deterministically) is still open and is
-      tracked separately — this item covers the lint cleanup only.
+      tracked as its own item in 7.7 — this item covers the lint cleanup only.
 - [x] **[P2]** Consolidated duplicated Web-Mercator math — there were six implementations, not the three the
       review found: forward in `tile/coords.go`, `renderer/mapnik.go` and `raster/raster.go`, plus two
       different inverses (`tile.mercatorToLonLat`, and `types.mercatorToLat` via `Sinh`) and an unshared clamp
@@ -821,10 +821,10 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
       verified exhaustively over all 256 thresholds × 256 gray levels × both polarities. The Overpass builders
       became `featureRule` tables with `[minZoom,maxZoom]` windows, guarded by golden tests landed _first_
       (38 goldens: zooms 0–18 × both `clipGeomToBbox` values) and verified byte-identical across the rewrite.
-      Tabulating them exposed three latent oddities, deliberately left as-is and recorded as follow-ups: parks
-      emit `natural=heath` twice from z10, the roads z8-9 comment understates a regex that also matches
-      `primary`, and the z8-9 and z10-11 road regexes are identical (so they collapse into one 8-11
-      rule). (PRs #19 and #14)
+      Tabulating them exposed three latent oddities. Two are behaviour-preserving to leave alone and are now
+      tracked in 7.7 (parks emit `natural=heath` twice from z10; the roads z8-9 comment understates a regex
+      that also matches `primary`); the third — identical z8-9 and z10-11 road regexes — collapsed into a
+      single 8-11 rule as part of the rewrite, with byte-identical output. (PRs #19 and #14)
 - [x] **[P3]** MBTiles no longer gzips PNG payloads — tiles are stored as raw PNG per the MBTiles 1.3 spec
       (gzip applies to `pbf` vector tiles, not raster), so QGIS and tileserver-gl can read them; the metadata
       already said `format: png` with no compression key, so the files were actively mislabelled. The reader
@@ -891,6 +891,28 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
 - [ ] **[P3]** Replace timing-based assertions (`worker/pool_test.go:90,174`) with deterministic
       synchronization; switch file-producing tests to `t.TempDir()` (currently write shared
       `testdata/output/...`); adopt `t.Parallel()` where safe (0 uses today).
+
+### 7.7 Follow-ups surfaced while completing 7.3 (P2/P3)
+
+Open items that the 7.3 work uncovered but deliberately did not change, so that each 7.3 PR stayed
+scoped and behaviour-preserving. They are listed here rather than left as prose inside 7.3, so that
+nothing in this plan claims a follow-up exists without an entry to point at.
+
+- [ ] **[P2]** `worker/pool.go` cancellation semantics. `taskCh` is buffered to `len(tasks)`, so a send
+      is always ready; once `ctx` is done both `select` arms are ready and Go picks at random, which
+      means a cancelled `Pool.Run` drops an arbitrary subset of the remaining tasks and returns a
+      nondeterministic number of `Result`s. Callers count failures from that slice. PR #10 only removed
+      the ineffective `break` (staticcheck SA4011) and the empty arm now documents the behaviour rather
+      than hiding it — but the behaviour itself is unchanged. Decide whether a cancelled run should emit
+      a cancellation `Result` per unfed task or stop feeding deterministically, then make the count
+      predictable either way.
+- [ ] **[P3]** `buildParksQuery` emits `natural=heath` twice from z10 — once as the way+relation pair
+      added at z ≥ 8, then again as a way-only rule at z ≥ 10. Harmless to Overpass (the union
+      de-duplicates) but it inflates the query. Surfaced by the table-driven rewrite in PR #14 and left
+      in place there so the goldens stayed byte-identical.
+- [ ] **[P3]** `buildRoadsQuery`'s z8-9 comment says "motorway + trunk" while the regex also matches
+      `primary`. Decide which is intended — the comment or the behaviour — and align them. Also from
+      PR #14; the goldens pin the current behaviour, so changing it is a deliberate, visible edit.
 
 ---
 
