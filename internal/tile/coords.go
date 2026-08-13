@@ -3,10 +3,11 @@ package tile
 import (
 	"errors"
 	"fmt"
-	"math"
 
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/maptile"
+
+	"github.com/cwbudde/watercolormap/internal/geo"
 )
 
 // Coords represents a tile coordinate in the Web Mercator tile system (z/x/y)
@@ -53,8 +54,8 @@ func (c Coords) BoundsMercator() [4]float64 {
 	maxLon, maxLat := bounds[2], bounds[3]
 
 	// Convert WGS84 to Web Mercator
-	minX, minY := lonLatToMercator(minLon, minLat)
-	maxX, maxY := lonLatToMercator(maxLon, maxLat)
+	minX, minY := geo.LonLatToMercator(minLon, minLat)
+	maxX, maxY := geo.LonLatToMercator(maxLon, maxLat)
 
 	return [4]float64{minX, minY, maxX, maxY}
 }
@@ -70,32 +71,7 @@ func (c Coords) Center() (float64, float64) {
 // CenterMercator returns the center point in Web Mercator (x, y) in meters
 func (c Coords) CenterMercator() (float64, float64) {
 	lon, lat := c.Center()
-	return lonLatToMercator(lon, lat)
-}
-
-// lonLatToMercator converts WGS84 coordinates to Web Mercator (EPSG:3857)
-func lonLatToMercator(lon, lat float64) (float64, float64) {
-	// Web Mercator constants
-	const earthRadius = 6378137.0 // meters
-
-	// Convert to radians
-	x := earthRadius * lon * math.Pi / 180.0
-
-	// Latitude conversion (more complex due to Mercator projection)
-	latRad := lat * math.Pi / 180.0
-	y := earthRadius * math.Log(math.Tan(math.Pi/4.0+latRad/2.0))
-
-	return x, y
-}
-
-// mercatorToLonLat converts Web Mercator (EPSG:3857) to WGS84
-func mercatorToLonLat(x, y float64) (float64, float64) {
-	const earthRadius = 6378137.0
-
-	lon := (x / earthRadius) * 180.0 / math.Pi
-	lat := (math.Atan(math.Exp(y/earthRadius)) - math.Pi/4.0) * 2.0 * 180.0 / math.Pi
-
-	return lon, lat
+	return geo.LonLatToMercator(lon, lat)
 }
 
 // NewCoords creates a new Coords from zoom, x, y values

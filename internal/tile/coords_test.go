@@ -158,36 +158,6 @@ func TestParseCoords(t *testing.T) {
 	}
 }
 
-func TestMercatorConversion(t *testing.T) {
-	// Test round-trip conversion
-	testPoints := [][2]float64{
-		{0, 0},           // Null Island
-		{9.73, 52.37},    // Hanover
-		{-122.42, 37.78}, // San Francisco
-		{139.69, 35.69},  // Tokyo
-	}
-
-	for _, point := range testPoints {
-		lon, lat := point[0], point[1]
-
-		// Convert to Mercator and back
-		x, y := lonLatToMercator(lon, lat)
-		lon2, lat2 := mercatorToLonLat(x, y)
-
-		// Check round-trip accuracy (should be very close)
-		lonDiff := math.Abs(lon - lon2)
-		latDiff := math.Abs(lat - lat2)
-
-		t.Logf("Point (%.2f, %.2f) -> Mercator (%.2f, %.2f) -> (%.6f, %.6f)",
-			lon, lat, x, y, lon2, lat2)
-
-		if lonDiff > 0.000001 || latDiff > 0.000001 {
-			t.Errorf("Round-trip conversion failed: (%.6f, %.6f) != (%.6f, %.6f)",
-				lon, lat, lon2, lat2)
-		}
-	}
-}
-
 func TestTileRange(t *testing.T) {
 	// Test range covering a few tiles
 	tr := TileRange{

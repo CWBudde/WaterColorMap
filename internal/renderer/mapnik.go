@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"math"
 	"os"
 
 	mapnik "github.com/omniscale/go-mapnik/v2"
 
+	"github.com/cwbudde/watercolormap/internal/geo"
 	"github.com/cwbudde/watercolormap/internal/types"
 )
 
@@ -61,8 +61,8 @@ func (r *MapnikRenderer) RenderTile(tile types.TileCoordinate, data *types.TileD
 	r.mapObject.SetSRS("+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +no_defs +over")
 
 	// Convert lat/lon bounds to Web Mercator coordinates
-	minX, minY := latLonToWebMercator(bounds.MinLat, bounds.MinLon)
-	maxX, maxY := latLonToWebMercator(bounds.MaxLat, bounds.MaxLon)
+	minX, minY := geo.LonLatToMercator(bounds.MinLon, bounds.MinLat)
+	maxX, maxY := geo.LonLatToMercator(bounds.MaxLon, bounds.MaxLat)
 
 	// Set the map extent (bounding box)
 	r.mapObject.ZoomTo(minX, minY, maxX, maxY)
@@ -87,8 +87,8 @@ func (r *MapnikRenderer) RenderToFile(tile types.TileCoordinate, outputPath stri
 	r.mapObject.SetSRS("+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +no_defs +over")
 
 	// Convert to Web Mercator
-	minX, minY := latLonToWebMercator(bounds.MinLat, bounds.MinLon)
-	maxX, maxY := latLonToWebMercator(bounds.MaxLat, bounds.MaxLon)
+	minX, minY := geo.LonLatToMercator(bounds.MinLon, bounds.MinLat)
+	maxX, maxY := geo.LonLatToMercator(bounds.MaxLon, bounds.MaxLat)
 
 	// Set extent
 	r.mapObject.ZoomTo(minX, minY, maxX, maxY)
@@ -110,20 +110,6 @@ func (r *MapnikRenderer) Close() error {
 		r.mapObject = nil
 	}
 	return nil
-}
-
-// latLonToWebMercator converts WGS84 lat/lon to Web Mercator (EPSG:3857) coordinates
-func latLonToWebMercator(lat, lon float64) (float64, float64) {
-	const earthRadius = 6378137.0 // meters
-
-	// Longitude: simple linear conversion
-	x := lon * earthRadius * (3.14159265359 / 180.0)
-
-	// Latitude: Mercator projection formula
-	latRad := lat * math.Pi / 180.0
-	y := earthRadius * math.Log(math.Tan(math.Pi/4.0+latRad/2.0))
-
-	return x, y
 }
 
 // RenderCurrentToFile renders using the current map state (SRS + extent already set).

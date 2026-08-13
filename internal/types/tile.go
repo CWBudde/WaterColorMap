@@ -3,6 +3,8 @@ package types
 import (
 	"fmt"
 	"math"
+
+	"github.com/cwbudde/watercolormap/internal/geo"
 )
 
 // TileCoordinate represents a tile in the Web Mercator tile system
@@ -29,13 +31,8 @@ func (b BoundingBox) Expand(deltaLon, deltaLat float64) BoundingBox {
 	maxLat := b.MaxLat + deltaLat
 
 	// Clamp to Web Mercator supported latitude range.
-	const maxLatMerc = 85.05112878
-	if minLat < -maxLatMerc {
-		minLat = -maxLatMerc
-	}
-	if maxLat > maxLatMerc {
-		maxLat = maxLatMerc
-	}
+	minLat = geo.ClampLat(minLat)
+	maxLat = geo.ClampLat(maxLat)
 
 	// Clamp longitude to WGS84 range.
 	if minLon < -180 {
@@ -64,8 +61,8 @@ func TileToBounds(coord TileCoordinate) BoundingBox {
 	minLon := float64(coord.X)/n*360.0 - 180.0
 	maxLon := float64(coord.X+1)/n*360.0 - 180.0
 
-	minLat := mercatorToLat(math.Pi * (1 - 2*float64(coord.Y+1)/n))
-	maxLat := mercatorToLat(math.Pi * (1 - 2*float64(coord.Y)/n))
+	minLat := geo.MercatorYToLat(math.Pi * (1 - 2*float64(coord.Y+1)/n))
+	maxLat := geo.MercatorYToLat(math.Pi * (1 - 2*float64(coord.Y)/n))
 
 	return BoundingBox{
 		MinLon: minLon,
@@ -73,11 +70,6 @@ func TileToBounds(coord TileCoordinate) BoundingBox {
 		MaxLon: maxLon,
 		MaxLat: maxLat,
 	}
-}
-
-// mercatorToLat converts Web Mercator Y coordinate to latitude
-func mercatorToLat(mercatorY float64) float64 {
-	return 180.0 / math.Pi * math.Atan(math.Sinh(mercatorY))
 }
 
 // String returns a human-readable representation of the tile coordinate
