@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -61,13 +62,24 @@ func TestRunHTTPServerDrainsAndStops(t *testing.T) {
 
 	srv := newHTTPServer(addr, mux, logger)
 
-	// RegisterOnShutdown callbacks run in their own goroutines, so the
-	// counter has to be atomic.
+	// RegisterOnShutdown callbacks run in their own goroutines and Shutdown
+	// does not wait for them, so the counter has to be atomic and the
+	// assertion has to wait for the callback instead of assuming it ran.
 	var shutdownCalls atomic.Int32
-	srv.RegisterOnShutdown(func() { shutdownCalls.Add(1) })
+	shutdownDone := make(chan struct{})
+	srv.RegisterOnShutdown(func() {
+		shutdownCalls.Add(1)
+		close(shutdownDone)
+	})
+
+	// The signal source is injected so this exercises serveUntil's real drain
+	// branch; calling srv.Shutdown directly would only make ListenAndServe
+	// return ErrServerClosed and skip it entirely.
+	stopCtx, stop := context.WithCancel(t.Context())
+	defer stop()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- runHTTPServer(srv, 5*time.Second, logger) }()
+	go func() { errCh <- serveUntil(stopCtx, srv, 5*time.Second, logger) }()
 
 	// Wait for the listener to come up.
 	var resp *http.Response
@@ -88,21 +100,24 @@ func TestRunHTTPServerDrainsAndStops(t *testing.T) {
 		t.Fatalf("healthz status = %d, want 200", resp.StatusCode)
 	}
 
-	// Shutting the server down directly exercises the same drain path a
-	// signal would take, without sending a signal to the test process.
-	if err := srv.Shutdown(t.Context()); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	// Cancelling the injected context stands in for SIGTERM.
+	stop()
 
 	select {
 	case err := <-errCh:
 		// A clean shutdown must not surface as an error: ErrServerClosed is
 		// the expected outcome, not a failure.
 		if err != nil {
-			t.Fatalf("runHTTPServer returned %v, want nil after a clean shutdown", err)
+			t.Fatalf("serveUntil returned %v, want nil after a clean shutdown", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("runHTTPServer did not return after shutdown")
+		t.Fatal("serveUntil did not return after shutdown")
+	}
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("onShutdown callback never ran")
 	}
 
 	if got := shutdownCalls.Load(); got != 1 {

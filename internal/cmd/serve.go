@@ -257,6 +257,13 @@ func runHTTPServer(srv *http.Server, shutdownTimeout time.Duration, logger *slog
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	return serveUntil(ctx, srv, shutdownTimeout, logger)
+}
+
+// serveUntil serves until stopCtx is cancelled or the listener fails. The
+// signal source is a parameter so tests can drive the drain path without
+// sending a signal to the test process.
+func serveUntil(stopCtx context.Context, srv *http.Server, shutdownTimeout time.Duration, logger *slog.Logger) error {
 	// Request contexts derive from connCtx, not from the signal context. If
 	// they derived from the signal, SIGTERM would cancel every in-flight
 	// request at once and Shutdown would have nothing left to drain --
@@ -275,7 +282,7 @@ func runHTTPServer(srv *http.Server, shutdownTimeout time.Duration, logger *slog
 			return err
 		}
 		return nil
-	case <-ctx.Done():
+	case <-stopCtx.Done():
 		logger.Info("shutdown signal received, draining connections", "timeout", shutdownTimeout)
 	}
 

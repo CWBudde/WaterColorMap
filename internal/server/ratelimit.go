@@ -220,13 +220,14 @@ func (l *IPRateLimiter) sweep(now time.Time) {
 
 func (l *IPRateLimiter) sweepLocked(now time.Time) {
 	for key, b := range l.buckets {
-		idle := now.Sub(b.lastSeen)
-		if idle < l.cfg.TTL && !(idle > 0 && b.limiter.TokensAt(now) >= float64(l.cfg.Burst)) {
+		// Only the idle TTL evicts. Dropping a still-full bucket early looked
+		// free, but limiterFor releases l.mu before Allow consumes the token:
+		// a sweep in that window removes a live bucket, the next request for
+		// the same key gets a fresh full one, and the client exceeds its
+		// burst. MaxEntries still bounds memory.
+		if now.Sub(b.lastSeen) < l.cfg.TTL {
 			continue
 		}
-		// Either idle past the TTL, or idle with a full bucket — in the
-		// latter case the entry holds no state worth keeping, which is what
-		// keeps steady-state memory near zero.
 		delete(l.buckets, key)
 	}
 }
