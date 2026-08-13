@@ -95,10 +95,14 @@ func NewMultiPassRenderer(stylesDir, outputDir string, tileSize int, padPx int) 
 func (r *MultiPassRenderer) Close() error {
 	err := r.mapnikRenderer.Close()
 	if r.tempDir != "" {
-		if rmErr := os.RemoveAll(r.tempDir); rmErr != nil && err == nil {
-			err = fmt.Errorf("failed to remove temp directory: %w", rmErr)
+		if rmErr := os.RemoveAll(r.tempDir); rmErr != nil {
+			// Keep the path so a later Close can retry the cleanup and still report the failure.
+			if err == nil {
+				err = fmt.Errorf("failed to remove temp directory: %w", rmErr)
+			}
+		} else {
+			r.tempDir = ""
 		}
-		r.tempDir = ""
 	}
 	return err
 }
