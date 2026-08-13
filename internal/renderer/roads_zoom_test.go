@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
-	"github.com/MeKo-Tech/watercolormap/internal/tile"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/maptile"
 )

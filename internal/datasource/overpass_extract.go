@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/MeKo-Christian/go-overpass"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/go-overpass"
+	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb"
 )
 
@@ -66,6 +66,11 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 			features.Parks = append(features.Parks, *feature)
 		case isRoad(way.Tags):
 			features.Roads = append(features.Roads, *feature)
+		case isRailroad(way.Tags):
+			features.Railroads = append(features.Railroads, *feature)
+		case isCivic(way.Tags):
+			// Check civic BEFORE building - civic buildings have both amenity=* and building=*
+			features.Civic = append(features.Civic, *feature)
 		case isBuilding(way.Tags):
 			features.Buildings = append(features.Buildings, *feature)
 		case isUrban(way.Tags):
@@ -95,6 +100,12 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 			features.Rivers = append(features.Rivers, *feature)
 		case isGreen(rel.Tags):
 			features.Parks = append(features.Parks, *feature)
+		case isCivic(rel.Tags):
+			// Civic campuses (schools, hospitals, universities) are often mapped
+			// as multipolygon relations - classify them before urban landuse.
+			features.Civic = append(features.Civic, *feature)
+		case isUrban(rel.Tags):
+			features.Urban = append(features.Urban, *feature)
 		}
 	}
 
@@ -258,6 +269,13 @@ func categorizeByTags(tags map[string]string) types.FeatureType {
 	if isRoad(tags) {
 		return types.FeatureTypeRoad
 	}
+	if isRailroad(tags) {
+		return types.FeatureTypeRailroad
+	}
+	if isCivic(tags) {
+		// Check civic BEFORE building - civic buildings have both amenity=* and building=*
+		return types.FeatureTypeCivic
+	}
 	if isBuilding(tags) {
 		return types.FeatureTypeBuilding
 	}
@@ -289,18 +307,23 @@ func isGreen(tags map[string]string) bool {
 		tags["leisure"] == "nature_reserve" ||
 		tags["landuse"] == "forest" ||
 		tags["landuse"] == "grass" ||
-		tags["landuse"] == "meadow" ||
-		tags["landuse"] == "farmland" ||
 		tags["landuse"] == "orchard" ||
 		tags["landuse"] == "vineyard" ||
 		tags["landuse"] == "allotments" ||
 		tags["natural"] == "wood" ||
-		tags["natural"] == "heath" ||
-		tags["natural"] == "grassland"
+		tags["natural"] == "heath"
 }
 
 func isRoad(tags map[string]string) bool {
 	return tags["highway"] != ""
+}
+
+func isRailroad(tags map[string]string) bool {
+	railway := tags["railway"]
+	return railway == "rail" ||
+		railway == "light_rail" ||
+		railway == "subway" ||
+		railway == "tram"
 }
 
 func isBuilding(tags map[string]string) bool {
@@ -308,20 +331,25 @@ func isBuilding(tags map[string]string) bool {
 }
 
 func isUrban(tags map[string]string) bool {
-	// Urban areas include landuse zones (residential/commercial/industrial)
-	// and urban buildings (schools, hospitals, universities)
+	// Urban areas are landuse zones (residential/commercial/industrial/retail)
 	landuse := tags["landuse"]
-	amenity := tags["amenity"]
-
 	return landuse == "residential" ||
 		landuse == "commercial" ||
 		landuse == "industrial" ||
-		landuse == "retail" ||
-		amenity == "school" ||
+		landuse == "retail"
+}
+
+func isCivic(tags map[string]string) bool {
+	// Civic buildings are amenities like schools, hospitals, universities, colleges, and stadiums
+	amenity := tags["amenity"]
+	leisure := tags["leisure"]
+	return amenity == "school" ||
 		amenity == "hospital" ||
 		amenity == "university" ||
+		amenity == "college" ||
 		amenity == "library" ||
-		amenity == "town_hall"
+		amenity == "town_hall" ||
+		leisure == "stadium"
 }
 
 // convertTags converts OSM tags to generic properties map

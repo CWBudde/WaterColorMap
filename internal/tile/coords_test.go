@@ -122,9 +122,20 @@ func TestParseCoords(t *testing.T) {
 		{"z13_x4297_y2754", Coords{Z: 13, X: 4297, Y: 2754}, false},
 		{"z0_x0_y0", Coords{Z: 0, X: 0, Y: 0}, false},
 		{"z18_x262143_y262143", Coords{Z: 18, X: 262143, Y: 262143}, false},
+		{"z22_x4194303_y4194303", Coords{Z: 22, X: 4194303, Y: 4194303}, false},
 		{"invalid", Coords{}, true},
 		{"z13_x4297", Coords{}, true},
 		{"13_4297_2754", Coords{}, true},
+		// Sscanf ignores anything after the last verb without the round-trip check.
+		{"z13_x1_y2JUNK", Coords{}, true},
+		{"z013_x1_y2", Coords{}, true},
+		// Out of range: zoom above MaxZoom, or x/y outside the 2^z grid.
+		{"z23_x0_y0", Coords{}, true},
+		{"z30_x999999999_y1", Coords{}, true},
+		{"z0_x1_y0", Coords{}, true},
+		{"z0_x0_y1", Coords{}, true},
+		{"z1_x2_y0", Coords{}, true},
+		{"z18_x262144_y0", Coords{}, true},
 	}
 
 	for _, tt := range tests {

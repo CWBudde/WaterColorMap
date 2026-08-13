@@ -44,7 +44,7 @@ options = [
   "-s",
   "default",
   "-s",
-  "prefix(github.com/MeKo-Tech/WaterColorMap)",
+  "prefix(github.com/cwbudde/watercolormap)",
   "-s",
   "blank",
 ]

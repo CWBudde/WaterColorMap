@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"image"
 
-	"github.com/MeKo-Tech/watercolormap/assets"
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/assets"
+	"github.com/cwbudde/watercolormap/internal/geojson"
 
 	_ "image/png" // Register PNG decoder
 )

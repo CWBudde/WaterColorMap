@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/MeKo-Tech/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/tile"
 )
 
 // Generator is the interface for tile generation.

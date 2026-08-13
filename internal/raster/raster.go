@@ -5,8 +5,8 @@ import (
 	"image/color"
 	"math"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb"
 	"golang.org/x/image/vector"
 )
@@ -41,7 +41,10 @@ func (r *Renderer) RenderLayers(fc types.FeatureCollection) map[geojson.LayerTyp
 	rivers := image.NewNRGBA(b)
 	parks := image.NewNRGBA(b)
 	urban := image.NewNRGBA(b)
+	civic := image.NewNRGBA(b)
+	buildings := image.NewNRGBA(b)
 	roads := image.NewNRGBA(b)
+	railroads := image.NewNRGBA(b)
 	highways := image.NewNRGBA(b)
 
 	// Water polygons (lakes, ponds, coastlines)
@@ -60,12 +63,24 @@ func (r *Renderer) RenderLayers(fc types.FeatureCollection) map[geojson.LayerTyp
 		r.renderFeature(parks, &fc.Parks[i], 0)
 	}
 
-	// Urban areas (landuse) + civic buildings
+	// Urban landuse areas (residential/commercial/industrial/retail)
+	// Rendered as areas, with buildings drawn on top at high zoom
 	for i := range fc.Urban {
 		r.renderFeature(urban, &fc.Urban[i], 0)
 	}
-	for i := range fc.Buildings {
-		r.renderFeature(urban, &fc.Buildings[i], 0)
+
+	// Civic areas (schools, hospitals, universities, libraries, town halls)
+	// Rendered as areas with lilac texture, with buildings drawn on top at high zoom
+	for i := range fc.Civic {
+		r.renderFeature(civic, &fc.Civic[i], 0)
+	}
+
+	// Individual building footprints - only at zoom 16+
+	// Buildings are drawn on top of their respective urban/civic areas
+	if r.zoom >= 16 {
+		for i := range fc.Buildings {
+			r.renderFeature(buildings, &fc.Buildings[i], 0)
+		}
 	}
 
 	// Roads + derived highways
@@ -78,13 +93,21 @@ func (r *Renderer) RenderLayers(fc types.FeatureCollection) map[geojson.LayerTyp
 		}
 	}
 
+	// Railway lines (rail, light_rail, subway, tram)
+	for i := range fc.Railroads {
+		r.renderFeature(railroads, &fc.Railroads[i], r.getRailroadStrokeWidth())
+	}
+
 	return map[geojson.LayerType]*image.NRGBA{
-		geojson.LayerWater:    water,
-		geojson.LayerRivers:   rivers,
-		geojson.LayerParks:    parks,
-		geojson.LayerUrban:    urban,
-		geojson.LayerRoads:    roads,
-		geojson.LayerHighways: highways,
+		geojson.LayerWater:     water,
+		geojson.LayerRivers:    rivers,
+		geojson.LayerParks:     parks,
+		geojson.LayerUrban:     urban,
+		geojson.LayerCivic:     civic,
+		geojson.LayerBuildings: buildings,
+		geojson.LayerRoads:     roads,
+		geojson.LayerRailroads: railroads,
+		geojson.LayerHighways:  highways,
 	}
 }
 
@@ -174,6 +197,19 @@ func (r *Renderer) getRoadStrokeWidth() int {
 	}
 }
 
+// getRailroadStrokeWidth returns the stroke width for railway lines based on zoom level.
+// Railroads are rendered slightly thinner than regular roads.
+func (r *Renderer) getRailroadStrokeWidth() int {
+	switch {
+	case r.zoom <= 11:
+		return 1 // Minimum visibility at low zoom
+	case r.zoom <= 15:
+		return 2 // Medium and medium-high zoom
+	default:
+		return 3 // High zoom
+	}
+}
+
 // getWaterStrokeWidth returns the stroke width for water polygons based on zoom level.
 // This applies to polygonal water bodies (lakes, ponds, coastlines).
 func (r *Renderer) getWaterStrokeWidth() int {
@@ -192,20 +228,20 @@ func (r *Renderer) getWaterStrokeWidth() int {
 }
 
 // getRiverStrokeWidth returns the stroke width for linear waterways based on zoom level.
-// This applies to rivers, streams, and canals.
-// Zoom-dependent filtering ensures only major rivers show at low zoom.
+// This applies to rivers and canals (streams excluded at zoom ≤15).
+// Wider strokes at low zoom ensure rivers remain visible.
 func (r *Renderer) getRiverStrokeWidth() int {
 	switch {
 	case r.zoom <= 9:
-		return 1 // Major rivers only, minimum width
+		return 2 // Major rivers only, visible width
 	case r.zoom <= 11:
-		return 1 // Low-medium zoom
+		return 2 // Low-medium zoom
 	case r.zoom <= 13:
-		return 2 // Medium zoom
+		return 3 // Medium zoom
 	case r.zoom <= 15:
-		return 3 // Medium-high zoom
+		return 4 // Medium-high zoom - rivers/canals only
 	default:
-		return 4 // High zoom
+		return 4 // High zoom - includes streams
 	}
 }
 

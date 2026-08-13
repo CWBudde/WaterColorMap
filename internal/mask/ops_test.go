@@ -68,3 +68,32 @@ func TestInvertMask(t *testing.T) {
 		t.Fatalf("expected 55 at (1,0), got %d", got)
 	}
 }
+
+func TestSubtractMaskPartialAlpha(t *testing.T) {
+	// SubtractMask implements a AND NOT b, i.e. min(a, 255-b).
+	cases := []struct {
+		av, bv, want uint8
+	}{
+		{av: 255, bv: 0, want: 255},   // nothing subtracted
+		{av: 255, bv: 255, want: 0},   // fully subtracted
+		{av: 100, bv: 100, want: 100}, // partial b must not erode partial a
+		{av: 200, bv: 128, want: 127}, // partial b caps a
+	}
+
+	a := image.NewGray(image.Rect(0, 0, len(cases), 1))
+	b := image.NewGray(image.Rect(0, 0, len(cases), 1))
+	for i, c := range cases {
+		a.SetGray(i, 0, color.Gray{Y: c.av})
+		b.SetGray(i, 0, color.Gray{Y: c.bv})
+	}
+
+	out := SubtractMask(a, b)
+	if out == nil {
+		t.Fatal("expected non-nil mask")
+	}
+	for i, c := range cases {
+		if got := out.GrayAt(i, 0).Y; got != c.want {
+			t.Errorf("SubtractMask(%d, %d) = %d, want %d", c.av, c.bv, got, c.want)
+		}
+	}
+}

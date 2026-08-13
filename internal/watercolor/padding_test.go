@@ -4,7 +4,7 @@ import (
 	"image"
 	"testing"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/geojson"
 )
 
 func TestRequiredPaddingPx(t *testing.T) {

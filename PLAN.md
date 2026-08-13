@@ -267,6 +267,7 @@ OpenStreetMap's raw data does **not include ocean polygons**. The ocean is repre
 **Current (Broken) Behavior**:
 
 For pure ocean tiles (e.g., z9_x266_y164.png):
+
 1. Query Overpass API for features within tile bounds
 2. Overpass returns **NOTHING** (ocean is not mapped)
 3. `land.xml` fills tile with TAN background (#C4A574)
@@ -274,6 +275,7 @@ For pure ocean tiles (e.g., z9_x266_y164.png):
 5. **Result**: Ocean appears as LAND (tan) ❌
 
 For coastal tiles with islands:
+
 1. Islands may have `natural=water` polygons (lakes)
 2. Lakes render BLUE
 3. Surrounding ocean has no data → stays TAN
@@ -289,6 +291,7 @@ For coastal tiles with islands:
 **Root Cause**:
 
 The rendering pipeline assumes all features (water, land, parks, etc.) are explicitly present as polygons in OSM data. This works for inland features but fails for oceans because:
+
 1. OSM uses an **implicit ocean model** (ocean = not land)
 2. Coastlines are directional lines (water is to the right)
 3. Converting coastlines to ocean polygons requires complex processing:
@@ -306,6 +309,7 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 **Cons**: External dependency, ~500MB-1GB download
 
 **Implementation**:
+
 - [ ] Download processed water polygons from https://osmdata.openstreetmap.de/data/water-polygons.html
 - [ ] Add new data source interface for shapefile/GeoPackage reading (alongside Overpass)
 - [ ] Integrate water polygons into the data pipeline
@@ -316,10 +320,12 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 - [ ] Update documentation with water polygon setup instructions
 
 **Files**:
+
 - Water-polygons-split-4326.zip (~500MB) - split into smaller files for tile-based access
 - Simplified-water-polygons-split-4326.zip (~50MB) - simplified for low zoom levels
 
 **Data Source Priority**:
+
 1. Use simplified polygons for z ≤ 9
 2. Use full polygons for z ≥ 10
 3. Use Overpass for detailed inland water features at all zooms
@@ -331,6 +337,7 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 **Cons**: Heuristic-based, may miss edge cases, doesn't solve coastal complexity
 
 **Implementation**:
+
 - [ ] Add ocean tile detection logic in datasource layer
 - [ ] If tile query returns zero land features AND tile bounds intersect known ocean areas:
   - Synthesize a water polygon covering the entire tile bounds
@@ -343,6 +350,7 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 - [ ] Document limitations (coastal tiles may still have issues)
 
 **Limitations**:
+
 - Doesn't handle complex coastlines (bays, islands, estuaries)
 - Requires hardcoding ocean bounding boxes
 - Won't work for all edge cases
@@ -358,11 +366,13 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 **Decision Required**: Choose between Option 1 (proper solution) or Option 2 (quick fix) based on project timeline and requirements.
 
 **Recommended Path**:
+
 1. Implement Option 2 (quick fix) for immediate unblocking
 2. Plan Option 1 (water polygons) as proper long-term solution
 3. Document both approaches in configuration
 
 **Testing Requirements**:
+
 - [ ] Pure ocean tile rendering (z9_x266_y164 North Sea area)
 - [ ] Coastal tile with mainland and ocean (Hamburg area)
 - [ ] Island tile (British Isles, Mediterranean islands)
@@ -372,12 +382,14 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 - [ ] Test across zoom levels z5-z12
 
 **Related Code**:
+
 - `internal/datasource/overpass.go` - buildWaterQuery() (lines 249-283)
 - `internal/datasource/overpass_extract.go` - isWater() (lines 270-277)
 - `assets/styles/layers/water.xml` - water rendering style
 - `assets/styles/layers/land.xml` - background color definition
 
 **References**:
+
 - [OSM Water Polygons](https://osmdata.openstreetmap.de/data/water-polygons.html)
 - [OSM Coastline Processing](https://wiki.openstreetmap.org/wiki/Coastline)
 - [osmcoastline tool](https://osmcode.org/osmcoastline/)
@@ -676,28 +688,68 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
 
 ### 7.2 Security & robustness of the tile server (P0/P1 — not internet-safe)
 
-- [ ] **[P0]** Validate tile coordinates at parse time (`tile/coords.go:106` `ParseCoords`): enforce
-  `z ≤ 22` and `x,y < 2^z`, reject with 400. Without this, `serveTile` (`server/ondemand_tiles.go`)
-  will fetch+render+cache for **any** coordinate → trivial DoS that also gets the server IP-banned
-  by the public Overpass endpoint, and fills disk unbounded.
-- [ ] **[P0]** Add `recover()` to background workers — `fetch_queue.go:190`, `ondemand_tiles.go:158,522`
-  run in bare goroutines with no panic recovery; one malformed Overpass response crashes the whole
-  process (net/http only recovers handler goroutines).
-- [ ] **[P1]** Add per-IP rate limiting + bounded request-admission queue on `/tiles/`; return 503
-  when the render backlog is deep (backpressure — nothing bounds queued goroutines today).
-- [ ] **[P1]** Use `QueryContext(ctx, query)` in `datasource/overpass.go:154` — the threaded `ctx` is
-  currently ignored, so request timeouts/cancellation cannot abort an in-flight Overpass fetch and
-  hung upstreams pin the (only 2) fetch workers.
-- [ ] **[P1]** Set `ReadTimeout`, `IdleTimeout`, and a per-route write timeout on the `http.Server`
-  (`cmd/serve.go:178`, currently only `ReadHeaderTimeout`); keep the SSE route on a separate handler.
-  Add graceful shutdown that calls `od.Stop()` on SIGINT/SIGTERM (`serve.go` never does; `generate.go`
-  does — fix the inconsistency).
-- [ ] **[P2]** Bound Overpass response reads with `io.LimitReader`/`MaxBytesReader` (unbounded
-  `io.ReadAll` today → OOM risk).
-- [ ] **[P2]** Stop leaking raw internal error strings (incl. backend server names) to HTTP clients
-  (`ondemand_tiles.go:304,367,378,406,413`); log detail, return generic messages.
-- [ ] **[P2]** Evict from the per-tile `locks sync.Map` (`ondemand_tiles.go:444`) — it stores one
-  mutex per distinct tile forever → unbounded memory on a long-running server.
+- [x] **[P0]** Validate tile coordinates at parse time (`tile/coords.go` `ParseCoords`): added
+  `MaxZoom = 22` plus a `Coords.Validate()` enforcing `z ≤ 22` and `x,y < 2^z`, with distinct
+  sentinels `ErrCoordsFormat` / `ErrCoordsOutOfRange` so handlers can answer 404 vs **400**.
+  `parseTilePath` now returns the error instead of swallowing it into a bool, and both tile backends
+  map it via the shared `writeTilePathError`. Also found that `fmt.Sscanf` silently ignores trailing
+  input, so `z13_x1_y2JUNK` parsed cleanly — closed with a `c.String() != s` round-trip check (which
+  also rejects zero-padded aliases like `z013_x1_y2` that would have split the disk cache).
+  Deleted the dead duplicate `parseTilePathMBTiles`, and moved the MBTiles `Content-Type: image/png`
+  below its error branch so 404 bodies are no longer served as PNG.
+- [x] **[P0]** Add `recover()` to background workers — added `internal/safe` (`Do`/`Go`), the repo's
+  first panic recovery of any kind, and applied it to the fetch workers and the retry worker.
+  Recovery is deliberately **per job**, not per goroutine: a goroutine-level recover would leave the
+  worker dead and silently shrink the pool. Two things this surfaced: a panicking fetch job must
+  still deliver a `FetchResult`, or the caller blocked in `SubmitAndWait` is stranded until its own
+  context expires; and `retryWorker` released the semaphore by hand on each branch, so a panic
+  leaked a generation slot for the life of the process — the job body is now extracted into
+  `runRetryJob` with `defer`ed release.
+- [x] **[P1]** Add per-IP rate limiting + bounded request-admission queue on `/tiles/`.
+  Admission lives **inside** `OnDemandTiles`, not in middleware: middleware cannot tell a cache hit
+  from a miss and would shed requests for tiles already on disk. The gate sits before the per-tile
+  lock, because that lock is taken before the semaphore and held across the whole fetch+render, so
+  requests blocked there are the biggest pool of stuck goroutines — and are invisible to
+  `queuedRenders`. New `MaxPendingGenerations` (default `max(32, MaxConcurrentGenerations*8)`) →
+  503 + `Retry-After`. Rate limiting uses `golang.org/x/time/rate` keyed by client IP, with
+  TTL+cap eviction so it does not become another unbounded map; `X-Forwarded-For` is honoured only
+  from `--trusted-proxies`, and IPv6 keys collapse to /64 (a client controls its whole /64 and could
+  otherwise rotate freely). Status endpoints are exempt — rate-limiting SSE causes a reconnect storm.
+  Also added a bounded retry to the demo's tile loader: Leaflet never retries, so the first shed
+  request would otherwise leave a permanently blank tile and make backpressure look like a bug.
+- [x] **[P1]** Use `QueryContext(ctx, query)` in `datasource/overpass.go` — the fork already exposes
+  a context-aware `Client.QueryContext`, so this was a one-line swap off the deprecated `Query`.
+  Also gave the default HTTP client an actual `Timeout` (3m): it was `http.DefaultClient`, which has
+  none, so a hung upstream pinned a fetch worker even with the context now threaded.
+- [x] **[P1]** Set `ReadTimeout`, `IdleTimeout`, `WriteTimeout`, `MaxHeaderBytes` and `ErrorLog` on
+  the `http.Server`, plus graceful shutdown via `signal.NotifyContext` + `srv.Shutdown` + `od.Stop()`.
+  Rather than a separate SSE handler, the two long-lived routes extend their own socket deadline with
+  `http.ResponseController` (`http.TimeoutHandler` is not usable — it buffers the whole response and
+  breaks `http.Flusher`). That forced `sendStatusEvent` to start returning an error: with a deadline
+  in play, a dead client would otherwise make the 250ms loop spin forever on a broken connection.
+  Three further findings: `srv.Shutdown` never ends the SSE stream, so shutting down with a demo tab
+  open burned the full timeout (fixed with `BeginShutdown` via `RegisterOnShutdown` — measured 1ms
+  instead of 30s); `od.Stop()` returned without waiting, so the retry worker could be killed
+  mid-`GenerateWithData` leaving a truncated PNG that the cache would serve forever (now a bounded
+  `WaitGroup` wait, bounded because Mapnik is cgo and may ignore cancellation); and
+  `FetchQueue.Stop` closed the jobs channel while `Submit` could still be sending — a
+  send-on-closed-channel panic that was unreachable only because nothing ever called `Stop`.
+- [x] **[P2]** Bound Overpass response reads — the unbounded `io.ReadAll` is *inside* the go-overpass
+  dependency (`query.go:84`), not this repo, so it cannot be fixed at the call site. Capped instead
+  at the transport: a `limitedTransport` RoundTripper wraps the injectable `OverpassConfig.HTTPClient`
+  and enforces `MaxResponseBytes` (default 64 MiB), rejecting an oversized `Content-Length` before
+  reading a byte and failing mid-stream for chunked responses. It errors rather than truncating —
+  a silently truncated body would either fail to parse confusingly or parse into a partial result
+  that renders as a plausible but wrong tile.
+- [x] **[P2]** Stop leaking raw internal error strings (incl. backend server names) to HTTP clients —
+  all five sites now log the detail and return a generic message via the new `writeTileError`, which
+  also sets `Cache-Control: no-store`. Error bodies previously inherited the tile `Cache-Control`
+  header, so a cacheable failure could pin a tile to "broken" in browsers and proxies.
+- [x] **[P2]** Evict from the per-tile lock map — replaced the never-pruned `sync.Map` with a
+  refcounted `map[string]*tileLock` behind a small mutex (`lockTile` returns its unlock func).
+  Entries are dropped once the last holder *or waiter* is gone; the refcount is taken before
+  releasing the map lock so a concurrent release cannot evict an entry someone is still waiting on.
+  Steady-state memory is now proportional to concurrent requests, not to distinct tiles ever seen.
 
 ### 7.3 Code quality & correctness (P1/P2)
 

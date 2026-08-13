@@ -13,14 +13,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MeKo-Tech/watercolormap/internal/composite"
-	"github.com/MeKo-Tech/watercolormap/internal/datasource"
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
-	"github.com/MeKo-Tech/watercolormap/internal/mask"
-	"github.com/MeKo-Tech/watercolormap/internal/raster"
-	"github.com/MeKo-Tech/watercolormap/internal/texture"
-	"github.com/MeKo-Tech/watercolormap/internal/types"
-	"github.com/MeKo-Tech/watercolormap/internal/watercolor"
+	"github.com/cwbudde/watercolormap/internal/composite"
+	"github.com/cwbudde/watercolormap/internal/datasource"
+	"github.com/cwbudde/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/mask"
+	"github.com/cwbudde/watercolormap/internal/raster"
+	"github.com/cwbudde/watercolormap/internal/texture"
+	"github.com/cwbudde/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/watercolor"
 	"syscall/js"
 )
 
@@ -139,13 +139,14 @@ func buildOverpassQuery(bounds types.BoundingBox) string {
   way["landuse"="meadow"](%s);
   relation["leisure"="park"](%s);
   way["highway"](%s);
+  way["railway"~"rail|light_rail|subway|tram"](%s);
   way["building"](%s);
   way["amenity"="school"](%s);
   way["amenity"="hospital"](%s);
   way["amenity"="university"](%s);
 );
 out geom;
-`, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox)
+`, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox)
 }
 
 // watercolorOverpassQueryForTile returns the Overpass QL query needed to render the tile.
@@ -292,6 +293,13 @@ func watercolorRenderTileFromOverpassJSON(this js.Value, args []js.Value) interf
 		}
 		painted[geojson.LayerRoads] = roadsPainted
 	}
+	if railroadsImg := raw[geojson.LayerRailroads]; railroadsImg != nil {
+		railroadsPainted, err := watercolor.PaintLayer(railroadsImg, geojson.LayerRailroads, params)
+		if err != nil {
+			return map[string]any{"error": fmt.Sprintf("failed to paint railroads: %v", err)}
+		}
+		painted[geojson.LayerRailroads] = railroadsPainted
+	}
 	if highwaysImg != nil {
 		highwaysPainted, err := watercolor.PaintLayer(highwaysImg, geojson.LayerHighways, params)
 		if err != nil {
@@ -320,7 +328,10 @@ func watercolorRenderTileFromOverpassJSON(this js.Value, args []js.Value) interf
 	composited, err := composite.CompositeLayersOverBase(
 		base,
 		painted,
-		[]geojson.LayerType{geojson.LayerWater, geojson.LayerLand, geojson.LayerParks, geojson.LayerCivic, geojson.LayerRoads, geojson.LayerHighways},
+		[]geojson.LayerType{
+			geojson.LayerWater, geojson.LayerLand, geojson.LayerParks, geojson.LayerCivic,
+			geojson.LayerRoads, geojson.LayerRailroads, geojson.LayerHighways,
+		},
 		params.TileSize,
 	)
 	if err != nil {

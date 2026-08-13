@@ -5,7 +5,7 @@ import (
 	"image/color"
 	"testing"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/geojson"
 )
 
 // coverage counts pixels with alpha > 0.

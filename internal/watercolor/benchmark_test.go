@@ -5,8 +5,8 @@ import (
 	"image/color"
 	"testing"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
-	"github.com/MeKo-Tech/watercolormap/internal/mask"
+	"github.com/cwbudde/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/mask"
 )
 
 // BenchmarkFullPipeline benchmarks the complete watercolor rendering pipeline

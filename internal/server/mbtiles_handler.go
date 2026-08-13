@@ -4,11 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"path"
-	"strings"
 
-	"github.com/MeKo-Tech/watercolormap/internal/mbtiles"
-	"github.com/MeKo-Tech/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/mbtiles"
 )
 
 // MBTilesHandler serves tiles from an MBTiles database.
@@ -55,9 +52,9 @@ func (h *MBTilesHandler) Handler() http.HandlerFunc {
 
 // serveTile serves a single tile from the MBTiles database.
 func (h *MBTilesHandler) serveTile(w http.ResponseWriter, r *http.Request) {
-	coords, suffix, ok := parseTilePath(r.URL.Path)
-	if !ok {
-		http.NotFound(w, r)
+	coords, suffix, err := parseTilePath(r.URL.Path)
+	if err != nil {
+		writeTilePathError(w, r, h.log(), err)
 		return
 	}
 
@@ -65,16 +62,17 @@ func (h *MBTilesHandler) serveTile(w http.ResponseWriter, r *http.Request) {
 	// Separate MBTiles files should be used for different tile sizes
 	_ = suffix
 
-	w.Header().Set("Cache-Control", h.cacheControl)
-	w.Header().Set("Content-Type", "image/png")
-
-	// Read tile from MBTiles
+	// Read tile from MBTiles before committing to a PNG response, so the
+	// error path is not served with an image/png content type.
 	data, err := h.reader.ReadTile(int(coords.Z), int(coords.X), int(coords.Y))
 	if err != nil {
 		h.log().Error("Failed to read tile", "coords", coords.String(), "error", err)
 		http.Error(w, "Tile not found", http.StatusNotFound)
 		return
 	}
+
+	w.Header().Set("Cache-Control", h.cacheControl)
+	w.Header().Set("Content-Type", "image/png")
 
 	// Write PNG data
 	if _, err := w.Write(data); err != nil {
@@ -92,33 +90,4 @@ func (h *MBTilesHandler) log() *slog.Logger {
 		return h.logger
 	}
 	return slog.Default()
-}
-
-// parseTilePath parses a tile path like /tiles/z13_x4317_y2692.png
-// Returns tile coordinates, suffix (e.g., "@2x"), and success flag.
-func parseTilePathMBTiles(requestPath string) (tile.Coords, string, bool) {
-	if !strings.HasPrefix(requestPath, "/tiles/") {
-		return tile.Coords{}, "", false
-	}
-
-	base := path.Base(requestPath)
-	if !strings.HasSuffix(base, ".png") {
-		return tile.Coords{}, "", false
-	}
-
-	name := strings.TrimSuffix(base, ".png")
-	suffix := ""
-
-	// Handle @2x suffix
-	if strings.HasSuffix(name, "@2x") {
-		suffix = "@2x"
-		name = strings.TrimSuffix(name, "@2x")
-	}
-
-	coords, err := tile.ParseCoords(name)
-	if err != nil {
-		return tile.Coords{}, "", false
-	}
-
-	return coords, suffix, true
 }

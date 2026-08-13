@@ -5,7 +5,7 @@ import (
 	"image/color"
 	"math"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/geojson"
 )
 
 // getNRGBA extracts an NRGBA color from an image at the given coordinates.
@@ -37,13 +37,16 @@ func getNRGBA(img image.Image, x, y int) color.NRGBA {
 
 // DefaultLayerTextures maps layer types to their default texture filenames.
 var DefaultLayerTextures = map[geojson.LayerType]string{
-	geojson.LayerLand:     "land.png",
-	geojson.LayerWater:    "water.png",
-	geojson.LayerParks:    "green.png",
-	geojson.LayerUrban:    "urban.png",
-	geojson.LayerRoads:    "gray.png",
-	geojson.LayerHighways: "yellow.png",
-	geojson.LayerPaper:    "white.png",
+	geojson.LayerLand:      "land.png",
+	geojson.LayerWater:     "water.png",
+	geojson.LayerParks:     "green.png",
+	geojson.LayerUrban:     "urban.png",
+	geojson.LayerCivic:     "civic.png",
+	geojson.LayerBuildings: "urban.png",
+	geojson.LayerRoads:     "gray.png",
+	geojson.LayerRailroads: "railroad.png",
+	geojson.LayerHighways:  "yellow.png",
+	geojson.LayerPaper:     "white.png",
 }
 
 // TextureNameForLayer returns the default texture filename for a layer.

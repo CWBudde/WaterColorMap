@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/paulmach/orb/geojson"
 )
 
@@ -16,9 +16,11 @@ const (
 	LayerRivers    LayerType = "rivers" // Linear waterways (rivers, streams, canals)
 	LayerLand      LayerType = "land"
 	LayerParks     LayerType = "parks"
-	LayerUrban     LayerType = "urban"     // Urban landuse areas and urban buildings
+	LayerUrban     LayerType = "urban"     // Urban landuse areas (residential/commercial/industrial/retail)
+	LayerCivic     LayerType = "civic"     // Civic buildings (schools, hospitals, universities, libraries, town halls)
 	LayerBuildings LayerType = "buildings" // Individual building footprints
 	LayerRoads     LayerType = "roads"
+	LayerRailroads LayerType = "railroads" // Railway lines (rail, light_rail, subway, tram)
 	LayerHighways  LayerType = "highways"
 	LayerPaper     LayerType = "paper"
 )
@@ -85,13 +87,18 @@ func GetLayerFeatures(fc types.FeatureCollection, layer LayerType) []types.Featu
 	case LayerParks:
 		return fc.Parks
 	case LayerUrban:
-		// Return urban landuse areas and urban buildings (not individual building footprints)
+		// Return urban landuse areas
 		return fc.Urban
+	case LayerCivic:
+		// Return civic buildings
+		return fc.Civic
 	case LayerBuildings:
-		// Return only buildings
+		// Return individual building footprints
 		return fc.Buildings
 	case LayerRoads:
 		return fc.Roads
+	case LayerRailroads:
+		return fc.Railroads
 	case LayerHighways:
 		// Highways/major roads are derived from the generic roads feature set.
 		// We keep this as a view rather than adding a separate collection bucket.
@@ -118,6 +125,6 @@ func LayerCount(fc types.FeatureCollection, layer LayerType) int {
 
 // LayerSummary returns a summary of features per layer
 func LayerSummary(fc types.FeatureCollection) string {
-	return fmt.Sprintf("Water: %d, Parks: %d, Urban: %d, Buildings: %d, Roads: %d (Total: %d)",
-		len(fc.Water), len(fc.Parks), len(fc.Urban), len(fc.Buildings), len(fc.Roads), fc.Count())
+	return fmt.Sprintf("Water: %d, Parks: %d, Urban: %d, Civic: %d, Buildings: %d, Roads: %d (Total: %d)",
+		len(fc.Water), len(fc.Parks), len(fc.Urban), len(fc.Civic), len(fc.Buildings), len(fc.Roads), fc.Count())
 }

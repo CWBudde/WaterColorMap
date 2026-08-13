@@ -42,7 +42,7 @@ mapnik-config --libs
 #### 3. Clone Repository
 
 ```bash
-git clone https://github.com/MeKo-Tech/watercolormap.git
+git clone https://github.com/cwbudde/WaterColorMap.git
 cd watercolormap
 ```
 
@@ -79,7 +79,7 @@ sudo sh get-docker.sh
 #### 2. Clone Repository
 
 ```bash
-git clone https://github.com/MeKo-Tech/watercolormap.git
+git clone https://github.com/cwbudde/WaterColorMap.git
 cd watercolormap
 ```
 

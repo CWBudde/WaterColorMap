@@ -11,11 +11,11 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/MeKo-Tech/watercolormap/internal/datasource"
-	"github.com/MeKo-Tech/watercolormap/internal/mbtiles"
-	"github.com/MeKo-Tech/watercolormap/internal/pipeline"
-	"github.com/MeKo-Tech/watercolormap/internal/tile"
-	"github.com/MeKo-Tech/watercolormap/internal/worker"
+	"github.com/cwbudde/watercolormap/internal/datasource"
+	"github.com/cwbudde/watercolormap/internal/mbtiles"
+	"github.com/cwbudde/watercolormap/internal/pipeline"
+	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/worker"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

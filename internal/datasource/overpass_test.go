@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // Helper functions to reduce cyclomatic complexity
@@ -143,6 +143,40 @@ func TestFetchHanoverTile(t *testing.T) {
 	if counts2["total"] != counts["total"] {
 		t.Errorf("Cached data mismatch: got %d features, expected %d", counts2["total"], counts["total"])
 	}
+}
+
+// TestEilenriedeForests tests fetching forests around Eilenriede at zoom 15
+func TestEilenriedeForests(t *testing.T) {
+	requireIntegration(t)
+
+	ds := NewOverpassDataSource("")
+	defer ds.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// Test the specific Eilenriede tile user reported
+	tile := types.TileCoordinate{Zoom: 15, X: 17272, Y: 10766}
+	t.Logf("Tile: %s", tile.String())
+
+	data, err := ds.FetchTileData(ctx, tile)
+	if err != nil {
+		t.Fatalf("Failed to fetch tile: %v", err)
+	}
+
+	// Count forests
+	forestCount := 0
+	for _, p := range data.Features.Parks {
+		if p.Properties["landuse"] == "forest" || p.Properties["natural"] == "wood" {
+			forestCount++
+			t.Logf("Forest: %s, bounds: %v", p.ID, p.Geometry.Bound())
+		}
+	}
+
+	if forestCount == 0 {
+		t.Error("Expected forests in Eilenriede tile z15_x17272_y10766")
+	}
+	t.Logf("Total parks: %d, Forests: %d", len(data.Features.Parks), forestCount)
 }
 
 // TestTileCoordinateConversion tests the tile coordinate to bounding box conversion

@@ -2,13 +2,15 @@ package datasource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/MeKo-Tech/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/safe"
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // FetchJob represents a tile fetch request.
@@ -73,6 +75,15 @@ type FetchQueue struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	startOnce sync.Once
+	stopOnce  sync.Once
+
+	// stateMu guards stopped and is held across every enqueue attempt, so no
+	// job can reach the channel once Stop has flipped the flag. Context
+	// cancellation alone could not do this: with a done context the send and
+	// the ctx.Done() case are both ready and the runtime may pick the send,
+	// reporting success for a job no worker will ever run.
+	stateMu sync.RWMutex
+	stopped bool
 
 	// Status tracking
 	activeFetches  atomic.Int32
@@ -118,24 +129,91 @@ func (fq *FetchQueue) Start() {
 	})
 }
 
-// Stop gracefully shuts down the fetch queue.
+// Stop gracefully shuts down the fetch queue. It is safe to call more than
+// once and safe to race with Submit.
+//
+// The jobs channel is deliberately not closed: workers already exit on
+// ctx.Done(), and closing it raced with an in-flight Submit sending on the
+// same channel, which panics. That was unreachable only because nothing ever
+// called Stop; graceful shutdown makes it reachable.
 func (fq *FetchQueue) Stop() {
-	fq.cancel()
-	close(fq.jobs)
-	fq.wg.Wait()
+	fq.stopOnce.Do(func() {
+		// Close admission before cancelling: enqueue attempts never block
+		// while holding the read lock, so this acquisition is immediate and
+		// no submission can succeed from here on.
+		fq.stateMu.Lock()
+		fq.stopped = true
+		fq.stateMu.Unlock()
+
+		fq.cancel()
+		fq.wg.Wait()
+	})
+}
+
+// ErrQueueStopped is returned when a job is submitted to a queue that is
+// shutting down or already stopped.
+var ErrQueueStopped = errors.New("fetch queue is shutting down")
+
+// ErrQueueFull is returned when the queue has no room for another job.
+var ErrQueueFull = errors.New("fetch queue is full")
+
+// enqueueRetryInterval is how long a blocking submission waits before trying a
+// full queue again. Retrying instead of blocking on the send keeps stateMu free
+// for Stop.
+const enqueueRetryInterval = 10 * time.Millisecond
+
+// tryEnqueue attempts one non-blocking send. It reports whether the job was
+// queued, and errors only when the queue is stopped.
+func (fq *FetchQueue) tryEnqueue(job FetchJob) (bool, error) {
+	fq.stateMu.RLock()
+	defer fq.stateMu.RUnlock()
+
+	if fq.stopped {
+		return false, ErrQueueStopped
+	}
+	select {
+	case fq.jobs <- job:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// enqueue waits for room in the queue, giving up when either context ends.
+func (fq *FetchQueue) enqueue(ctx context.Context, job FetchJob) error {
+	for {
+		queued, err := fq.tryEnqueue(job)
+		if err != nil {
+			return err
+		}
+		if queued {
+			return nil
+		}
+
+		timer := time.NewTimer(enqueueRetryInterval)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-fq.ctx.Done():
+			timer.Stop()
+			return ErrQueueStopped
+		}
+	}
 }
 
 // Submit adds a fetch job to the queue and returns immediately.
 // The result will be sent to the job's ResultChan when complete.
 func (fq *FetchQueue) Submit(job FetchJob) error {
-	select {
-	case fq.jobs <- job:
-		return nil
-	case <-fq.ctx.Done():
-		return fmt.Errorf("fetch queue is shutting down")
-	default:
-		return fmt.Errorf("fetch queue is full")
+	queued, err := fq.tryEnqueue(job)
+	if err != nil {
+		return err
 	}
+	if !queued {
+		return ErrQueueFull
+	}
+	return nil
 }
 
 // SubmitAndWait submits a fetch job and blocks until the result is available.
@@ -147,12 +225,8 @@ func (fq *FetchQueue) SubmitAndWait(ctx context.Context, coord types.TileCoordin
 		ResultChan: resultChan,
 	}
 
-	select {
-	case fq.jobs <- job:
-	case <-ctx.Done():
-		return FetchResult{}, ctx.Err()
-	case <-fq.ctx.Done():
-		return FetchResult{}, fmt.Errorf("fetch queue is shutting down")
+	if err := fq.enqueue(ctx, job); err != nil {
+		return FetchResult{}, err
 	}
 
 	select {
@@ -160,6 +234,10 @@ func (fq *FetchQueue) SubmitAndWait(ctx context.Context, coord types.TileCoordin
 		return result, nil
 	case <-ctx.Done():
 		return FetchResult{}, ctx.Err()
+	case <-fq.ctx.Done():
+		// Without this the caller would keep waiting for a worker that has
+		// already exited, until its own context expires.
+		return FetchResult{}, ErrQueueStopped
 	}
 }
 
@@ -187,6 +265,50 @@ func (fq *FetchQueue) Status() FetchQueueStatus {
 	}
 }
 
+// runJob performs one fetch, recovering from a panic in the datasource or in
+// Overpass response parsing.
+//
+// The recovery is deliberately per job, not per worker: recovering around the
+// worker loop would leave the goroutine dead and silently shrink the pool. It
+// is also essential that the result is delivered even when the job panicked —
+// a caller blocked in SubmitAndWait only unblocks on a result or on its own
+// context expiring, so a swallowed panic would strand it for the full request
+// timeout.
+func (fq *FetchQueue) runJob(log *slog.Logger, job FetchJob) {
+	var result FetchResult
+	if err := safe.Do(log, "overpass fetch", func() {
+		result = fq.doFetch(fq.ctx, job.Coordinate, job.Bounds)
+	}); err != nil {
+		// doFetch's own deferred cleanup (activeFetches, currentTiles) has
+		// already run as the panic unwound; only the failure count is missing.
+		fq.totalFailed.Add(1)
+		result = FetchResult{Error: fmt.Errorf("fetch panicked: %w", err)}
+	}
+
+	fq.deliverResult(log, job, result)
+}
+
+// deliverResult hands the result to the submitter. The send itself runs under
+// its own recovery: a select cannot guard against a closed ResultChan — sending
+// on one panics regardless of the default case — and that panic would otherwise
+// escape runJob's recovery boundary and kill the worker goroutine.
+func (fq *FetchQueue) deliverResult(log *slog.Logger, job FetchJob, result FetchResult) {
+	if job.ResultChan == nil {
+		return
+	}
+
+	err := safe.Do(log, "fetch result delivery", func() {
+		select {
+		case job.ResultChan <- result:
+		default:
+			log.Warn("result channel full", "tile", formatTileCoord(job.Coordinate))
+		}
+	})
+	if err != nil {
+		log.Warn("result channel closed", "tile", formatTileCoord(job.Coordinate))
+	}
+}
+
 func (fq *FetchQueue) worker(id int) {
 	defer fq.wg.Done()
 	log := fq.cfg.Logger.With("worker_id", id)
@@ -202,14 +324,7 @@ func (fq *FetchQueue) worker(id int) {
 				log.Debug("fetch worker channel closed")
 				return
 			}
-			result := fq.doFetch(fq.ctx, job.Coordinate, job.Bounds)
-			if job.ResultChan != nil {
-				select {
-				case job.ResultChan <- result:
-				default:
-					log.Warn("result channel full or closed", "tile", formatTileCoord(job.Coordinate))
-				}
-			}
+			fq.runJob(log, job)
 		}
 	}
 }
@@ -262,6 +377,7 @@ func (fq *FetchQueue) doFetch(ctx context.Context, coord types.TileCoordinate, b
 		"parks_features", len(data.Features.Parks),
 		"buildings_features", len(data.Features.Buildings),
 		"urban_features", len(data.Features.Urban),
+		"civic_features", len(data.Features.Civic),
 	)
 
 	if dataSize > fq.cfg.DataSizeWarningThreshold {
@@ -296,9 +412,11 @@ func estimateDataSize(data *types.TileData) int64 {
 	featureCount := len(data.Features.Water) +
 		len(data.Features.Rivers) +
 		len(data.Features.Roads) +
+		len(data.Features.Railroads) +
 		len(data.Features.Parks) +
 		len(data.Features.Buildings) +
-		len(data.Features.Urban)
+		len(data.Features.Urban) +
+		len(data.Features.Civic)
 
 	size = int64(featureCount * bytesPerFeature)
 

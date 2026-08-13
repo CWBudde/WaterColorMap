@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/MeKo-Tech/watercolormap/internal/geojson"
+	"github.com/cwbudde/watercolormap/internal/geojson"
 )
 
 func fillRect(img *image.NRGBA, rect image.Rectangle, c color.NRGBA) {

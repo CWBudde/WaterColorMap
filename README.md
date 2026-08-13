@@ -26,7 +26,7 @@ WaterColorMap is built for "old-school" raster cartography: we render clean laye
 ## Quick Start (native)
 
 ```bash
-git clone https://github.com/MeKo-Tech/watercolormap.git
+git clone https://github.com/cwbudde/WaterColorMap.git
 cd watercolormap
 
 sudo apt update
