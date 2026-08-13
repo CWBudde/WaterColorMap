@@ -41,17 +41,20 @@ func OpenReader(path string) (*Reader, error) {
 	}, nil
 }
 
-// ReadTile reads a tile from the database and returns ungzipped PNG data.
+// ReadTile reads a tile from the database and returns the PNG data.
+// Spec-conformant raster tiles are stored uncompressed, but tiles written by
+// older versions of this package were gzipped, so the blob is gunzipped when
+// it carries the gzip magic bytes.
 // Coordinates are in XYZ format and will be converted to TMS internally.
 func (r *Reader) ReadTile(z, x, y int) ([]byte, error) {
 	// Convert XYZ to TMS coordinates
 	tmsY := (1 << z) - 1 - y
 
-	var compressedData []byte
+	var tileData []byte
 	err := r.db.QueryRow(
 		"SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
 		z, x, tmsY,
-	).Scan(&compressedData)
+	).Scan(&tileData)
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("tile not found: %d/%d/%d", z, x, y)
@@ -60,13 +63,12 @@ func (r *Reader) ReadTile(z, x, y int) ([]byte, error) {
 		return nil, fmt.Errorf("failed to query tile: %w", err)
 	}
 
-	// Decompress gzip data
-	uncompressed, err := gzipDecompress(compressedData)
+	data, err := maybeGunzip(tileData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress tile: %w", err)
 	}
 
-	return uncompressed, nil
+	return data, nil
 }
 
 // Metadata reads metadata from the database.
@@ -109,7 +111,8 @@ func (r *Reader) readMetadataMap() (metaMap map[string]string, err error) {
 }
 
 // metadataFromMap converts raw metadata name/value pairs into a Metadata struct.
-// Malformed numeric values are ignored, leaving the corresponding field at its zero value.
+// Missing or malformed numeric values are ignored, leaving the corresponding
+// field at its zero value (nil for MinZoom/MaxZoom).
 func metadataFromMap(metaMap map[string]string) Metadata {
 	meta := Metadata{}
 
@@ -122,12 +125,12 @@ func metadataFromMap(metaMap map[string]string) Metadata {
 
 	if v, ok := metaMap["minzoom"]; ok {
 		if i, err := strconv.Atoi(v); err == nil {
-			meta.MinZoom = i
+			meta.MinZoom = Zoom(i)
 		}
 	}
 	if v, ok := metaMap["maxzoom"]; ok {
 		if i, err := strconv.Atoi(v); err == nil {
-			meta.MaxZoom = i
+			meta.MaxZoom = Zoom(i)
 		}
 	}
 
@@ -168,8 +171,18 @@ func (r *Reader) Close() error {
 	return nil
 }
 
-// gzipDecompress decompresses gzip data.
-func gzipDecompress(data []byte) (uncompressed []byte, err error) {
+// gzipMagic is the two-byte header every gzip stream starts with (RFC 1952).
+var gzipMagic = [2]byte{0x1f, 0x8b}
+
+// maybeGunzip decompresses data when it starts with the gzip magic bytes and
+// returns it unchanged otherwise. Raster MBTiles blobs are stored as-is per the
+// spec, but databases written by earlier versions of this package gzipped their
+// PNGs, so both layouts have to stay readable.
+func maybeGunzip(data []byte) (uncompressed []byte, err error) {
+	if len(data) < len(gzipMagic) || data[0] != gzipMagic[0] || data[1] != gzipMagic[1] {
+		return data, nil
+	}
+
 	gr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err

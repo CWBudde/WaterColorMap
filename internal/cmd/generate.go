@@ -373,8 +373,8 @@ func openMBTilesWriters(opts *batchOptions, bbox [4]float64) (base, hidpi *mbtil
 	metadata := mbtiles.Metadata{
 		Name:        "WaterColorMap",
 		Format:      "png",
-		MinZoom:     opts.zoomMin,
-		MaxZoom:     opts.zoomMax,
+		MinZoom:     mbtiles.Zoom(opts.zoomMin),
+		MaxZoom:     mbtiles.Zoom(opts.zoomMax),
 		Bounds:      bounds,
 		Center:      center,
 		Attribution: "© OpenStreetMap contributors",

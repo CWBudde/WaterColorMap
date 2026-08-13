@@ -1,8 +1,6 @@
 package mbtiles
 
 import (
-	"bytes"
-	"compress/gzip"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -18,7 +16,7 @@ const (
 
 // TileEntry represents a single tile to be written.
 type TileEntry struct {
-	Data []byte // PNG data (will be gzip-compressed before storage)
+	Data []byte // Raw PNG data, stored verbatim (raster tiles are never gzipped)
 	Z    int
 	X    int
 	Y    int
@@ -77,8 +75,10 @@ func New(path string, metadata Metadata) (*Writer, error) {
 // createSchema creates the MBTiles database schema.
 func createSchema(db *sql.DB) error {
 	schema := `
+		-- The spec requires metadata names to be unique; PRIMARY KEY enforces
+		-- that. insertMetadata clears the table first, so re-writing is safe.
 		CREATE TABLE IF NOT EXISTS metadata (
-			name TEXT NOT NULL,
+			name TEXT NOT NULL PRIMARY KEY,
 			value TEXT
 		);
 
@@ -128,7 +128,8 @@ func insertMetadata(db *sql.DB, meta Metadata) (err error) {
 }
 
 // WriteTile adds a tile to the batch. When the batch is full, it is automatically flushed.
-// The PNG data is gzip-compressed before storage. Coordinates are converted to TMS format.
+// The PNG data is stored uncompressed, as the MBTiles 1.3 spec requires for raster
+// formats; gzip applies to pbf vector tiles only. Coordinates are converted to TMS format.
 func (w *Writer) WriteTile(z, x, y int, pngData []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -180,13 +181,9 @@ func (w *Writer) flushLocked() (err error) {
 		// Convert XYZ to TMS coordinates
 		tmsY := (1 << tile.Z) - 1 - tile.Y
 
-		// Gzip compress the PNG data
-		compressed, err := gzipCompress(tile.Data)
-		if err != nil {
-			return fmt.Errorf("failed to compress tile %d/%d/%d: %w", tile.Z, tile.X, tile.Y, err)
-		}
-
-		if _, err := stmt.Exec(tile.Z, tile.X, tmsY, compressed); err != nil {
+		// Store the PNG bytes verbatim: MBTiles readers (QGIS, tileserver-gl,
+		// mbutil) expect raster tile_data to be the image itself.
+		if _, err := stmt.Exec(tile.Z, tile.X, tmsY, tile.Data); err != nil {
 			return fmt.Errorf("failed to insert tile %d/%d/%d: %w", tile.Z, tile.X, tile.Y, err)
 		}
 	}
@@ -210,20 +207,4 @@ func (w *Writer) Close() error {
 	}
 
 	return nil
-}
-
-// gzipCompress compresses data with gzip.
-func gzipCompress(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-
-	if _, err := gw.Write(data); err != nil {
-		return nil, errors.Join(err, gw.Close())
-	}
-
-	if err := gw.Close(); err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
 }

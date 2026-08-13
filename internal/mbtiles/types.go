@@ -1,10 +1,19 @@
 // Package mbtiles provides MBTiles format support for reading and writing tile databases.
 package mbtiles
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 // Metadata contains MBTiles metadata fields.
 type Metadata struct {
+	// MinZoom/MaxZoom are pointers so that zoom level 0 — a perfectly valid
+	// zoom — can be told apart from "not set". A nil pointer omits the key.
+	// Use Zoom to build one from a literal. They lead the struct to satisfy
+	// the fieldalignment linter.
+	MinZoom     *int
+	MaxZoom     *int
 	Name        string // Human-readable tileset identifier
 	Format      string // Tile data type (png, jpg, webp, pbf)
 	Attribution string // Attribution text
@@ -13,8 +22,11 @@ type Metadata struct {
 	Version     string // Version string
 	Bounds      [4]float64
 	Center      [3]float64
-	MinZoom     int // Minimum zoom level
-	MaxZoom     int // Maximum zoom level
+}
+
+// Zoom returns a pointer to z, for use with Metadata.MinZoom/MaxZoom.
+func Zoom(z int) *int {
+	return &z
 }
 
 // ToMap converts Metadata to a map for database insertion.
@@ -27,11 +39,11 @@ func (m Metadata) ToMap() map[string]string {
 	if m.Format != "" {
 		result["format"] = m.Format
 	}
-	if m.MinZoom > 0 {
-		result["minzoom"] = fmt.Sprintf("%d", m.MinZoom)
+	if m.MinZoom != nil {
+		result["minzoom"] = strconv.Itoa(*m.MinZoom)
 	}
-	if m.MaxZoom > 0 {
-		result["maxzoom"] = fmt.Sprintf("%d", m.MaxZoom)
+	if m.MaxZoom != nil {
+		result["maxzoom"] = strconv.Itoa(*m.MaxZoom)
 	}
 	if m.Bounds != [4]float64{} {
 		result["bounds"] = fmt.Sprintf("%.6f,%.6f,%.6f,%.6f",
