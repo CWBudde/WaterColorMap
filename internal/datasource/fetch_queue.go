@@ -14,45 +14,47 @@ import (
 )
 
 // FetchJob represents a tile fetch request.
+//
+// Fields are ordered for struct alignment, not for reading order.
 type FetchJob struct {
-	Coordinate types.TileCoordinate
-	Bounds     types.BoundingBox
 	ResultChan chan FetchResult
+	Bounds     types.BoundingBox
+	Coordinate types.TileCoordinate
 }
 
 // FetchResult contains the result of a tile fetch operation.
 type FetchResult struct {
 	Data     *types.TileData
-	DataSize int64 // Size of the fetched data in bytes (estimated)
 	Error    error
+	DataSize int64 // Size of the fetched data in bytes (estimated)
 }
 
 // FetchQueueStatus contains current status of the fetch queue.
 type FetchQueueStatus struct {
-	// ActiveFetches is the number of currently in-flight fetch operations
-	ActiveFetches int `json:"active_fetches"`
-	// QueuedFetches is the number of jobs waiting in the queue
-	QueuedFetches int `json:"queued_fetches"`
+	// CurrentTiles lists tiles currently being fetched
+	CurrentTiles []string `json:"current_tiles"`
 	// TotalCompleted is the total number of completed fetches since start
 	TotalCompleted int64 `json:"total_completed"`
 	// TotalFailed is the total number of failed fetches since start
 	TotalFailed int64 `json:"total_failed"`
 	// TotalBytes is the total bytes fetched since start
 	TotalBytes int64 `json:"total_bytes"`
-	// CurrentTiles lists tiles currently being fetched
-	CurrentTiles []string `json:"current_tiles"`
+	// ActiveFetches is the number of currently in-flight fetch operations
+	ActiveFetches int `json:"active_fetches"`
+	// QueuedFetches is the number of jobs waiting in the queue
+	QueuedFetches int `json:"queued_fetches"`
 }
 
 // FetchQueueConfig configures the fetch queue behavior.
 type FetchQueueConfig struct {
+	// Logger for fetch operations
+	Logger *slog.Logger
+	// DataSizeWarningThreshold warns when tile data exceeds this size in bytes (default: 10MB)
+	DataSizeWarningThreshold int64
 	// Workers is the number of concurrent fetch workers (default: 2)
 	Workers int
 	// QueueSize is the maximum number of pending fetch jobs (default: 100)
 	QueueSize int
-	// DataSizeWarningThreshold warns when tile data exceeds this size in bytes (default: 10MB)
-	DataSizeWarningThreshold int64
-	// Logger for fetch operations
-	Logger *slog.Logger
 }
 
 // DefaultFetchQueueConfig returns sensible defaults.
@@ -68,11 +70,16 @@ func DefaultFetchQueueConfig() FetchQueueConfig {
 // FetchQueue manages decoupled data fetching from rendering.
 // It queues fetch jobs and processes them with a pool of workers.
 type FetchQueue struct {
-	ds        *OverpassDataSource
-	jobs      chan FetchJob
-	cfg       FetchQueueConfig
-	ctx       context.Context
-	cancel    context.CancelFunc
+	ds     *OverpassDataSource
+	jobs   chan FetchJob
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// currentTiles maps a tile coord string to the fetch start time.
+	currentTiles sync.Map
+
+	cfg FetchQueueConfig
+
 	wg        sync.WaitGroup
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -83,14 +90,14 @@ type FetchQueue struct {
 	// the ctx.Done() case are both ready and the runtime may pick the send,
 	// reporting success for a job no worker will ever run.
 	stateMu sync.RWMutex
-	stopped bool
 
 	// Status tracking
-	activeFetches  atomic.Int32
 	totalCompleted atomic.Int64
 	totalFailed    atomic.Int64
 	totalBytes     atomic.Int64
-	currentTiles   sync.Map // map[string]time.Time - tile coord string -> start time
+	activeFetches  atomic.Int32
+
+	stopped bool
 }
 
 // NewFetchQueue creates a new fetch queue with the given datasource and config.
@@ -251,7 +258,11 @@ func (fq *FetchQueue) FetchSync(ctx context.Context, coord types.TileCoordinate,
 func (fq *FetchQueue) Status() FetchQueueStatus {
 	var currentTiles []string
 	fq.currentTiles.Range(func(key, _ any) bool {
-		currentTiles = append(currentTiles, key.(string))
+		// Keys are always tile-coordinate strings; ignore anything else
+		// rather than panicking inside a status call.
+		if tileKey, ok := key.(string); ok {
+			currentTiles = append(currentTiles, tileKey)
+		}
 		return true
 	})
 
