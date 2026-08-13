@@ -20,8 +20,9 @@ type OverpassConfig struct {
 	RetryConfig *overpass.RetryConfig
 	// HTTPClient allows custom HTTP client (default: a client with Timeout set)
 	HTTPClient *http.Client
-	// MaxResponseBytes caps a single Overpass response body
-	// (default: DefaultMaxResponseBytes). Zero or less disables the cap.
+	// MaxResponseBytes caps a single Overpass response body. Zero means
+	// "unset" and is defaulted to DefaultMaxResponseBytes; a negative value
+	// is an explicit opt-out that disables the cap.
 	MaxResponseBytes int64
 }
 
@@ -103,6 +104,12 @@ func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = defaultHTTPClient()
+	}
+	// An omitted cap must not mean "unbounded": callers that build an
+	// OverpassConfig literal (the multi-server path does) would otherwise lose
+	// the OOM protection silently. Opting out stays possible via a negative value.
+	if cfg.MaxResponseBytes == 0 {
+		cfg.MaxResponseBytes = DefaultMaxResponseBytes
 	}
 	httpClient := withResponseLimit(cfg.HTTPClient, cfg.MaxResponseBytes)
 
@@ -527,6 +534,10 @@ type ServerConfig struct {
 	RetryConfig *overpass.RetryConfig
 	// HTTPClient allows custom HTTP client
 	HTTPClient *http.Client
+	// MaxResponseBytes caps a single Overpass response body. Zero means
+	// "unset" and is defaulted to DefaultMaxResponseBytes; a negative value
+	// disables the cap.
+	MaxResponseBytes int64
 	// Coverage defines the geographic area this server covers (nil = covers everything)
 	Coverage *types.BoundingBox
 	// Name is an optional human-readable name for logging (e.g., "Niedersachsen", "Public")
@@ -571,10 +582,11 @@ func NewMultiOverpassDataSource(configs ...ServerConfig) *MultiOverpassDataSourc
 	for _, cfg := range configs {
 		// Build OverpassConfig from ServerConfig
 		ovConfig := OverpassConfig{
-			Endpoint:    cfg.Endpoint,
-			Workers:     cfg.Workers,
-			RetryConfig: cfg.RetryConfig,
-			HTTPClient:  cfg.HTTPClient,
+			Endpoint:         cfg.Endpoint,
+			Workers:          cfg.Workers,
+			RetryConfig:      cfg.RetryConfig,
+			HTTPClient:       cfg.HTTPClient,
+			MaxResponseBytes: cfg.MaxResponseBytes,
 		}
 
 		// Apply defaults if needed
