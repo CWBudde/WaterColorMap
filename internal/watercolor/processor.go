@@ -51,6 +51,7 @@ func (c *ProcessorContext) EnsureCapacity(tileSize int) {
 // LayerStyle defines per-layer watercolor styling parameters.
 type LayerStyle struct {
 	Texture           image.Image
+	MaskThreshold     *uint8 // Optional per-layer threshold override (if nil, uses global Params.Threshold)
 	Layer             geojson.LayerType
 	EdgeStrength      float64
 	MaskNoiseStrength float64
@@ -61,14 +62,14 @@ type LayerStyle struct {
 	MaskBlurSigma     float32
 	ShadeSigma        float32
 	EdgeSigma         float32
-	MaskThreshold     *uint8 // Optional per-layer threshold override (if nil, uses global Params.Threshold)
-	InvertMask        bool   // If true, invert the mask after threshold (used for land = invert of non-land)
-	AdaptiveNoise     bool   // If true, scale noise based on feature distance (protects thin structures)
+	InvertMask        bool // If true, invert the mask after threshold (used for land = invert of non-land)
+	AdaptiveNoise     bool // If true, scale noise based on feature distance (protects thin structures)
 }
 
 // Params define the common watercolor processing knobs.
 type Params struct {
 	Styles         map[geojson.LayerType]LayerStyle
+	PerlinNoise    *image.Gray // Pre-generated noise texture, reused across all layers to avoid redundant allocations
 	TileSize       int
 	NoiseScale     float64
 	NoiseStrength  float64
@@ -78,7 +79,6 @@ type Params struct {
 	BlurSigma      float32
 	AntialiasSigma float32
 	Threshold      uint8
-	PerlinNoise    *image.Gray // Pre-generated noise texture, reused across all layers to avoid redundant allocations
 }
 
 // ZoomAdjustedBlurSigma returns blur sigma adjusted for zoom level.

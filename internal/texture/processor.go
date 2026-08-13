@@ -31,7 +31,11 @@ func getNRGBA(img image.Image, x, y int) color.NRGBA {
 		}
 	default:
 		// Fallback to interface method (causes allocation)
-		return color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+		nrgba, ok := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+		if !ok {
+			return color.NRGBA{}
+		}
+		return nrgba
 	}
 }
 

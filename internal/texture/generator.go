@@ -88,32 +88,12 @@ func WriteDefaultTextures(dir string, size int, seed int64, variationScale float
 			}
 		}
 
-		baseColor, ok := defaultTextureColors[layer]
-		if !ok {
-			return result, fmt.Errorf("missing base color for layer %s", layer)
-		}
-		layerVariation, ok := defaultTextureVariations[layer]
-		if !ok {
-			return result, fmt.Errorf("missing variation for layer %s", layer)
+		params, err := defaultTextureParams(layer, size, seed+int64(i)*1000, variationScale, brushness)
+		if err != nil {
+			return result, err
 		}
 
-		params := TextureParams{
-			Size:      size,
-			BaseColor: baseColor,
-			Variation: clamp01(layerVariation * variationScale),
-			Brushness: brushness,
-			Seed:      seed + int64(i)*1000,
-		}
-
-		var (
-			img *image.RGBA
-			err error
-		)
-		if layer == geojson.LayerPaper {
-			img, err = GeneratePaperTexture(params)
-		} else {
-			img, err = GenerateSeamlessTexture(params)
-		}
+		img, err := generateLayerTexture(layer, params)
 		if err != nil {
 			return result, err
 		}
@@ -127,12 +107,50 @@ func WriteDefaultTextures(dir string, size int, seed int64, variationScale float
 	return result, nil
 }
 
-func writePNG(path string, img image.Image) error {
+// defaultTextureParams builds the texture parameters for a default layer texture.
+func defaultTextureParams(
+	layer geojson.LayerType,
+	size int,
+	seed int64,
+	variationScale float64,
+	brushness float64,
+) (TextureParams, error) {
+	baseColor, ok := defaultTextureColors[layer]
+	if !ok {
+		return TextureParams{}, fmt.Errorf("missing base color for layer %s", layer)
+	}
+	layerVariation, ok := defaultTextureVariations[layer]
+	if !ok {
+		return TextureParams{}, fmt.Errorf("missing variation for layer %s", layer)
+	}
+
+	return TextureParams{
+		Size:      size,
+		BaseColor: baseColor,
+		Variation: clamp01(layerVariation * variationScale),
+		Brushness: brushness,
+		Seed:      seed,
+	}, nil
+}
+
+// generateLayerTexture renders the texture for a layer using its matching generator.
+func generateLayerTexture(layer geojson.LayerType, params TextureParams) (*image.RGBA, error) {
+	if layer == geojson.LayerPaper {
+		return GeneratePaperTexture(params)
+	}
+	return GenerateSeamlessTexture(params)
+}
+
+func writePNG(path string, img image.Image) (err error) {
 	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("failed to create texture %s: %w", path, err)
 	}
-	defer file.Close()
+	defer func() {
+		if cerr := file.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close texture %s: %w", path, cerr)
+		}
+	}()
 
 	if err := png.Encode(file, img); err != nil {
 		return fmt.Errorf("failed to encode texture %s: %w", path, err)
@@ -388,11 +406,11 @@ func applyPaperGrain(img *floatImg, sx *simplex, variation float64) {
 }
 
 type floatImg struct {
-	w int
-	h int
 	R []float64
 	G []float64
 	B []float64
+	w int
+	h int
 }
 
 func newFloatImg(w, h int) *floatImg {
@@ -424,13 +442,13 @@ func (f *floatImg) addWash(cx, cy float64, radius float64, col [3]float64, alpha
 	for yy := minY; yy <= maxY; yy++ {
 		y := wrapIndex(yy, f.h)
 		vy := (float64(yy)/float64(f.h) - cy)
-		vy = vy - math.Round(vy)
+		vy -= math.Round(vy)
 		dy := vy * float64(f.h)
 
 		for xx := minX; xx <= maxX; xx++ {
 			x := wrapIndex(xx, f.w)
 			vx := (float64(xx)/float64(f.w) - cx)
-			vx = vx - math.Round(vx)
+			vx -= math.Round(vx)
 			dx := vx * float64(f.w)
 
 			d2 := dx*dx + dy*dy
@@ -542,6 +560,46 @@ func dot4(g [4]float64, x, y, z, w float64) float64 {
 	return g[0]*x + g[1]*y + g[2]*z + g[3]*w
 }
 
+// simplexRanks ranks the four simplex coordinates against each other, yielding
+// the traversal order of the simplex corners.
+func simplexRanks(x0, y0, z0, w0 float64) [4]int {
+	var ranks [4]int
+	coords := [4]float64{x0, y0, z0, w0}
+	for a := 0; a < 4; a++ {
+		for b := a + 1; b < 4; b++ {
+			if coords[a] > coords[b] {
+				ranks[a]++
+			} else {
+				ranks[b]++
+			}
+		}
+	}
+	return ranks
+}
+
+// simplexOffsets converts corner ranks into the unit offsets for the corner at
+// the given rank threshold.
+func simplexOffsets(ranks [4]int, threshold int) (i, j, k, l int) {
+	var offsets [4]int
+	for n, r := range ranks {
+		if r >= threshold {
+			offsets[n] = 1
+		}
+	}
+	return offsets[0], offsets[1], offsets[2], offsets[3]
+}
+
+// simplexContribution computes a single simplex corner's contribution to the
+// noise value.
+func simplexContribution(g [4]float64, x, y, z, w float64) float64 {
+	t := 0.6 - x*x - y*y - z*z - w*w
+	if t <= 0 {
+		return 0
+	}
+	t *= t
+	return t * t * dot4(g, x, y, z, w)
+}
+
 func (s *simplex) noise4D(x, y, z, w float64) float64 {
 	const F4 = 0.30901699437494745
 	const G4 = 0.1381966011250105
@@ -563,80 +621,10 @@ func (s *simplex) noise4D(x, y, z, w float64) float64 {
 	z0 := z - Z0
 	w0 := w - W0
 
-	rankx, ranky, rankz, rankw := 0, 0, 0, 0
-	if x0 > y0 {
-		rankx++
-	} else {
-		ranky++
-	}
-	if x0 > z0 {
-		rankx++
-	} else {
-		rankz++
-	}
-	if x0 > w0 {
-		rankx++
-	} else {
-		rankw++
-	}
-	if y0 > z0 {
-		ranky++
-	} else {
-		rankz++
-	}
-	if y0 > w0 {
-		ranky++
-	} else {
-		rankw++
-	}
-	if z0 > w0 {
-		rankz++
-	} else {
-		rankw++
-	}
-
-	i1, j1, k1, l1 := 0, 0, 0, 0
-	i2, j2, k2, l2 := 0, 0, 0, 0
-	i3, j3, k3, l3 := 0, 0, 0, 0
-
-	if rankx >= 3 {
-		i1 = 1
-	}
-	if ranky >= 3 {
-		j1 = 1
-	}
-	if rankz >= 3 {
-		k1 = 1
-	}
-	if rankw >= 3 {
-		l1 = 1
-	}
-
-	if rankx >= 2 {
-		i2 = 1
-	}
-	if ranky >= 2 {
-		j2 = 1
-	}
-	if rankz >= 2 {
-		k2 = 1
-	}
-	if rankw >= 2 {
-		l2 = 1
-	}
-
-	if rankx >= 1 {
-		i3 = 1
-	}
-	if ranky >= 1 {
-		j3 = 1
-	}
-	if rankz >= 1 {
-		k3 = 1
-	}
-	if rankw >= 1 {
-		l3 = 1
-	}
+	ranks := simplexRanks(x0, y0, z0, w0)
+	i1, j1, k1, l1 := simplexOffsets(ranks, 3)
+	i2, j2, k2, l2 := simplexOffsets(ranks, 2)
+	i3, j3, k3, l3 := simplexOffsets(ranks, 1)
 
 	x1 := x0 - float64(i1) + G4
 	y1 := y0 - float64(j1) + G4
@@ -669,33 +657,11 @@ func (s *simplex) noise4D(x, y, z, w float64) float64 {
 	gi3 := s.perm[ii+i3+int(s.perm[jj+j3+int(s.perm[kk+k3+int(s.perm[ll+l3])])])] % 32
 	gi4 := s.perm[ii+1+int(s.perm[jj+1+int(s.perm[kk+1+int(s.perm[ll+1])])])] % 32
 
-	n0, n1, n2, n3, n4 := 0.0, 0.0, 0.0, 0.0, 0.0
-
-	t0c := 0.6 - x0*x0 - y0*y0 - z0*z0 - w0*w0
-	if t0c > 0 {
-		t0c *= t0c
-		n0 = t0c * t0c * dot4(grad4[gi0], x0, y0, z0, w0)
-	}
-	t1c := 0.6 - x1*x1 - y1*y1 - z1*z1 - w1*w1
-	if t1c > 0 {
-		t1c *= t1c
-		n1 = t1c * t1c * dot4(grad4[gi1], x1, y1, z1, w1)
-	}
-	t2c := 0.6 - x2*x2 - y2*y2 - z2*z2 - w2*w2
-	if t2c > 0 {
-		t2c *= t2c
-		n2 = t2c * t2c * dot4(grad4[gi2], x2, y2, z2, w2)
-	}
-	t3c := 0.6 - x3*x3 - y3*y3 - z3*z3 - w3*w3
-	if t3c > 0 {
-		t3c *= t3c
-		n3 = t3c * t3c * dot4(grad4[gi3], x3, y3, z3, w3)
-	}
-	t4c := 0.6 - x4*x4 - y4*y4 - z4*z4 - w4*w4
-	if t4c > 0 {
-		t4c *= t4c
-		n4 = t4c * t4c * dot4(grad4[gi4], x4, y4, z4, w4)
-	}
+	n0 := simplexContribution(grad4[gi0], x0, y0, z0, w0)
+	n1 := simplexContribution(grad4[gi1], x1, y1, z1, w1)
+	n2 := simplexContribution(grad4[gi2], x2, y2, z2, w2)
+	n3 := simplexContribution(grad4[gi3], x3, y3, z3, w3)
+	n4 := simplexContribution(grad4[gi4], x4, y4, z4, w4)
 
 	return 27.0 * (n0 + n1 + n2 + n3 + n4)
 }
