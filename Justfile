@@ -16,9 +16,12 @@ deps:
     go mod download
     go mod tidy
 
-# Install the formatters treefmt.toml drives that are Go-installable
+# Install the formatters treefmt.toml drives.
+# gci and shfmt are Go-installable; prettier and taplo come from npm; shellcheck is
+# preinstalled on CI runners and available from every distro package manager.
 deps-fmt:
-    go install github.com/daixiang0/gci@latest
+    go install github.com/daixiang0/gci@v0.14.0
+    go install mvdan.cc/sh/v3/cmd/shfmt@v3.12.0
 
 # Build the application
 build:
@@ -73,7 +76,7 @@ check-formatted:
         echo "ERROR: Working directory has uncommitted changes. Commit or stash changes before running format check."; \
         exit 1; \
     fi
-    treefmt --allow-missing-formatter
+    treefmt
     @if ! git diff --exit-code > /dev/null 2>&1; then \
         echo "ERROR: Code is not formatted. Run 'just fmt' to format."; \
         git diff; \

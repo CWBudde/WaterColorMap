@@ -25,6 +25,21 @@ jobs:
         run: |
           just setup-deps
 
+      # check-formatted runs treefmt WITHOUT --allow-missing-formatter, so every
+      # formatter configured in treefmt.toml must actually be present here --
+      # otherwise the job silently skips it and enforces nothing. Versions are
+      # pinned because formatter output differs between releases.
+      - name: Install prettier and taplo
+        run: |
+          npm install -g prettier@3.8.0 @taplo/cli@0.7.0
+
+      - name: Verify every configured formatter is present
+        run: |
+          for f in prettier taplo gci shellcheck shfmt; do
+            command -v "$f" >/dev/null 2>&1 || { echo "missing formatter: $f"; exit 1; }
+            echo "$f -> $(command -v "$f")"
+          done
+
       - name: Install treefmt
         env:
           TREEFMT_VERSION: 2.5.0

@@ -69,7 +69,11 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 // collectMultipolygonMemberWayIDs returns the set of way IDs that are members of
 // multipolygon relations, so those ways are not emitted a second time on their own.
 //
-// Note: We check both embedded Way objects and referenced way IDs.
+// Only members with an embedded *Way are collected. go-overpass's RelationMember
+// carries Type, Node, Way, Relation and Role but no reference ID, so a member the
+// API returned by reference alone cannot be identified here and will not be
+// deduplicated. In practice Overpass does not embed way geometry in relations, so
+// this mainly catches test fixtures and APIs that do embed it.
 func collectMultipolygonMemberWayIDs(relations map[int64]*overpass.Relation) map[int64]bool {
 	memberWayIDs := make(map[int64]bool)
 	for _, rel := range relations {

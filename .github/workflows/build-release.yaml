@@ -91,8 +91,22 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
+        # go-mapnik hardcodes /usr/local/lib/mapnik/{fonts,input} and expects a
+        # link-time override, so released binaries otherwise start with no fonts
+        # and no input plugins registered. Only override when mapnik-config is
+        # present and answers -- baking in an empty path would be worse than the
+        # upstream default (Windows has no Mapnik step in this matrix).
         run: |
-          go build -o ${{ matrix.binary_name }} -ldflags="-s -w" ./cmd/watercolormap
+          LDFLAGS="-s -w"
+          if command -v mapnik-config >/dev/null 2>&1; then
+            FONTS=$(mapnik-config --fonts || true)
+            PLUGINS=$(mapnik-config --input-plugins || true)
+            if [ -n "$FONTS" ] && [ -n "$PLUGINS" ]; then
+              LDFLAGS="$LDFLAGS -X github.com/omniscale/go-mapnik/v2.fontPath=$FONTS -X github.com/omniscale/go-mapnik/v2.pluginPath=$PLUGINS"
+            fi
+          fi
+          echo "ldflags: $LDFLAGS"
+          go build -o ${{ matrix.binary_name }} -ldflags="$LDFLAGS" ./cmd/watercolormap
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1

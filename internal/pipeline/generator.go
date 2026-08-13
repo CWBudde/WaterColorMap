@@ -640,15 +640,15 @@ func paintAreaLayers(
 
 	// Paint urban with roads/railroads/highways subtracted (similar to land subtraction)
 	if err := paintAreaMinusRoads(painted, rawLayers, geojson.LayerUrban, roadsRailroadsHighwaysUnion, params, dc,
-		"14b_urban_minus_roads", "Urban areas with roads/railroads/highways subtracted",
+		"14b_urban_minus_roads", "Urban areas with roads/railroads/highways subtracted", 14,
 		"14_painted_urban", "Watercolor-painted urban layer", 14); err != nil {
 		return err
 	}
 
 	// Paint civic with roads/railroads/highways subtracted (similar to land subtraction)
 	if err := paintAreaMinusRoads(painted, rawLayers, geojson.LayerCivic, roadsRailroadsHighwaysUnion, params, dc,
-		"14c_civic_minus_roads", "Civic areas with roads/railroads/highways subtracted",
-		"15_painted_civic", "Watercolor-painted civic layer", 14); err != nil {
+		"14c_civic_minus_roads", "Civic areas with roads/railroads/highways subtracted", 14,
+		"15_painted_civic", "Watercolor-painted civic layer", 15); err != nil {
 		return err
 	}
 
@@ -671,9 +671,10 @@ func paintAreaMinusRoads(
 	dc *DebugContext,
 	minusStage string,
 	minusDescription string,
+	minusZOrder int,
 	paintedStage string,
 	paintedDescription string,
-	zorder int,
+	paintedZOrder int,
 ) error {
 	img := rawLayers[layer]
 	if img == nil {
@@ -682,13 +683,13 @@ func paintAreaMinusRoads(
 	areaMask := mask.ExtractAlphaMask(img)
 	// Subtract roads, railroads, and highways from the area
 	areaMinusRoads := mask.SubtractMask(areaMask, roadsUnion)
-	dc.Capture(minusStage, minusDescription, areaMinusRoads, zorder)
+	dc.Capture(minusStage, minusDescription, areaMinusRoads, minusZOrder)
 	result, err := watercolor.PaintLayerFromMask(areaMinusRoads, layer, params)
 	if err != nil {
 		return fmt.Errorf("failed to paint %s: %w", layer, err)
 	}
 	painted[layer] = result
-	dc.Capture(paintedStage, paintedDescription, result, zorder)
+	dc.Capture(paintedStage, paintedDescription, result, paintedZOrder)
 	return nil
 }
 

@@ -66,8 +66,8 @@ includes = ["*.sh"]
 priority = 1           # run after shellcheck
 
 ### Dockerfile
-
-[formatter.dockerfile]
-command = "shfmt"
-options = ["-s", "-w"]
-includes = ["*/Dockerfile"]
+#
+# Deliberately NOT formatted. shfmt is a shell formatter and a Dockerfile is not
+# a shell script: it strips the trailing "\" line continuations from multi-line
+# RUN instructions, which ends the instruction early and makes the image
+# unbuildable. Use hadolint (a linter, not a formatter) if this needs checking.

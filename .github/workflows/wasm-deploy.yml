@@ -57,8 +57,13 @@ jobs:
             python3-mapnik
 
       - name: Build watercolormap binary
+        # Link-time Mapnik paths: go-mapnik defaults to /usr/local/lib/mapnik/{fonts,input},
+        # which does not exist on the runner, so without these the tiles generated below
+        # render with no fonts and no input plugins registered.
         run: |
-          go build -o ./bin/watercolormap ./cmd/watercolormap
+          go build \
+            -ldflags "-X github.com/omniscale/go-mapnik/v2.fontPath=$(mapnik-config --fonts) -X github.com/omniscale/go-mapnik/v2.pluginPath=$(mapnik-config --input-plugins)" \
+            -o ./bin/watercolormap ./cmd/watercolormap
 
       - name: Generate static tiles
         run: |
