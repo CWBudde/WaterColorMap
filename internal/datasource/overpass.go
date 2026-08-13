@@ -358,9 +358,6 @@ var parksRules = []featureRule{
 
 	// landuse=grass only, not natural=grassland or meadow/farmland.
 	{elems: wayOnly, filter: `["landuse"="grass"]`, minZoom: 10},
-	// NOTE: natural=heath is emitted a second time here (way only), duplicating
-	// the z8+ rule above. Preserved verbatim; see the follow-up in the PR.
-	{elems: wayOnly, filter: `["natural"="heath"]`, minZoom: 10},
 
 	{elems: wayOnly, filter: `["leisure"="garden"]`, minZoom: 14},
 	{elems: wayOnly, filter: `["landuse"="orchard"]`, minZoom: 14},
@@ -380,11 +377,12 @@ var parksRules = []featureRule{
 //   - z12-13: + secondary, tertiary
 //   - z14-15: + residential, unclassified, living_street
 //   - z16+: All roads
+//
+// Including primary from z8 is intentional: an older description claimed
+// "motorway + trunk" for z8-9, but the shipped regex has always matched primary
+// too, and the goldens pin that behaviour — do not "correct" it back.
 var roadsRules = []featureRule{
 	{elems: wayOnly, filter: `["highway"~"motorway|motorway_link"]`, minZoom: 5, maxZoom: 7},
-	// NOTE: the historical z8-9 comment said "motorway + trunk", but the regex
-	// has always matched primary too, and z10-11 used the identical regex.
-	// Preserved verbatim; see the follow-up in the PR.
 	{
 		elems:   wayOnly,
 		filter:  `["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link"]`,
