@@ -753,28 +753,84 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
 
 ### 7.3 Code quality & correctness (P1/P2)
 
-- [ ] **[P1]** Shared, non-unique GeoJSON temp path (`renderer/multipass.go:175`) — base (256px) and
-      `@2x` (512px) renders of the same coords write/delete the identical temp file concurrently and race.
-      Include tile size + a random token (or use the per-call temp dir).
-- [ ] **[P1]** Replace `debugCtx interface{}` + unchecked type assertion (`pipeline/generator.go:140,151`)
-      with the concrete `*DebugContext` — removes a panic path and cleans the `worker.Generator` interface.
-- [ ] **[P2]** Buffer-pooling infrastructure (`ProcessorContext`, `DistanceContext`) is built but
-      bypassed — `paintFromFinalMask` allocates a fresh context per call (~8×/tile). Either thread a
-      per-worker context through the pipeline or delete the pooling façade.
-- [ ] **[P2]** Fix `worker/pool.go:96` — `break` inside `select` doesn't exit the feed loop, so
-      `ctx.Done()` cancellation is dead logic (only harmless because `taskCh` is fully buffered).
-- [ ] **[P2]** Consolidate duplicated Web-Mercator math (`tile/coords.go:76`, `renderer/mapnik.go:115`,
-      `raster/raster.go:342`; `mapnik.go:119` even hardcodes `3.14159265359` next to `math.Pi`).
-- [ ] **[P2]** Single source of truth for layer compositing order (`composite.DefaultOrder` is unused
-      and disagrees with the hard-coded slice in `pipeline/generator.go:597`).
-- [ ] **[P2]** Replace 12–18 positional-arg functions (`cmd/generate.go:146,213`) with a
-      `GenerateOptions` struct.
-- [ ] **[P3]** De-duplicate near-identical threshold/noise funcs (`mask/processor.go:396/429`, `286/334`)
-      and the repetitive Overpass query builders (`overpass.go:249-448`, table-driven by zoom).
-- [ ] **[P3]** MBTiles gzips PNG payloads (`mbtiles/writer.go:178`) — non-standard; external tools
-      (QGIS, tileserver-gl) expect raw PNG. Store PNG raw if interop matters.
-- [ ] **[P3]** Check `Close()` errors on files being written (`pipeline/generator.go:651`,
-      `texture/generator.go:135`) to avoid silent truncation.
+- [x] **[P0]** CI `test-lint` never installed Mapnik (out of scope for 7.3, fixed here to unblock it) —
+      golangci-lint builds the packages it lints, so `internal/renderer`'s cgo import failed typecheck with
+      `mapnik/version.hpp: No such file or directory` and the lint job was red on `main` and on every PR.
+      7.1 added the install step to `test-unit.yaml` and `test-can-build.yaml` already had it, but
+      `test-lint.yaml` was missed. All four CI jobs now pass. (PR #17)
+- [x] **[P1]** Shared, non-unique GeoJSON temp path (`renderer/multipass.go`) — the directory was a fixed
+      `os.TempDir()/watercolormap` and the filename `{coords}_{layer}.geojson`, but `Coords.String()` is
+      `z{z}_x{x}_y{y}` and carries no tile size. Base (256px) and `@2x` (512px) renders are separate
+      `*pipeline.Generator` instances cached in the same `sync.Map`, so concurrent requests for one z/x/y
+      wrote and `defer os.Remove`d the identical file; that path is also substituted into the style XML as
+      `DATASOURCE_PLACEHOLDER` **and** used as the Mapnik layer name, so a lost race fed Mapnik the wrong
+      geometry or no file at all. Parallel `go test` binaries shared it too. Replaced with a per-renderer
+      `os.MkdirTemp("", "watercolormap-geojson-*")` removed in `Close()` — chosen over salting the filename
+      because it also sweeps orphans and keeps the derived layer name readable. Two constructor error paths
+      were leaking the Mapnik renderer and the temp dir; both now unwind, and `Close()` is idempotent. (PR #13)
+- [x] **[P1]** Replaced `debugCtx interface{}` (`pipeline/generator.go`) — the unchecked type assertion had
+      already been `ok`-checked in earlier work, so what actually remained was the `interface{}` typing, which
+      existed only because `worker.Generator` declared it that way. No production caller ever passed a non-nil
+      value; the single non-nil caller in the repo was one test. Rather than make the interface depend on the
+      concrete `*DebugContext`, the debug parameter was dropped from `worker.Generator` entirely, so `worker`
+      keeps a 4-arg `Generate` and needs no dependency on `pipeline` at all; `GenerateWithDebug` covers the
+      debug case. (PR #15)
+- [x] **[P2]** Wired the bypassed buffer-pooling infrastructure up — a package-level `sync.Pool` (the repo
+      had no `sync.Pool` anywhere before) now backs `paintFromFinalMask` and `EuclideanDistanceTransform`,
+      reusing the existing `EnsureCapacity`; no signatures changed. BenchmarkPaintFromMask: allocs/op −73%,
+      B/op −78%, and since painting runs on the padded metatile (padPx ≥ 64) the real saving is larger than
+      the 256px benchmark suggests. Pooling surfaced two latent bugs that a throwaway context had hidden: the
+      shade-branch buffer swap left `ctx.painted` and `ctx.tempNRGBA` aliasing the same buffer (harmless until
+      reuse, then corrupting), and because `EnsureCapacity` grows but never shrinks while the result bounds
+      are read back off the buffers, an oversized pooled context would have returned an oversized image —
+      such contexts are now dropped instead of reused. (PR #19)
+- [x] **[P2]** `worker/pool.go` `break` inside `select` — already fixed during the 7.1 lint cleanup (PR #10,
+      commit `cc7acca`). The cancellation case is now deliberately empty with a comment explaining why:
+      `taskCh` is buffered to `len(tasks)`, so a send is always ready and exiting the loop early would change
+      how many `Result`s a cancelled run returns.
+- [x] **[P2]** Consolidated duplicated Web-Mercator math — there were six implementations, not the three the
+      review found: forward in `tile/coords.go`, `renderer/mapnik.go` and `raster/raster.go`, plus two
+      different inverses (`tile.mercatorToLonLat`, and `types.mercatorToLat` via `Sinh`) and an unshared clamp
+      constant in `types`. All now route through a new leaf package `internal/geo`, which imports nothing from
+      `internal/` so it cannot introduce a cycle. The truncated `3.14159265359` turned out to be cosmetic —
+      max deviation 1.3e-6 m, about 1 part in 1.5e13; the real hazard was `latLonToWebMercator` taking
+      `(lat, lon)` while everything around it took `(lon, lat)`. Also fixed: `raster.lonLatToLocalPx` had no
+      latitude clamp, so lat = ±90 produced a garbage pixel ordinate. (PR #16)
+- [x] **[P2]** Single source of truth for layer compositing order — three orders disagreed: the hard-coded
+      slice in `pipeline/generator.go` (the one that actually shipped), the stale `composite.DefaultOrder`
+      (9 entries, no rivers, water at the bottom, buildings below roads) and a third in `cmd/wasm/main.go`.
+      `DefaultOrder` is now authoritative and holds the live generator slice verbatim, so production rendering
+      is byte-for-byte unchanged; WASM now follows production, which _does_ change WASM output — it previously
+      drew water below land and civic above parks. (PR #15)
+- [x] **[P2]** Replaced the 12–18 positional-arg functions in `cmd/generate.go` — `runBatchGenerate` had
+      already been converted to a `batchOptions` struct, so `runSingleGenerate`'s remaining 12 positional
+      params now take a `singleOptions` struct following that same in-repo pattern (fields grouped by type to
+      satisfy `fieldalignment`). Kept separate from `batchOptions` rather than sharing an embedded struct:
+      only nine fields overlap, and embedding would have rewritten every `opts.` reference across six
+      helpers. (PR #12)
+- [x] **[P3]** De-duplicated the threshold/noise funcs and the Overpass query builders. `ApplyNoiseToMask`
+      was `ApplyNoiseToMaskAdaptive` with `noiseScale == 1`, and the two antialiased-threshold functions
+      differed in three lines of polarity; both collapsed behind thin wrappers keeping the exported names,
+      with the loop-invariant `lower`/`upper` hoisted, the existing `smoothstep` reused, and both doc comments
+      corrected (they claimed "smootherstep (3t²-2t³)" while computing plain smoothstep). Bit-identity was
+      verified exhaustively over all 256 thresholds × 256 gray levels × both polarities. The Overpass builders
+      became `featureRule` tables with `[minZoom,maxZoom]` windows, guarded by golden tests landed _first_
+      (38 goldens: zooms 0–18 × both `clipGeomToBbox` values) and verified byte-identical across the rewrite.
+      Tabulating them exposed three latent oddities, deliberately left as-is and recorded as follow-ups: parks
+      emit `natural=heath` twice from z10, the roads z8-9 comment understates a regex that also matches
+      `primary`, and the z8-9 and z10-11 road regexes are identical (so they collapse into one 8-11
+      rule). (PRs #19 and #14)
+- [x] **[P3]** MBTiles no longer gzips PNG payloads — tiles are stored as raw PNG per the MBTiles 1.3 spec
+      (gzip applies to `pbf` vector tiles, not raster), so QGIS and tileserver-gl can read them; the metadata
+      already said `format: png` with no compression key, so the files were actively mislabelled. The reader
+      sniffs the gzip magic `1f 8b` and passes non-gzipped payloads straight through, so already-generated
+      files stay readable and this is not a breaking change. Two adjacent defects fixed in the same area:
+      `ToMap` omitted `minzoom`/`maxzoom` when `<= 0`, silently dropping z0 (now `*int`, since a `-1` sentinel
+      would collide with Go's zero value), and `metadata(name)` gained its missing PRIMARY KEY. (PR #18)
+- [x] **[P3]** `Close()` errors on files being written — already fixed in the work that landed as PR #10.
+      `texture.writePNG` uses a named return and reports the close error, and the pipeline write path was
+      replaced by `encodePNGAtomic`, which closes explicitly and checks. The remaining unchecked closes are
+      all on read/cleanup paths and are annotated as such.
 
 ### 7.4 CI / build / tooling (P1/P2)
 
