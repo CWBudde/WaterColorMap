@@ -159,29 +159,61 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	return runSingleGenerate(zoom, x, y, force, outputDir, dataSourceName, tileSize, hidpi, pngCompression, seed, keepLayers, folderStructure)
+	return runSingleGenerate(&singleOptions{
+		outputDir:       outputDir,
+		dataSourceName:  dataSourceName,
+		pngCompression:  pngCompression,
+		folderStructure: folderStructure,
+		seed:            seed,
+		zoom:            zoom,
+		x:               x,
+		y:               y,
+		tileSize:        tileSize,
+		force:           force,
+		hidpi:           hidpi,
+		keepLayers:      keepLayers,
+	})
 }
 
-func runSingleGenerate(zoom, x, y int, force bool, outputDir, dataSourceName string, tileSize int, hidpi bool, pngCompression string, seed int64, keepLayers bool, folderStructure string) error {
-	coords := tile.NewCoords(uint32(zoom), uint32(x), uint32(y))
+// singleOptions collects every setting for a single-tile generation run. It
+// exists to keep runSingleGenerate from taking a dozen loose parameters, and
+// mirrors the shared subset of batchOptions. Fields are grouped by type to
+// satisfy the fieldalignment check.
+type singleOptions struct {
+	outputDir       string
+	dataSourceName  string
+	pngCompression  string
+	folderStructure string
+	seed            int64
+	zoom            int
+	x               int
+	y               int
+	tileSize        int
+	force           bool
+	hidpi           bool
+	keepLayers      bool
+}
+
+func runSingleGenerate(opts *singleOptions) error {
+	coords := tile.NewCoords(uint32(opts.zoom), uint32(opts.x), uint32(opts.y))
 
 	logger.Info("Starting tile generation",
 		"coords", coords.String(),
-		"output_dir", outputDir,
-		"force", force,
-		"data_source", dataSourceName,
-		"tile_size", tileSize,
-		"hidpi", hidpi,
-		"png_compression", pngCompression,
-		"seed", seed,
-		"keep_layers", keepLayers,
+		"output_dir", opts.outputDir,
+		"force", opts.force,
+		"data_source", opts.dataSourceName,
+		"tile_size", opts.tileSize,
+		"hidpi", opts.hidpi,
+		"png_compression", opts.pngCompression,
+		"seed", opts.seed,
+		"keep_layers", opts.keepLayers,
 	)
 
-	if zoom < 0 || x < 0 || y < 0 {
+	if opts.zoom < 0 || opts.x < 0 || opts.y < 0 {
 		return fmt.Errorf("invalid coordinates: zoom/x/y must be non-negative")
 	}
 
-	ds, err := newTileDataSource(dataSourceName)
+	ds, err := newTileDataSource(opts.dataSourceName)
 	if err != nil {
 		return err
 	}
@@ -189,34 +221,34 @@ func runSingleGenerate(zoom, x, y int, force bool, outputDir, dataSourceName str
 	stylesDir := filepath.Join("assets", "styles")
 	texturesDir := filepath.Join("assets", "textures")
 
-	gen, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, outputDir, tileSize, seed, keepLayers, logger, pipeline.GeneratorOptions{
-		PNGCompression:  pngCompression,
-		FolderStructure: folderStructure,
+	gen, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize, opts.seed, opts.keepLayers, logger, pipeline.GeneratorOptions{
+		PNGCompression:  opts.pngCompression,
+		FolderStructure: opts.folderStructure,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to init generator: %w", err)
 	}
 
-	path, layersDir, err := gen.Generate(context.Background(), coords, force, "")
+	path, layersDir, err := gen.Generate(context.Background(), coords, opts.force, "")
 	if err != nil {
 		return fmt.Errorf("failed to generate tile: %w", err)
 	}
 
 	logFields := []interface{}{"coords", coords.String(), "path", path}
-	if keepLayers && layersDir != "" {
+	if opts.keepLayers && layersDir != "" {
 		logFields = append(logFields, "layers_dir", layersDir)
 	}
 	logger.Info("Tile generated", logFields...)
 
-	if hidpi {
-		gen2x, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, outputDir, tileSize*2, seed, keepLayers, logger, pipeline.GeneratorOptions{
-			PNGCompression:  pngCompression,
-			FolderStructure: folderStructure,
+	if opts.hidpi {
+		gen2x, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize*2, opts.seed, opts.keepLayers, logger, pipeline.GeneratorOptions{
+			PNGCompression:  opts.pngCompression,
+			FolderStructure: opts.folderStructure,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to init hidpi generator: %w", err)
 		}
-		path2x, _, err := gen2x.Generate(context.Background(), coords, force, "@2x")
+		path2x, _, err := gen2x.Generate(context.Background(), coords, opts.force, "@2x")
 		if err != nil {
 			return fmt.Errorf("failed to generate hidpi tile: %w", err)
 		}
