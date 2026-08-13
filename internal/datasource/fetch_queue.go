@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cwbudde/watercolormap/internal/safe"
 	"github.com/cwbudde/watercolormap/internal/types"
 )
 
@@ -187,6 +188,35 @@ func (fq *FetchQueue) Status() FetchQueueStatus {
 	}
 }
 
+// runJob performs one fetch, recovering from a panic in the datasource or in
+// Overpass response parsing.
+//
+// The recovery is deliberately per job, not per worker: recovering around the
+// worker loop would leave the goroutine dead and silently shrink the pool. It
+// is also essential that the result is delivered even when the job panicked —
+// a caller blocked in SubmitAndWait only unblocks on a result or on its own
+// context expiring, so a swallowed panic would strand it for the full request
+// timeout.
+func (fq *FetchQueue) runJob(log *slog.Logger, job FetchJob) {
+	var result FetchResult
+	if err := safe.Do(log, "overpass fetch", func() {
+		result = fq.doFetch(fq.ctx, job.Coordinate, job.Bounds)
+	}); err != nil {
+		// doFetch's own deferred cleanup (activeFetches, currentTiles) has
+		// already run as the panic unwound; only the failure count is missing.
+		fq.totalFailed.Add(1)
+		result = FetchResult{Error: fmt.Errorf("fetch panicked: %w", err)}
+	}
+
+	if job.ResultChan != nil {
+		select {
+		case job.ResultChan <- result:
+		default:
+			log.Warn("result channel full or closed", "tile", formatTileCoord(job.Coordinate))
+		}
+	}
+}
+
 func (fq *FetchQueue) worker(id int) {
 	defer fq.wg.Done()
 	log := fq.cfg.Logger.With("worker_id", id)
@@ -202,14 +232,7 @@ func (fq *FetchQueue) worker(id int) {
 				log.Debug("fetch worker channel closed")
 				return
 			}
-			result := fq.doFetch(fq.ctx, job.Coordinate, job.Bounds)
-			if job.ResultChan != nil {
-				select {
-				case job.ResultChan <- result:
-				default:
-					log.Warn("result channel full or closed", "tile", formatTileCoord(job.Coordinate))
-				}
-			}
+			fq.runJob(log, job)
 		}
 	}
 }
