@@ -51,11 +51,12 @@ func expectColor(t *testing.T, got color.NRGBA, want color.NRGBA, context string
 func TestCompositeUsesOrderAndTransparency(t *testing.T) {
 	tileSize := 4
 
-	water := image.NewNRGBA(image.Rect(0, 0, tileSize, tileSize))
-	fillRect(water, water.Bounds(), color.NRGBA{B: 255, A: 255})
-
+	// DefaultOrder stacks land below water below roads.
 	land := image.NewNRGBA(image.Rect(0, 0, tileSize, tileSize))
-	fillRect(land, image.Rect(0, 0, tileSize/2, tileSize/2), color.NRGBA{G: 255, A: 255})
+	fillRect(land, land.Bounds(), color.NRGBA{G: 255, A: 255})
+
+	water := image.NewNRGBA(image.Rect(0, 0, tileSize, tileSize))
+	fillRect(water, image.Rect(0, 0, tileSize/2, tileSize/2), color.NRGBA{B: 255, A: 255})
 
 	roads := image.NewNRGBA(image.Rect(0, 0, tileSize, tileSize))
 	for y := 0; y < tileSize; y++ {
@@ -73,15 +74,15 @@ func TestCompositeUsesOrderAndTransparency(t *testing.T) {
 		t.Fatalf("CompositeLayers returned error: %v", err)
 	}
 
-	expectColor(t, out.NRGBAAt(0, 0), color.NRGBA{G: 255, A: 255}, "land should sit above water")
-	expectColor(t, out.NRGBAAt(3, 3), color.NRGBA{B: 255, A: 255}, "water should show where land is transparent")
+	expectColor(t, out.NRGBAAt(0, 0), color.NRGBA{B: 255, A: 255}, "water should sit above land")
+	expectColor(t, out.NRGBAAt(3, 3), color.NRGBA{G: 255, A: 255}, "land should show where water is transparent")
 
 	expectedRoad := blendNRGBA(
 		color.NRGBA{R: 255, A: 128},
-		color.NRGBA{G: 255, A: 255},
+		color.NRGBA{B: 255, A: 255},
 	)
-	expectColor(t, out.NRGBAAt(1, 1), expectedRoad, "road should alpha-blend on top of land")
-	expectColor(t, out.NRGBAAt(0, 1), color.NRGBA{G: 255, A: 255}, "neighbor pixel remains aligned")
+	expectColor(t, out.NRGBAAt(1, 1), expectedRoad, "road should alpha-blend on top of water")
+	expectColor(t, out.NRGBAAt(0, 1), color.NRGBA{B: 255, A: 255}, "neighbor pixel remains aligned")
 }
 
 func TestCompositeValidatesBounds(t *testing.T) {

@@ -10,16 +10,22 @@ import (
 )
 
 // DefaultOrder defines the bottom-to-top compositing order for watercolor layers.
+// It is the single source of truth for layer stacking; callers that composite a
+// full tile should pass nil (or DefaultOrder) rather than spelling out an order.
+// Urban/civic are below parks so green spaces show on top of developed areas.
+// Buildings are on top so individual footprints show over everything at high zoom.
+// Layers absent from the layer map are skipped, so partial renderers can reuse it.
 var DefaultOrder = []geojson.LayerType{
-	geojson.LayerWater,
 	geojson.LayerLand,
+	geojson.LayerUrban, // Urban landuse areas (lighter lavender)
+	geojson.LayerCivic, // Civic areas (schools, hospitals, universities)
 	geojson.LayerParks,
-	geojson.LayerUrban,     // Urban landuse areas (lighter lavender)
-	geojson.LayerCivic,     // Civic areas (schools, hospitals, universities)
-	geojson.LayerBuildings, // Buildings on top of urban (darker lavender)
+	geojson.LayerRivers, // Linear waterways
+	geojson.LayerWater,
 	geojson.LayerRoads,
 	geojson.LayerRailroads,
 	geojson.LayerHighways,
+	geojson.LayerBuildings, // Buildings on top (darker lavender)
 }
 
 // CompositeLayersOverBase stacks watercolor-painted layers into a single tile over a pre-filled base.

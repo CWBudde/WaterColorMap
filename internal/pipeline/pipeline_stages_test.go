@@ -64,7 +64,7 @@ func runPipelineStagesTest(t *testing.T, caseName string, ds DataSource, coords 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	_, _, err = gen.Generate(ctx, coords, true, "", debugCtx)
+	_, _, err = gen.GenerateWithDebug(ctx, coords, true, "", debugCtx)
 	require.NoError(t, err)
 
 	stages := debugCtx.SortedStages()

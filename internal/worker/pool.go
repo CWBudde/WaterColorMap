@@ -12,7 +12,7 @@ import (
 // Generator is the interface for tile generation.
 // This matches the signature of pipeline.Generator.Generate.
 type Generator interface {
-	Generate(ctx context.Context, coords tile.Coords, force bool, suffix string, debugCtx interface{}) (path string, layersDir string, err error)
+	Generate(ctx context.Context, coords tile.Coords, force bool, suffix string) (path string, layersDir string, err error)
 }
 
 // Task represents a single tile generation task.
@@ -156,7 +156,7 @@ func (p *Pool) worker(ctx context.Context, tasks <-chan Task, results chan<- Res
 		}
 
 		start := time.Now()
-		path, _, err := p.generator.Generate(ctx, task.Coords, task.Force, task.Suffix, nil)
+		path, _, err := p.generator.Generate(ctx, task.Coords, task.Force, task.Suffix)
 		elapsed := time.Since(start)
 
 		results <- Result{
