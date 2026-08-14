@@ -1,81 +1,119 @@
 # WaterColorMap Configuration Example
-# Copy this to config.yaml and adjust as needed
+# Copy this to config.yaml and adjust as needed.
+#
+# Key naming: top-level keys use the hyphenated flag spelling (data-source,
+# output-dir, log-level), while every key inside the per-command sections uses
+# UNDERSCORES, even though the matching CLI flag is hyphenated:
+#   --zoom-min  ->  generate.zoom_min
+#   --tiles-dir ->  serve.tiles_dir
+#   --input-dir ->  convert.input_dir
+#
+# Precedence: CLI flag > config file > built-in default. The per-command
+# sections below are commented out so a fresh copy of this file changes
+# nothing; uncomment only the keys you actually want to pin.
 
-# Data source configuration
-data-source: "overpass" # Options: overpass, protomaps, openmaptiles
+# Data source for OSM data. "overpass" is the only implemented source.
+data-source: "overpass"
 
-# Output settings
+# Default output directory for generated tiles (also the fallback for
+# serve.tiles_dir).
 output-dir: "./tiles"
 
-# Verbose logging
+# Logging
 verbose: false
+log-level: "info" # debug, info, warn, error
 
-# Overpass API settings
+# Overpass API endpoint.
+#
+# NOTE: this is honoured by `serve` only. `generate` always builds a default
+# single-server Overpass source and ignores everything under `overpass:`.
+# For geographic routing across several Overpass servers (also serve-only),
+# see config.multi-overpass.example.yaml.
 overpass:
   endpoint: "https://overpass-api.de/api/interpreter"
-  timeout: 30s
-  rate-limit: 2 # requests per second
-  retry:
-    max-attempts: 3
-    backoff: 2s
 
-# Tile generation settings
-tile:
-  # Image format settings
-  width: 256
-  height: 256
-  format: "png"
+# --- generate --------------------------------------------------------------
+# Values shown are the built-in defaults.
+# generate:
+#   # Single-tile mode (used when bbox is empty)
+#   zoom: 13
+#   x: 0
+#   y: 0
+#
+#   # Batch mode: set bbox to "minLon,minLat,maxLon,maxLat" to enable it.
+#   bbox: ""
+#   zoom_min: 0 # required (> 0) for batch mode
+#   zoom_max: 0 # required (> 0) for batch mode
+#   workers: 0 # 0 = one worker per CPU
+#   progress: true
+#   allow_failures: false # keep going when individual tiles fail
+#
+#   # Rendering
+#   force: false # regenerate even if the tile already exists
+#   tile_size: 256 # 512 for Hi-DPI base tiles
+#   hidpi: false # additionally render @2x tiles
+#   png_compression: "default" # default, speed, best, none
+#   seed: 1337 # deterministic noise/texture alignment
+#   keep_layers: false # keep intermediate layer PNGs for debugging
+#
+#   # Output
+#   format: "folder" # folder or mbtiles
+#   output_file: "" # required for format: mbtiles
+#   # folder_structure: flat = z{z}_x{x}_y{y}.png, nested = {z}/{x}/{y}.png
+#   folder_structure: "flat"
 
-  # Rendering settings
-  dpi: 96
+# --- serve -----------------------------------------------------------------
+# serve:
+#   addr: "127.0.0.1:8080"
+#   tiles_dir: "" # empty = use output-dir
+#   demo_dir: "docs/leaflet-demo"
+#   mbtiles: "" # serve from an MBTiles file instead of tiles_dir
+#
+#   # On-demand generation
+#   generate_missing: true
+#   disable_cache: false # always re-render, still writes to disk
+#   max_concurrent_generations: 0 # flag default is the CPU count
+#   generation_timeout: "2m"
+#   cache_control: "no-store"
+#   max_pending_generations: 0 # 0 = auto; excess requests get 503
+#
+#   # Rendering (same meaning as under generate)
+#   tile_size: 256
+#   png_compression: "default"
+#   seed: 1337
+#   keep_layers: false
+#
+#   # Data fetching
+#   overpass_workers: 4 # 2-4 is polite for the public API
+#   fetch_workers: 2
+#   data_size_warning_mb: 10
+#
+#   # Per-client rate limiting on /tiles/
+#   tile_rate_limit: 20 # requests per second, 0 disables
+#   tile_rate_burst: 400
+#   tile_rate_ttl: "10m" # idle time before a client entry is evicted
+#   tile_rate_max_entries: 20000
+#   trusted_proxies: "" # CIDRs whose X-Forwarded-For is trusted
+#
+#   shutdown_timeout: "30s"
 
-  # Caching
-  cache-enabled: true
-  cache-dir: "./cache"
+# --- convert (tile folder -> MBTiles) --------------------------------------
+# convert:
+#   input_dir: "./tiles"
+#   output: "" # required: path of the .mbtiles file to write
+#   name: "WaterColorMap"
+#   description: "Watercolor-styled map tiles"
+#   attribution: "© OpenStreetMap contributors"
+#   bounds: "" # optional "minLon,minLat,maxLon,maxLat" for the metadata
 
-# Test area - Hanover, Germany
-test-area:
-  name: "Hanover"
-  center:
-    lat: 52.3759
-    lon: 9.7320
-  zoom-range:
-    min: 10
-    max: 16
-
-  # Example test tile
-  test-tile:
-    zoom: 13
-    x: 4299
-    y: 2740
-
-# Feature rendering configuration
-rendering:
-  # Watercolor texture settings
-  textures:
-    path: "./assets/textures"
-    water: "water.png"
-    land: "land.png"
-    park: "park.png"
-    forest: "forest.png"
-
-  # Layer order (bottom to top)
-  layers:
-    - water
-    - land
-    - parks
-    - forests
-    - roads
-    - buildings
-
-  # Color schemes (fallback if textures not available)
-  colors:
-    water: "#a5bfdd"
-    land: "#f2efe9"
-    park: "#c8e6c9"
-    forest: "#81c784"
-    road: "#ffffff"
-    building: "#e0e0e0"
+# --- textures (generate the seamless watercolor textures) ------------------
+# textures:
+#   dir: "assets/textures"
+#   size: 1024 # pixels, square
+#   seed: 1337
+#   variation: 1.0 # 0..1
+#   brushness: 1.0 # 0..1, brush stroke strength
+#   force: false # overwrite existing textures
 
 # Watercolor tuning (optional).
 #
@@ -119,3 +157,8 @@ rendering:
 #       tint:
 #         color: "#8ab4c8"         # recolours this layer's paper texture
 #         strength: 0.25           # 0..1; 0 is untinted, 1 is flat colour
+
+# Not configurable: the layer set (water, rivers, land, parks, urban, civic,
+# buildings, roads, railroads, highways, paper) and the texture used for each
+# layer are hard-coded in the renderer, as are the fallback colours. Change
+# them by editing assets/styles and assets/textures, not this file.

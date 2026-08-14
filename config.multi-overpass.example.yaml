@@ -1,5 +1,10 @@
 # WaterColorMap Multi-Server Overpass Configuration Example
-# This demonstrates how to configure multiple Overpass API servers with geographic routing
+# This demonstrates how to configure multiple Overpass API servers with
+# geographic routing.
+#
+# NOTE: multi-server routing is used by `serve` only. `generate` always builds
+# a default single-server Overpass source and ignores everything under
+# `overpass:`. See config.example.yaml for the remaining settings.
 
 # Data source configuration
 data-source: "overpass"
@@ -7,7 +12,7 @@ data-source: "overpass"
 # Output settings
 output-dir: "./tiles"
 
-# Verbose logging
+# Logging
 verbose: false
 log-level: "info"
 
@@ -32,46 +37,10 @@ overpass:
       workers: 2 # Conservative for public API
       # No coverage specified = matches everything
 
-# Alternative: Single server configuration (legacy format, still supported)
-# If you uncomment this and remove overpass.servers above, it uses single-server mode
+# Alternative: single-server configuration. Remove overpass.servers above and
+# uncomment this to have `serve` use one endpoint.
 # overpass:
 #   endpoint: "https://overpass-api.de/api/interpreter"
-#   timeout: 30s
-#   rate-limit: 2
-
-# Tile generation settings
-tile:
-  width: 256
-  height: 256
-  format: "png"
-  dpi: 96
-  cache-enabled: true
-  cache-dir: "./cache"
-
-# Feature rendering configuration
-rendering:
-  textures:
-    path: "./assets/textures"
-    water: "water.png"
-    land: "land.png"
-    park: "park.png"
-    forest: "forest.png"
-
-  layers:
-    - water
-    - land
-    - parks
-    - forests
-    - roads
-    - buildings
-
-  colors:
-    water: "#a5bfdd"
-    land: "#f2efe9"
-    park: "#c8e6c9"
-    forest: "#81c784"
-    road: "#ffffff"
-    building: "#e0e0e0"
 
 # Geographic coverage notes:
 # - Niedersachsen (Lower Saxony): 51.3°N to 53.9°N, 6.6°E to 11.6°E
