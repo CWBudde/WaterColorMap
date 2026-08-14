@@ -19,7 +19,11 @@ import (
 // MapnikRenderer wraps Mapnik for tile rendering
 type MapnikRenderer struct {
 	mapObject *mapnik.Map
-	tileSize  int
+	// scaleFactor is Mapnik's hi-DPI multiplier. Zero means "unset"; go-mapnik
+	// normalises that to 1.0, so a renderer that never calls SetScaleFactor
+	// issues exactly the same Mapnik call it always has.
+	scaleFactor float64
+	tileSize    int
 }
 
 func (r *MapnikRenderer) resetMapObject() {
@@ -69,7 +73,8 @@ func (r *MapnikRenderer) RenderTile(tile types.TileCoordinate, data *types.TileD
 
 	// Render to image (returns *image.NRGBA directly)
 	img, err := r.mapObject.RenderImage(mapnik.RenderOpts{
-		Format: "png32",
+		Format:      "png32",
+		ScaleFactor: r.scaleFactor,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to render tile: %w", err)
@@ -95,7 +100,8 @@ func (r *MapnikRenderer) RenderToFile(tile types.TileCoordinate, outputPath stri
 
 	// Render directly to file
 	if err := r.mapObject.RenderToFile(mapnik.RenderOpts{
-		Format: "png32",
+		Format:      "png32",
+		ScaleFactor: r.scaleFactor,
 	}, outputPath); err != nil {
 		return fmt.Errorf("failed to render to file: %w", err)
 	}
@@ -115,7 +121,8 @@ func (r *MapnikRenderer) Close() error {
 // RenderCurrentToFile renders using the current map state (SRS + extent already set).
 func (r *MapnikRenderer) RenderCurrentToFile(outputPath string) error {
 	if err := r.mapObject.RenderToFile(mapnik.RenderOpts{
-		Format: "png32",
+		Format:      "png32",
+		ScaleFactor: r.scaleFactor,
 	}, outputPath); err != nil {
 		return fmt.Errorf("failed to render to file: %w", err)
 	}
@@ -217,4 +224,28 @@ func (r *MapnikRenderer) SetBounds(minX, minY, maxX, maxY float64) error {
 // SetBufferSize sets the buffer size around the tile (for label placement, etc.)
 func (r *MapnikRenderer) SetBufferSize(pixels int) {
 	r.mapObject.SetBufferSize(pixels)
+}
+
+// SetScaleFactor sets Mapnik's hi-DPI scale factor, i.e. how many device pixels
+// one "reference" pixel of the stylesheet is worth. Callers pass
+// watercolor.ScaleForTileSize(baseTileSize); note that the renderer's own
+// tileSize is the padded metatile size and must not be used to derive this.
+//
+// It does two things, and the second one matters more:
+//
+//  1. stroke-width, font sizes and marker sizes in assets/styles/layers/*.xml are
+//     fixed device-pixel values, so without it a 512px @2x tile draws roads at the
+//     same pixel width as the 256px tile covering the same ground.
+//  2. Mapnik multiplies the scale denominator by this factor before evaluating
+//     Min/MaxScaleDenominator filters. An @2x tile has half the denominator of the
+//     @1x tile over the same extent, so without the correction it resolves a
+//     different detail tier and can draw road classes the @1x tile omits entirely.
+//
+// Values <= 0 are ignored, leaving the field at its zero value, which go-mapnik
+// normalises to 1.0.
+func (r *MapnikRenderer) SetScaleFactor(s float64) {
+	if s <= 0 {
+		return
+	}
+	r.scaleFactor = s
 }

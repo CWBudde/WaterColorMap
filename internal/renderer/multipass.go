@@ -51,6 +51,10 @@ func NewMultiPassRenderer(stylesDir, outputDir string, tileSize int, padPx int) 
 	}
 	renderSize := tileSize + 2*padPx
 
+	// Device pixels per world pixel. Derived from the base tile size, never from
+	// renderSize: the metatile padding is not part of the hi-DPI ratio.
+	scale := watercolor.ScaleForTileSize(tileSize)
+
 	// Create Mapnik renderer (empty style file, requested tile size)
 	mapnikRenderer, err := NewMapnikRenderer("", renderSize)
 	if err != nil {
@@ -64,9 +68,14 @@ func NewMultiPassRenderer(stylesDir, outputDir string, tileSize int, padPx int) 
 	// so it scales with the tile size. Left unscaled it would reach half as far
 	// on an @2x tile as on the 256px tile covering the same area, and features
 	// just outside the bounds would be clipped on one and not the other.
-	minBuf := int(math.Ceil(128 * watercolor.ScaleForTileSize(tileSize)))
+	minBuf := int(math.Ceil(128 * scale))
 	buf := max(padPx, minBuf)
 	mapnikRenderer.SetBufferSize(buf)
+
+	// The stylesheets' stroke widths and scale-denominator tiers are written for
+	// the 256px reference size; this is what carries them to @2x. See
+	// MapnikRenderer.SetScaleFactor.
+	mapnikRenderer.SetScaleFactor(scale)
 
 	// Create a private temp directory for GeoJSON files.
 	// It must be unique per renderer: the same tile coordinates are rendered
