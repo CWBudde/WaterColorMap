@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/aquilax/go-perlin v1.1.0
-	github.com/cwbudde/go-overpass v0.0.0-20260418190031-ddf15fac5067
+	github.com/cwbudde/go-overpass v0.1.0
 	github.com/disintegration/gift v1.2.1
 	github.com/omniscale/go-mapnik/v2 v2.0.1
 	github.com/paulmach/orb v0.12.0
