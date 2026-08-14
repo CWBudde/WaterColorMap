@@ -11,20 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Setup Go-Version
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-          cache-dependency-path: "*/*.sum"
+          cache-dependency-path: go.sum
 
       - name: Download go dependencies
         run: |
           go mod download
 
       - name: Setup just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
 
       - name: Install Mapnik dependencies
         run: |
@@ -36,19 +36,64 @@ jobs:
             libicu-dev \
             python3-mapnik
 
-      - name: Check generated
-        run: |
-          just check-generated
-
       - name: Check tidy
         run: |
           just check-tidy
 
       - name: Run linter
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
         with:
           # Must be built with a Go >= the version in go.mod, otherwise it aborts
           # with "the Go language version used to build golangci-lint is lower
           # than the targeted Go version" before linting anything.
           version: v2.12.2
           args: -D exhaustruct -D exhaustive -D godox --timeout 5m
+
+  # Lints what golangci-lint does not cover: the Dockerfile, the YAML, and the
+  # workflows themselves. These were configured only under .trunk/, which no
+  # workflow ever invoked, so they have never gated a merge. Needs neither Go nor
+  # Mapnik, so it runs as its own job instead of extending the one above.
+  lint-config:
+    runs-on: ubuntu-latest
+    env:
+      # Pinned with checksums: a bare `curl | tar` into a privileged CI step is
+      # the same unverified-download pattern this PR series removes elsewhere.
+      HADOLINT_VERSION: 2.15.1
+      HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      YAMLLINT_VERSION: 1.38.0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install hadolint
+        run: |
+          curl -fsSL -o /tmp/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+          echo "${HADOLINT_SHA256}  /tmp/hadolint" > /tmp/hadolint.sha256
+          sha256sum -c /tmp/hadolint.sha256
+          sudo install -m 0755 /tmp/hadolint /usr/local/bin/hadolint
+
+      - name: Install actionlint
+        run: |
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" > /tmp/actionlint.sha256
+          sha256sum -c /tmp/actionlint.sha256
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+
+      - name: Install yamllint
+        run: pipx install "yamllint==${YAMLLINT_VERSION}"
+
+      - name: Run hadolint
+        run: hadolint docker/Dockerfile
+
+      - name: Run yamllint
+        run: yamllint --strict .
+
+      # Also runs shellcheck over every `run:` block, which is how the unquoted
+      # $GITHUB_ENV in build-release.yaml was found.
+      - name: Run actionlint
+        run: actionlint

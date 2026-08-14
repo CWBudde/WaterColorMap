@@ -89,20 +89,16 @@ setup-deps:
     just deps
     just deps-fmt
 
-# Check if go mod tidy is needed
+# Check if go mod tidy is needed.
+# Runs tidy first, then diffs. Diffing without running it only ever reported
+# whether the worktree was dirty, so an untidy committed go.mod passed.
 check-tidy:
-    @if [ -n "$(git diff go.mod go.sum)" ]; then \
-        echo "ERROR: go.mod or go.sum not tidy"; \
-        git diff go.mod go.sum; \
+    go mod tidy
+    @if ! git diff --exit-code go.mod go.sum; then \
+        echo "ERROR: go.mod or go.sum not tidy -- run 'go mod tidy' and commit the result"; \
         exit 1; \
-    else \
-        echo "go.mod and go.sum are tidy"; \
     fi
-
-# Check if generated files are up to date
-check-generated:
-    @echo "Checking generated files..."
-    @echo "All generated files are up to date"
+    @echo "go.mod and go.sum are tidy"
 
 # Lint code
 lint:

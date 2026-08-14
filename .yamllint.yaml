@@ -1,0 +1,18 @@
+# Semantics only. YAML *formatting* is owned by prettier via treefmt.toml, so
+# style rules are deliberately absent -- a quoting or line-length rule here would
+# fight the formatter, and on the next `just fmt` the formatter wins.
+# What is left are the checks prettier cannot make, because they change meaning
+# rather than layout.
+#
+# No `extends:`, so these are the only rules that run.
+rules:
+  # A duplicated key silently discards the earlier value.
+  key-duplicates: {}
+  # `0644` is an integer in YAML 1.1 and a string in YAML 1.2; forbid the
+  # ambiguity rather than depend on which one the parser implements.
+  octal-values:
+    forbid-implicit-octal: true
+
+ignore: |
+  .claude/
+  /config.yaml
