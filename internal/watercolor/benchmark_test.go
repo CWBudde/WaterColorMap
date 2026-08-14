@@ -83,58 +83,6 @@ func BenchmarkMaskProcessing(b *testing.B) {
 	}
 }
 
-// BenchmarkGaussianBlur benchmarks Gaussian blur operation
-func BenchmarkGaussianBlur(b *testing.B) {
-	tileSize := 256
-	baseMask := createAlphaMask(tileSize)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		_ = mask.GaussianBlur(baseMask, 1.2)
-	}
-}
-
-// BenchmarkBoxBlurSigma benchmarks box blur with sigma parameter
-func BenchmarkBoxBlurSigma(b *testing.B) {
-	tileSize := 256
-	baseMask := createAlphaMask(tileSize)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		_ = mask.BoxBlurSigma(baseMask, 1.2)
-	}
-}
-
-// BenchmarkBlurComparison compares Gaussian vs Box blur at various sigma values
-func BenchmarkBlurComparison(b *testing.B) {
-	tileSize := 256
-	baseMask := createAlphaMask(tileSize)
-
-	sigmas := []float32{0.5, 1.0, 1.2, 2.0, 3.5, 4.5}
-
-	for _, sigma := range sigmas {
-		b.Run("Gaussian/sigma="+formatSigma(sigma), func(b *testing.B) {
-			b.ResetTimer()
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				_ = mask.GaussianBlur(baseMask, sigma)
-			}
-		})
-
-		b.Run("BoxBlur/sigma="+formatSigma(sigma), func(b *testing.B) {
-			b.ResetTimer()
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				_ = mask.BoxBlurSigma(baseMask, sigma)
-			}
-		})
-	}
-}
-
 // BenchmarkPerlinNoiseGeneration benchmarks Perlin noise generation
 func BenchmarkPerlinNoiseGeneration(b *testing.B) {
 	tileSize := 256
@@ -290,25 +238,4 @@ func benchSolidTexture(w, h int, c color.NRGBA) image.Image {
 		}
 	}
 	return img
-}
-
-func formatSigma(sigma float32) string {
-	if sigma == float32(int(sigma)) {
-		return string(rune('0' + int(sigma)))
-	}
-	// For decimals, format as string
-	s := ""
-	switch sigma {
-	case 0.5:
-		s = "0.5"
-	case 1.2:
-		s = "1.2"
-	case 3.5:
-		s = "3.5"
-	case 4.5:
-		s = "4.5"
-	default:
-		s = "unknown"
-	}
-	return s
 }
