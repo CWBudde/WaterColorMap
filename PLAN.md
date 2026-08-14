@@ -840,25 +840,86 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
 
 ### 7.4 CI / build / tooling (P1/P2)
 
-- [ ] **[P1]** Make `build-release.yaml` actually produce binaries: it cross-compiles `CGO_ENABLED=1`
-      for arm64/windows/darwin-amd64 with no cross toolchain or cross-built Mapnik (3 of 5 targets fail);
-      the tag-push trigger has an empty `upload_url`; `actions/upload-release-asset@v1` is deprecated.
-      Drop unbuildable targets or add proper cross containers; replace the upload action.
-- [ ] **[P1]** Repair fake checks: `check-tidy` never runs `go mod tidy` before diffing (always passes);
-      `check-generated` is a stub that echoes success; `test-format` installs none of treefmt's formatters
-      so it verifies nothing. Make them real or delete them.
-- [ ] **[P1]** Collapse the three overlapping lint/format stacks (golangci-lint + trunk + treefmt) and
-      fix the gci prefix casing bug (`treefmt.toml:47` `WaterColorMap` → `watercolormap`, so local-import
-      grouping silently does nothing). Align golangci-lint versions (CI v2.2.1 vs trunk 2.7.2) and the
-      trunk Go runtime (1.21) with the project's Go 1.25.
-- [ ] **[P2]** Stop shfmt from formatting the Dockerfile (`treefmt.toml:70` — root cause of 7.1's
-      broken `&&`); add a `.dockerignore`; verify the downloaded Go tarball checksum; digest-pin base
-      images.
-- [ ] **[P2]** Fix the cache-dependency glob `*/*.sum` → `go.sum` (root lockfile) in
-      `test-unit/test-lint/test-can-build.yaml`; SHA-pin third-party actions.
-- [ ] **[P3]** Pin the core dependency `MeKo-Christian/go-overpass` (untagged pseudo-version on a
-      personal fork) or bring it in-org; emit `vX.Y.Z` release tags (release-please currently produces
-      bare `0.2.0`, which Go module tooling won't resolve).
+Four claims in this section were already stale when the work started — PRs #10 and #17 had fixed
+them — and one was simply wrong. They are corrected in place below rather than silently ticked, so
+that the record does not credit this phase with work it did not do:
+`treefmt.toml:47` already read lowercase `watercolormap`; shfmt already excluded the Dockerfile
+(`treefmt.toml:68-71`); `test-format` already installed **and asserted the presence of** every
+formatter; CI golangci-lint was already `v2.12.2`, not `v2.2.1`. And release-please was never
+emitting bare tags — `v0.2.0` and `v0.3.0` both exist and are correctly `v`-prefixed.
+
+- [x] **[P1]** `build-release.yaml` now produces binaries. Both prior releases shipped **zero**
+      assets, and the cause turned out not to be the trigger but `fail-fast`: in run `31657624994`
+      the `windows/amd64` leg — which had no Mapnik step at all, so could never build — failed at
+      ~1m and cancelled every sibling, including the `linux/amd64` leg that was on its way to a
+      working binary. `fail-fast: false` is therefore as load-bearing as the matrix change. Every
+      target is now built natively (the old matrix cross-compiled `CGO_ENABLED=1` with no
+      cross-built Mapnik, which cannot work): `linux/amd64`, `linux/arm64` on `ubuntu-24.04-arm`,
+      and the two darwin legs. `windows/amd64` dropped — Mapnik there needs vcpkg. `macos-13` no
+      longer exists as a runner label, so Intel macOS is `macos-15-intel`. **Both macOS legs are
+      marked `continue-on-error`** and are expected to fail: Homebrew ships Mapnik 4.3.0 while
+      `go-mapnik/v2` wraps the Mapnik **3** API, and `internal/renderer/mapnik.go:4` pins
+      `-std=c++14` where Mapnik 4 needs C++17. No macOS build has ever succeeded in this repo.
+      They stay visible rather than hidden; closing that gap is a source change (see 7.8).
+      Triggers collapse to `release: published` — `created` skips drafts, and the tag-push trigger
+      was unreachable three times over (no `v` prefix, `(-.*)?` is regex where GitHub takes globs,
+      and `github.event.release.*` is empty on that path). `workflow_dispatch` with a tag input
+      replaces it as the backfill handle. `actions/upload-release-asset@v1` (archived; its
+      `upload_url` input is _why_ the tag path could not work) gives way to `gh release upload
+--clobber`. Released binaries also reported `WaterColorMap dev` — `internal/cmd`'s
+      version/commit/date were only ever set by `Justfile:32`, which no workflow calls — so those
+      ldflags are now injected here, and a missing `mapnik-config` became a hard failure rather
+      than a silent font-less binary. The same dead tag filter was removed from `wasm-deploy.yml`,
+      where it was doubly unreachable: `tags:` and `paths:` are ANDed, and a release-please tag
+      commit touches only `CHANGELOG.md` and the manifest.
+- [x] **[P1]** The fake checks are gone. `check-tidy` now runs `go mod tidy` and _then_ diffs;
+      previously it diffed only, so it reported whether the worktree was dirty and an untidy
+      committed `go.mod` passed. Verified by committing one deliberately: exit 1 where the old
+      recipe returned 0. `check-generated` was deleted outright rather than made real — the repo
+      has zero `//go:generate` directives, so it could never fail, and a check that cannot fail is
+      worse than no check because it reads as coverage. (The `test-format` third of this item was
+      already fixed by PR #10; see the note above.)
+- [x] **[P1]** Three lint stacks collapsed to two. `.trunk/` was deleted: no workflow ever invoked
+      it, and it duplicated golangci-lint (2.7.2 vs CI's 2.12.2), gofmt and prettier while pinning
+      `go@1.21` against the project's 1.25. golangci-lint remains the Go linter and treefmt the
+      formatter — both already run in CI and were already aligned, so no version reconciliation was
+      needed. What trunk uniquely provided is now genuinely enforced for the first time, in a new
+      `lint-config` job: **hadolint, yamllint and actionlint**, each installed from a
+      checksum-pinned release. They immediately found real defects (see the Dockerfile item below,
+      and an unquoted `$GITHUB_ENV` in `build-release.yaml` caught by actionlint's shellcheck pass).
+      markdownlint was not carried over: its config disabled every formatting rule and prettier
+      already formats `*.md`, so it checked nothing. The yamllint config was narrowed to semantics
+      (duplicate keys, implicit octals) — its `quoted-strings` rule fought prettier, which owns YAML
+      formatting and would have won on the next `just fmt`.
+- [x] **[P2]** Docker hardened — and unbroken. **The image did not build at all**: `ubuntu:24.04`
+      now ships a default `ubuntu` account holding UID 1000, so `useradd -m -u 1000 mapuser` aborted
+      with exit 4. Pre-existing and unrelated to the digest pin (the floating tag resolves to the
+      very digest pinned here); 7.1 fixed a _different_ Dockerfile break and this one arrived later
+      from upstream. The UID is freed first and stays 1000 because `just docker-run` bind-mounts
+      host-owned `tiles/` and `cache/`. On top of that: a `.dockerignore` cuts the build context
+      from **607 MB to 38 MB** and stops unrelated churn from busting the `COPY . .` layer cache;
+      the Go tarball is verified against the SHA256 published on go.dev via paired
+      `GO_VERSION`/`GO_SHA256` ARGs (guard confirmed — a corrupted checksum fails at `sha256sum -c`,
+      before `tar` runs); and both stages are digest-pinned to the _same_ digest, which the floating
+      tag could not guarantee even though the runtime stage depends on having the builder's Mapnik.
+      The file is now hadolint-clean: DL4006 fixed by removing the pipes rather than muting the
+      rule, DL3008 ignored with a written reason (Ubuntu drops superseded versions from the archive,
+      so pinning apt versions turns the next security update into a build failure). The shfmt half
+      of this item was already done — see the note above.
+- [x] **[P2]** `cache-dependency-path: "*/*.sum"` matched nothing — the lockfile is the root
+      `go.sum` and the glob requires exactly one directory level — so `setup-go` was caching against
+      an empty key set. Fixed in all three workflows. Third-party actions are SHA-pinned with
+      trailing version comments; `actions/checkout` and `actions/setup-go` moved to majors running
+      on Node 24, since the release runs warn that Node 20 is deprecated and being force-migrated.
+      First-party `actions/*` stay on major tags — GitHub controls that namespace, and pinning them
+      buys Dependabot churn for no threat-model gain.
+- [ ] **[P3]** Pin the core dependency `CWBudde/go-overpass` (untagged pseudo-version
+      `v0.0.0-20260418190031-ddf15fac5067` on a personal fork of `serjvanilla/go-overpass`, which
+      currently has **no tags at all**) or bring it in-org. Needs an action in _that_ repo, so it is
+      not closable from here: tag `v0.1.0` at the already-pinned commit `ddf15fac5067` and
+      `go get github.com/cwbudde/go-overpass@v0.1.0`, which is behaviour-identical since the commit
+      does not move. Bringing it into MeKo-Tech instead interacts with the identity split tracked in
+      7.5. The release-tag half of this item was **incorrect** and is withdrawn — see the note above.
 
 ### 7.5 Documentation & repo hygiene (P1/P2)
 
@@ -925,6 +986,26 @@ this plan claims a follow-up exists without an entry to point at. **All three ar
       primary at z8-11, so all that remained was deleting the stale `NOTE` that pointed at this very
       follow-up, and folding a one-line rationale into the `roadsRules` doc comment so the next reader
       does not "correct" it back. Comment-only: zero golden churn.
+
+### 7.8 Follow-ups surfaced while completing 7.4 (P2/P3)
+
+- [ ] **[P2]** macOS releases cannot build until the Mapnik version gap is closed:
+      `internal/renderer/mapnik.go:4` pins `-std=c++14`, Homebrew ships Mapnik 4.3.0, and Mapnik 4
+      requires C++17 — while `go-mapnik/v2` documents itself as wrapping the Mapnik **3** API, so
+      simply raising the standard may not be sufficient. A GOOS-conditional
+      `#cgo darwin CXXFLAGS: -std=c++17` plus Homebrew `-I`/`-L` paths is the first thing to try.
+      Note this cannot be fixed from the workflow: cgo appends `#cgo` directive flags _after_
+      `CGO_CXXFLAGS`, so the source pin always wins. Until then the darwin legs stay
+      `continue-on-error` in `build-release.yaml`.
+- [ ] **[P2]** `wasm-deploy.yml`'s weekly cron has been failing since January 2026 and its failures
+      are unmonitored. Step logs have expired; the likely candidate is the `Generate static tiles`
+      step hitting Overpass. Out of scope for a release-pipeline repair.
+- [ ] **[P3]** The security scanners `.trunk/` nominally carried — checkov, trufflehog, osv-scanner —
+      were **not** ported into the new `lint-config` job. Adding three scanners under a lint ticket
+      would have smuggled in unreviewed failure modes. Decide deliberately whether to adopt them;
+      `osv-scanner` (Go dependency CVEs) is the one with the clearest value here.
+- [ ] **[P3]** `rootCmd` never sets cobra's `Version` field, so `watercolormap --version` errors
+      with "unknown flag" — the only surface is the `version` subcommand. One line to fix.
 
 ---
 
