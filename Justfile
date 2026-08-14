@@ -206,7 +206,6 @@ docker-run *args:
         -v "${PWD}/tiles:/app/tiles" \
         -v "${PWD}/cache:/app/cache" \
         -v "${PWD}/assets:/app/assets:ro" \
-        -e WATERCOLORMAP_CONFIG=/app/config.yaml \
         watercolormap:latest {{args}}
 
 # Start development Docker container
