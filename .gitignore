@@ -50,6 +50,8 @@ dist/
 # `go build ./cmd/wasm` writes its output binary here as `wasm`
 /wasm
 *.wasm
+# Go's WASM runtime shim, copied out of GOROOT by scripts/copy-wasm-exec.sh
+docs/wasm-playground/wasm_exec.js
 
 # Profiling data
 *.prof
