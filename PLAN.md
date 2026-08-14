@@ -535,7 +535,8 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 
 #### 5.11.2 Blur Optimization ✅ COMPLETE
 
-**Result**: 9-13x faster blur on the sigmas production uses; blur is no longer a bottleneck.
+**Result**: 2-11x faster blur depending on sigma (6-11x across the range the layer masks use);
+blur is no longer a bottleneck.
 
 - [x] Re-measure: the "39.6% Gaussian blur" figure was stale. `gift.GaussianBlur` had already been
       replaced by a 3-pass box blur, and the profile it came from predated that change.
@@ -588,8 +589,11 @@ These are with the rescaled sigmas below, which roughly double the kernel widths
 `MaskProcessing` was -42%. The blur itself is 8-11x faster either way — the pipeline numbers are
 smaller because blur was never the whole of it.
 
-Accuracy against a true Gaussian is now within 0.2 levels RMSE on the direct path and 0.8 on the box
-path; the old implementation was never measured against one.
+Accuracy against a true Gaussian is now within 0.2 levels RMSE on the direct path, and 0.8 to 1.6 on
+the box path, which drifts with sigma and is at its worst at the 7.48 land shade. The old
+implementation was never measured against one. `TestBlurAccuracyVsGaussian` pins both budgets and
+asserts which path each sigma takes, so moving `maxConvRadius` cannot silently reassign a case to
+the wrong budget.
 
 **Default sigmas were rescaled to keep the look.** Because the old blur ran about twice as wide as
 its nominal sigma, the sigma values in `DefaultParams` had been tuned by eye against that. They are

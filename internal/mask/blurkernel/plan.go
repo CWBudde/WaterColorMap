@@ -47,6 +47,18 @@ const (
 	ModeBox
 )
 
+func (m Mode) String() string {
+	switch m {
+	case ModeNone:
+		return "none"
+	case ModeConv:
+		return "conv"
+	case ModeBox:
+		return "box"
+	}
+	return "unknown"
+}
+
 // Plan is the kernel configuration derived from a sigma. Deriving it once and
 // reusing it for both passes keeps the sigma-to-kernel policy in a single place
 // and out of the hot loops.
@@ -79,9 +91,13 @@ func (p Plan) Radius() int {
 // Small sigmas use a direct convolution rather than the box approximation. A
 // 3-pass box blur cannot represent sigma below ~0.8 at all — the narrowest
 // non-trivial box is 3 wide, which on its own is already sigma 0.82 — so the
-// classic boxesForGauss split degenerates to identity there. Since the sigmas
-// this renderer actually uses are 0.35 to ~1.7, the direct path is the common
-// case, not the exception; the box path is for the wide land-shade blur.
+// classic boxesForGauss split degenerates to identity there.
+//
+// DefaultParams asks for 1.41 to 7.48, and ZoomAdjustedBlurSigma stretches the
+// global blur and antialias across 0.99 to 3.43, so everything but the 7.48
+// land shade lands on the direct path. That makes the convolution the common
+// case and the box blur the exception — which is also why maxConvRadius below
+// is set where it is.
 func PlanFor(sigma float64) Plan {
 	if sigma <= 0 || sigma < 0.05 {
 		return Plan{Mode: ModeNone}
