@@ -14,7 +14,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/tile"
@@ -58,6 +57,10 @@ func init() {
 	generateCmd.Flags().String("output-file", "", "Output file path for MBTiles format (e.g., tiles.mbtiles)")
 	generateCmd.Flags().String("folder-structure", "flat", "Folder structure for folder format: flat (z{z}_x{x}_y{y}.png) or nested ({z}/{x}/{y}.png)")
 
+	// Overpass flags. Only used by the single-server path; when overpass.servers
+	// is configured, each server carries its own worker count.
+	generateCmd.Flags().Int("overpass-workers", 4, "Number of parallel Overpass API requests (2-4 recommended for public API)")
+
 	bindFlags := []struct {
 		key  string
 		flag string
@@ -80,6 +83,7 @@ func init() {
 		{"generate.format", "format"},
 		{"generate.output_file", "output-file"},
 		{"generate.folder_structure", "folder-structure"},
+		{"generate.overpass_workers", "overpass-workers"},
 	}
 
 	for _, bf := range bindFlags {
@@ -370,10 +374,19 @@ func validateBatchZoom(zoomMin, zoomMax int) error {
 }
 
 // newTileDataSource resolves the configured data source name.
+//
+// This goes through the same createOverpassDataSource that `serve` uses, so both
+// commands honour the `overpass.servers` / `overpass.endpoint` config. Before,
+// `generate` hardcoded the empty endpoint and therefore always hit the public
+// overpass-api.de, ignoring a configured local instance and taking its rate
+// limits — see docs/local-overpass.md.
 func newTileDataSource(name string) (pipeline.DataSource, error) {
 	switch name {
 	case "overpass":
-		return datasource.NewOverpassDataSource(""), nil
+		if logger == nil {
+			initLogging()
+		}
+		return createOverpassDataSource(viper.GetInt("generate.overpass_workers"), logger), nil
 	default:
 		return nil, fmt.Errorf("unsupported data source: %s", name)
 	}

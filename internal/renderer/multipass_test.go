@@ -317,6 +317,13 @@ func expectedMaskColor(layer geojson.LayerType) (color.NRGBA, bool) {
 	case geojson.LayerUrban:
 		return color.NRGBA{R: 192, G: 128, B: 192, A: 255}, true
 	case geojson.LayerRoads:
+		// roads.xml strokes #FFFFFF — the white mask the compositor cuts with.
+		// The ratio check below still bites: it demands r≈g≈b, i.e. that nothing
+		// tints the mask.
+		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}, true
+	case geojson.LayerHighways:
+		// highways.xml strokes #FFFF00. This layer was split out of roads;
+		// the yellow expectation used to sit on LayerRoads and no longer held there.
 		return color.NRGBA{R: 255, G: 255, B: 0, A: 255}, true
 	default:
 		return color.NRGBA{}, false

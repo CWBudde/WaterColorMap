@@ -361,10 +361,12 @@ func createOverpassDataSource(overpassWorkers int, logger *slog.Logger) pipeline
 		}
 	}
 
-	// Fall back to single-server configuration
+	// Fall back to single-server configuration. An unset endpoint is passed
+	// through as "" so the datasource applies its own default, which honours
+	// WATERCOLORMAP_OVERPASS_ENDPOINT before falling back to the public API.
 	endpoint := viper.GetString("overpass.endpoint")
 	if endpoint == "" {
-		endpoint = "https://overpass-api.de/api/interpreter"
+		endpoint = datasource.DefaultEndpoint()
 	}
 
 	logger.Info("Using single Overpass server", "endpoint", endpoint, "workers", overpassWorkers)
