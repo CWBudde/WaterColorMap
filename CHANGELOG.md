@@ -15,8 +15,18 @@
   That is correct and consistent, but it is a visible look change for anyone running a non-256
   base tile size. Output at the default 256px is bit-identical — the scale path is a no-op there.
 
-  Still mismatched, tracked separately: Mapnik `stroke-width` in `assets/styles/layers/*.xml` is
-  fixed device px, so `@2x` roads remain half as wide in ground terms.
+- **renderer:** anchor Mapnik's vector rendering to world position too, by passing
+  `RenderOpts.ScaleFactor = tileSize / 256`. This completes the fix above, and it corrects two
+  things rather than one. `stroke-width`, font and marker sizes in `assets/styles/layers/*.xml`
+  are fixed device-pixel values, so an `@2x` tile drew roads at the same pixel width as the 256px
+  tile covering the same ground — half as wide in ground terms. Less visibly, Mapnik multiplies
+  the scale denominator by the scale factor before evaluating `Min`/`MaxScaleDenominator`, and an
+  `@2x` tile has half the denominator of its `@1x` twin, so the two could resolve **different
+  detail tiers** and draw different road classes at the same zoom.
+
+  Behaviour change: **existing `@2x` output looks different and should be regenerated.** Output at
+  the default 256px is unchanged — the scale factor is exactly `1.0` there, which go-mapnik treats
+  identically to the unset value the code passed before.
 
 ## [0.3.0](https://github.com/CWBudde/WaterColorMap/compare/v0.2.0...v0.3.0) (2026-08-13)
 
