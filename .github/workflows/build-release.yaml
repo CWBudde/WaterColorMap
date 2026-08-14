@@ -1,12 +1,27 @@
 name: Build and Release CLI
 
+# `release` only. release-please creates releases with a PAT
+# (see release-please.yaml), so this fires -- both prior releases produced a run
+# here. The old `push: tags:` trigger was removed: its filter
+# "[0-9]+.[0-9]+.[0-9]+(-.*)?" had no `v` prefix and so matched neither v0.2.0
+# nor v0.3.0, `(-.*)?` is regex that GitHub's glob filters take literally, and on
+# a tag push github.event.release.* is empty so there was nothing to upload to.
+#
+# `published` rather than `created` so a draft release still ships assets when it
+# is published; `created` skips drafts entirely.
+#
+# workflow_dispatch replaces the tag path as the manual handle: it re-runs the
+# matrix against an existing release to backfill an asset after a failed leg.
+# Safe to repeat because the upload uses --clobber.
 on:
   release:
     types:
-      - created
-  push:
-    tags:
-      - "[0-9]+.[0-9]+.[0-9]+(-.*)?"
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and upload assets for (e.g. v0.3.0)
+        required: true
 
 permissions:
   contents: write
@@ -15,59 +30,62 @@ jobs:
   build:
     name: Build for ${{ matrix.os }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    # Every leg is built natively -- no cross toolchains. The previous matrix
+    # cross-compiled with CGO_ENABLED=1 and no cross-built Mapnik, which cannot
+    # work; windows/amd64 additionally had no Mapnik step at all.
+    #
+    # fail-fast is off because it is what actually zeroed out the last two
+    # releases: windows died at ~1m and cancelled every sibling, including the
+    # linux/amd64 leg that would have produced a usable binary.
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          # Linux
+          # Linux -- the supported contract. Mapnik 3.1 is in noble for both
+          # architectures.
           - os: linux
             arch: amd64
             runner: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            binary_name: watercolormap
             asset_name: watercolormap-linux-amd64
           - os: linux
             arch: arm64
-            runner: ubuntu-latest
-            goos: linux
-            goarch: arm64
-            binary_name: watercolormap
+            runner: ubuntu-24.04-arm
             asset_name: watercolormap-linux-arm64
 
-          # macOS
-          - os: macos
-            arch: amd64
-            runner: macos-latest
-            goos: darwin
-            goarch: amd64
-            binary_name: watercolormap
-            asset_name: watercolormap-darwin-amd64
+          # macOS -- experimental, and expected to fail until the Mapnik version
+          # gap is closed. Homebrew ships Mapnik 4.3.0 while go-mapnik/v2 wraps
+          # the Mapnik 3 API, and internal/renderer/mapnik.go pins -std=c++14
+          # where Mapnik 4 needs C++17. There is also no Intel bottle for mapnik,
+          # so macos-15-intel falls back to a source build of the whole
+          # dependency tree. No macOS build has ever succeeded in this repo.
+          # These legs are here to surface that state, not to gate the release.
           - os: macos
             arch: arm64
             runner: macos-latest
-            goos: darwin
-            goarch: arm64
-            binary_name: watercolormap
             asset_name: watercolormap-darwin-arm64
-
-          # Windows
-          - os: windows
+            experimental: true
+          - os: macos
             arch: amd64
-            runner: windows-latest
-            goos: windows
-            goarch: amd64
-            binary_name: watercolormap.exe
-            asset_name: watercolormap-windows-amd64.exe
+            runner: macos-15-intel
+            asset_name: watercolormap-darwin-amd64
+            experimental: true
+
+    env:
+      # workflow_dispatch has no github.event.release, so the tag comes from the
+      # input instead. Used for checkout, the version ldflag and the upload.
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
 
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
 
       - name: Install Mapnik dependencies (Linux)
         if: matrix.os == 'linux'
@@ -77,43 +95,51 @@ jobs:
             libmapnik-dev \
             mapnik-utils \
             libboost-all-dev \
-            libicu-dev \
-            python3-mapnik
+            libicu-dev
 
       - name: Install Mapnik dependencies (macOS)
         if: matrix.os == 'macos'
         run: |
           brew install mapnik boost icu4c pkg-config
-          echo "PKG_CONFIG_PATH=$(brew --prefix)/opt/icu4c/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+          BREW="$(brew --prefix)"
+          {
+            echo "CGO_CXXFLAGS=-I$BREW/include"
+            echo "CGO_LDFLAGS=-L$BREW/lib"
+            echo "PKG_CONFIG_PATH=$BREW/opt/icu4c/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          } >> "$GITHUB_ENV"
 
+      # go-mapnik hardcodes /usr/local/lib/mapnik/{fonts,input} and expects a
+      # link-time override, so without these the released binary starts with no
+      # fonts and no input plugins registered. Every remaining runner installs
+      # Mapnik, so a missing mapnik-config is now a hard failure -- silently
+      # shipping a font-less binary as a release asset is the worse outcome.
+      #
+      # Builds straight to asset_name: `gh release upload` names the asset after
+      # the file, so this avoids a rename step.
       - name: Build binary
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 1
-        # go-mapnik hardcodes /usr/local/lib/mapnik/{fonts,input} and expects a
-        # link-time override, so released binaries otherwise start with no fonts
-        # and no input plugins registered. Only override when mapnik-config is
-        # present and answers -- baking in an empty path would be worse than the
-        # upstream default (Windows has no Mapnik step in this matrix).
+          CGO_ENABLED: "1"
         run: |
+          set -euo pipefail
+          FONTS="$(mapnik-config --fonts)"
+          PLUGINS="$(mapnik-config --input-plugins)"
+          test -n "$FONTS"
+          test -n "$PLUGINS"
+          MODULE=github.com/cwbudde/watercolormap/internal/cmd
           LDFLAGS="-s -w"
-          if command -v mapnik-config >/dev/null 2>&1; then
-            FONTS=$(mapnik-config --fonts || true)
-            PLUGINS=$(mapnik-config --input-plugins || true)
-            if [ -n "$FONTS" ] && [ -n "$PLUGINS" ]; then
-              LDFLAGS="$LDFLAGS -X github.com/omniscale/go-mapnik/v2.fontPath=$FONTS -X github.com/omniscale/go-mapnik/v2.pluginPath=$PLUGINS"
-            fi
-          fi
+          LDFLAGS="$LDFLAGS -X github.com/omniscale/go-mapnik/v2.fontPath=$FONTS"
+          LDFLAGS="$LDFLAGS -X github.com/omniscale/go-mapnik/v2.pluginPath=$PLUGINS"
+          LDFLAGS="$LDFLAGS -X $MODULE.version=${TAG#v}"
+          LDFLAGS="$LDFLAGS -X $MODULE.commit=$GITHUB_SHA"
+          LDFLAGS="$LDFLAGS -X $MODULE.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "ldflags: $LDFLAGS"
-          go build -o ${{ matrix.binary_name }} -ldflags="$LDFLAGS" ./cmd/watercolormap
+          go build -trimpath -o "${{ matrix.asset_name }}" -ldflags "$LDFLAGS" ./cmd/watercolormap
 
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
+      # Replaces actions/upload-release-asset@v1, which is archived and whose
+      # upload_url input is why the tag path could never work. gh is preinstalled
+      # on every runner here and infers --repo from the checkout.
+      - name: Upload release asset
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./${{ matrix.binary_name }}
-          asset_name: ${{ matrix.asset_name }}
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$TAG" "${{ matrix.asset_name }}" --clobber
