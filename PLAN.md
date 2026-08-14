@@ -2,157 +2,38 @@
 
 This document outlines the complete implementation plan for creating Stamen Watercolor-style map tiles in Go, starting with Hanover and eventually scaling globally.
 
+> **Completed phases have been archived** out of this file so that what remains
+> here is work that is still open. See:
+>
+> - Phases 1–2 (data prep, tooling, base map rendering) →
+>   [docs/history/phases-1-2-foundation.md](docs/history/phases-1-2-foundation.md)
+> - Phase 3 (watercolor mask design, Stamen-aligned) →
+>   [docs/watercolor-mask-design.md](docs/watercolor-mask-design.md)
+> - Phase 5.11.2 (blur rewrite: measurements, rationale, rescaled sigmas) →
+>   [docs/performance/blur-optimization.md](docs/performance/blur-optimization.md)
+> - Phase 7.1/7.2/7.3/7.7 (build, tile-server hardening, code quality) →
+>   [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
+
 ## Phase 1: Data Preparation and Tool Setup ✅ COMPLETE
 
-### 1.1-1.2 Data & Tile Infrastructure
-
-- [x] Tile coordinate system (z/x/y) design and implementation
-- [x] Flat tile storage structure (`tiles/z{zoom}_x{x}_y{y}.png`)
-- [x] OSM data fetching via Overpass API (`internal/datasource/overpass.go`)
-- [x] Bounding box and tile range utilities (`internal/tile/coords.go`)
-
-**Tested**: z13_x4317_y2692 → 2,531 features (86 water, 87 parks, 621 roads, 1,736 buildings, 1 civic) in 1.9s
-
-### 1.3-1.4 Rendering Stack
-
-- [x] **Mapnik 3.1.0** (omniscale/go-mapnik v2.0.1) for map rendering
-- [x] Web Mercator projection (EPSG:3857), 256×256 PNG output
-- [x] Supporting libraries: paulmach/orb, fogleman/gg, disintegration/gift
-- [x] CartoCSS/XML style support with Docker setup (Dockerfile, Justfile)
-
-**Workflow**: Mapnik renders base layers → mask extraction → watercolor effects → composite tiles
-
-### 1.5 Textures
-
-- [x] 6 seamless 1024×1024 PNG textures (land, water, green, gray, lilac, yellow) ready in `assets/textures/`
-
-### 1.6-1.7 Project Setup
-
-- [x] Go structure (cmd/, internal/, pkg/, assets/), go.mod initialized
-- [x] Configuration system with YAML support
-- [x] Development environment fully prepared
+Tile coordinate system and flat tile storage, Overpass OSM fetching, the
+Mapnik 3.1 / Web-Mercator rendering stack, six seamless watercolor textures, and
+the Go project and YAML config skeleton.
 
 ## Phase 2: Rendering Base Map Layers ✅ COMPLETE
 
-**Overview**: Implemented multi-pass Mapnik rendering system that generates separate PNG masks for each map layer (land, water, parks, civic, roads). Each layer uses distinct colors for downstream mask extraction and texture application.
+Multi-pass Mapnik rendering producing one colour-coded PNG mask per layer
+(land, water, parks, civic, roads), with layer isolation via map-object reset and
+a 128px buffer for seamless tile edges. 68 unit tests plus 3×3 grid integration
+tests.
 
-**Layer Color Mapping**:
+## Phase 3: Image Processing - Watercolor Effect ✅ COMPLETE
 
-- Water: #0000FF (blue) → water.png texture
-- Land: #C4A574 (tan) → land.png texture
-- Parks: #00FF00 (green) → green.png texture
-- Civic: #C080C0 (lilac) → lilac.png texture
-- Roads: #FFFF00 (yellow) → yellow.png texture
-
-**Key Implementations**:
-
-- `internal/renderer/multipass.go` - Multi-pass rendering engine with 128px Mapnik buffer for seamless tile edges
-- `internal/renderer/mapnik.go` - Mapnik wrapper with map object reset for layer isolation
-- `internal/geojson/converter.go` - OSM to GeoJSON conversion
-- `internal/tile/coords.go` - Web Mercator projection and tile coordinate system
-- `assets/styles/layers/` - Mapnik XML styles for each layer
-
-**Critical Fixes**:
-
-- **Layer Isolation**: Mapnik map object reset prevents layer contamination in multi-pass rendering
-- **Edge Alignment**: 128-pixel buffer (50% of tile size) ensures features render seamlessly across tile boundaries
-- **Anti-aliasing**: Tests handle premultiplied alpha and perspective-dependent color variations (tolerance: 60)
-
-**Test Coverage**: 68 unit tests + integration tests rendering 3×3 tile grids with layer separation and edge alignment verification
-
-## Phase 3: Image Processing - Watercolor Effect (Stamen-Aligned Revision) 🟨 IN PROGRESS
-
-**Why this revision**: The current Phase 3 implementation largely processes each layer independently using its own alpha mask. The Stamen process relies on **cross-layer mask construction** (e.g., land is derived by inverting a combined “non-land” mask), and reuses progressively blurred masks for additional effects.
-
-### 3.0 Current State (v1)
-
-**What exists today** (works, but simplified):
-
-- Per-layer mask pipeline: blur → noise → threshold → antialias
-- Texture tiling/tinting using the mask as alpha
-- Edge darkening halo (mask blur differencing)
-
-**Where**:
-
-- `internal/mask/processor.go`
-- `internal/mask/edge.go`
-- `internal/texture/processor.go`
-- `internal/watercolor/processor.go`
-
-**Main gap vs Stamen**:
-
-- No explicit “water + roads” (sea + roads) union mask used as the foundation.
-- No explicit **inversion step** to derive the land mask from that union.
-- No explicit reuse of “even-more-blurred” masks as multiplicative/overlay shading layers per feature category.
-
-### 3.1 Revised Core Mask Logic (alpha-only)
-
-We treat all masks as **single-channel alpha masks** (grayscale 0–255), derived only from the rendered layer PNG alpha.
-
-**Base masks** (from rendered layers):
-
-- `waterMask` := alpha(layer=water)
-- `roadsMask` := alpha(layer=roads)
-
-**Combined non-land mask** (union):
-
-- `nonLandMask` := max(waterMask, roadsMask)
-  - (Optional later: include other “non-land” contributors if we decide they must punch holes, but start with water+roads as requested.)
-
-**Fuzzy boundary mask** (Stamen step):
-
-1. `blur1` := GaussianBlur(nonLandMask)
-2. `noisy` := blur1 + PerlinNoise (applied to the same channel)
-3. `hard` := Threshold(noisy) → hard black/white (transparent/opaque)
-4. `aa` := Antialias(hard)
-
-**Invert for land**:
-
-- `landMask` := invert(aa)
-  - This produces a land mask where “everything not water/roads” becomes the textured land region.
-
-**Antialiasing strategy** (pick simplest first):
-
-- Option A (simple): small blur kernel (`sigma ~ 0.3–0.8`) after threshold
-- Option B (higher quality): supersample at 2× and downsample (only if needed)
-
-### 3.2 Using the Mask for Texture + Shading
-
-**Land texture application**:
-
-1. Tile/tint the land texture (globally aligned)
-2. Apply `landMask` as alpha
-
-**Land darkening / pigment accumulation** (reuse the same foundation mask):
-
-1. `landShadeMask` := GaussianBlur(landMask, larger sigma)
-2. Use `landShadeMask` as a black/transparent overlay and multiply/overlay it onto the painted land.
-
-This matches the “keep blurring and reuse as a darkening overlay” idea: it’s derived from the same mask field and stays consistent across tiles.
-
-### 3.3 Apply Similar Logic to Other Layers
-
-For other layers (parks/civic/water/roads), we keep the same _mask building blocks_ but ensure **correct masking relationships** before painting:
-
-- `parksMask` := alpha(parks) AND landMask
-- `civicMask` := alpha(civic) AND landMask
-- `waterMask` := alpha(water)
-- `roadsMask` := alpha(roads)
-
-Then each layer gets:
-
-1. blur → noise → threshold → antialias (applied to that layer’s mask)
-2. texture application using the final mask as alpha
-3. optional further-blur reuse as darkening overlay (layer-specific)
-
-### 3.4 Work Items (to complete Phase 3 revision)
-
-- [x] Add explicit mask composition ops (alpha extraction, union/max, intersect/min, invert) and unit tests.
-- [x] Add a new “cross-layer mask construction” step before painting any layer.
-- [x] Update the land pipeline to use `landMask := invert(process(nonLandMask))` instead of “land’s own alpha”.
-- [x] Update parks/civic to be constrained to land (AND landMask).
-- [x] Add a test that verifies land is fully excluded where water/roads are present.
-- [x] Re-tune blur/noise/threshold parameters after behavior changes.
+Cross-layer mask construction: `nonLandMask = max(water, roads)` →
+blur → noise → threshold → antialias → invert for land; parks and civic
+constrained to land; further-blurred masks reused as darkening overlays. All work
+items done, parameters retuned.
+→ [docs/watercolor-mask-design.md](docs/watercolor-mask-design.md)
 
 ## Phase 4: Compositing and Tile Delivery
 
@@ -536,81 +417,17 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 #### 5.11.2 Blur Optimization ✅ COMPLETE
 
 **Result**: 2-11x faster blur depending on sigma (6-11x across the range the layer masks use);
-blur is no longer a bottleneck.
+blur is no longer a bottleneck. `blurkernel.PlanFor` picks a direct fixed-point Gaussian below
+sigma 4 and a 3-pass box blur above it, with an AVX2 path and a portable fallback. Allocations per
+blur dropped from 12 to 1; `MaskProcessing` -16% time / -47% bytes, `FullPipeline` -33% / -38%.
 
-- [x] Re-measure: the "39.6% Gaussian blur" figure was stale. `gift.GaussianBlur` had already been
-      replaced by a 3-pass box blur, and the profile it came from predated that change.
-- [x] Benchmark alternatives against the true Gaussian at realistic sizes (256 and the 384 padded
-      metatile) and realistic sigmas (0.35-4.9)
-- [x] Implement the selected kernels in `internal/mask/blurkernel`
-- [x] Add an AVX2 assembly path with a portable fallback
-- [x] Add quality tests measuring RMSE against a true Gaussian
-- [x] Regenerate golden stage images
+Two things a future reader can easily undo, both explained in the archive: the **default sigmas
+were rescaled** (`BlurSigma` 1.2 → 2.45 and friends) because the old blur ran ~2x wider than its
+nominal sigma, so tiles keep their look while sigma now means blur width in pixels; and
+`TestBlurAccuracyVsGaussian` asserts _which path_ each sigma takes, not just its RMSE budget.
 
-**What was actually wrong**: the box blur was not faster than the Gaussian it replaced (960µs vs
-918µs at sigma 1.2 on a 256 tile), and it was inaccurate. `radius := int(sqrt(12σ²/3 + 1))` applied
-three times blurred roughly twice as hard as the nominal sigma at every setting, and up to four
-times at sigma 0.35. Its inner loops were branchy and its vertical pass walked columns, touching one
-byte per cache line.
-
-**What replaced it**: `blurkernel.PlanFor` picks the kernel from sigma. Below sigma 4 it convolves a
-true Gaussian directly with 16-bit fixed-point weights; above it, a 3-pass box blur with three
-distinct radii. The direct path exists because a box approximation cannot represent sigma
-below ~0.8 at all — the narrowest non-trivial box is already sigma 0.82 — which is where most of
-this renderer's sigmas live. Both passes share one kernel shape (a weighted sum at fixed offsets
-from a base pointer), so both are served by one AVX2 implementation in
-`internal/mask/blurkernel/asm/amd64`, dispatched on `cpu.X86.HasAVX2` with a portable Go fallback
-for other architectures, `-tags purego`, and js/wasm.
-
-**Measured** (`just bench-blur`, i7-1255U, 384 padded metatile, at the sigmas the renderer now
-produces). The old blur was flat in sigma — a fixed six box passes — at 2.14-2.22ms for every sigma
-measured, so one baseline column covers all rows. `gift` is the true-Gaussian reference:
-
-| sigma | old blur | gift   | new    | vs old |
-| ----- | -------- | ------ | ------ | ------ |
-| 0.99  | ~2150µs  | 2520µs | 198µs  | 10.9x  |
-| 1.41  | ~2150µs  | 3417µs | 263µs  | 8.2x   |
-| 2.45  | ~2150µs  | 3916µs | 345µs  | 6.2x   |
-| 3.43  | ~2150µs  | 8424µs | 543µs  | 4.0x   |
-| 7.48  | ~2150µs  | 8679µs | 1081µs | 2.0x   |
-
-Sigma 7.48 gains least: it is the only production sigma left on the box path, which has no assembly
-implementation. Vectorising `BoxCols` is the obvious follow-up if blur ever matters again.
-
-Allocations per blur dropped from 12 to 1 (a pooled `BlurContext` holds the scratch buffers). At the
-pipeline level (`benchstat`, 8 runs each, vs `main`):
-
-| benchmark        | time | bytes/op | allocs/op |
-| ---------------- | ---- | -------- | --------- |
-| `MaskProcessing` | -16% | -47%     | -36%      |
-| `FullPipeline`   | -33% | -38%     | -31%      |
-
-These are with the rescaled sigmas below, which roughly double the kernel widths; before the rescale
-`MaskProcessing` was -42%. The blur itself is 8-11x faster either way — the pipeline numbers are
-smaller because blur was never the whole of it.
-
-Accuracy against a true Gaussian is now within 0.2 levels RMSE on the direct path, and 0.8 to 1.6 on
-the box path, which drifts with sigma and is at its worst at the 7.48 land shade. The old
-implementation was never measured against one. `TestBlurAccuracyVsGaussian` pins both budgets and
-asserts which path each sigma takes, so moving `maxConvRadius` cannot silently reassign a case to
-the wrong budget.
-
-**Default sigmas were rescaled to keep the look.** Because the old blur ran about twice as wide as
-its nominal sigma, the sigma values in `DefaultParams` had been tuned by eye against that. They are
-now set to the widths that were actually being rendered — `BlurSigma` 1.2 → 2.45, `AntialiasSigma`
-0.5 → 1.41, `ShadeSigma` 3.5 → 7.48, per-layer `MaskBlurSigma` 0.7 → 1.41 and 0.9/1.1 → 2.45 — so
-tiles look as they did before while sigma now means blur width in pixels. Without this the map
-rendered visibly crisper and thin railway and highway lines, which the over-blur used to push under
-the threshold, started surviving it.
-
-One side effect: `ShadeSigma` 7.48 needs a radius of 23, which puts the land shade blur on the box
-path, the one with no assembly implementation.
-
-**Known gap, not fixed here**: `testdata/golden/watercolor-stages/` and
-`watercolor-stages-hannover/` are orphaned. The `TestWatercolorStagesGolden` tests they belong to no
-longer exist, so those PNGs (including `04_blur.png`) are not an active regression guard. The
-`update-goldens` recipes that referenced those dead test names have been repointed at
-`TestPipelineStages`, but the stale directories are still there.
+Full measurements, rationale and the remaining `BoxCols` vectorisation follow-up →
+[docs/performance/blur-optimization.md](docs/performance/blur-optimization.md)
 
 #### 5.11.3 Memory Allocation Optimization 🟡 HIGH PRIORITY
 
@@ -735,184 +552,40 @@ longer exist, so those PNGs (including `04_blur.png`) are not an active regressi
 
 ---
 
-## Phase 7: Repository Quality & Hardening 🔴 NEW — from full-repo quality review (2026-08)
+## Phase 7: Repository Quality & Hardening 🟨 IN PROGRESS — from full-repo quality review (2026-08)
 
 A detailed, multi-area review (code quality, testing, CI/build, docs, security) found that
-several things advertised as working are in fact **broken or non-functional**, giving a false
+several things advertised as working were in fact **broken or non-functional**, giving a false
 sense of safety. This phase tracks fixing what can be fixed. Items are ordered by priority;
 `[P0]` = broken/red today, `[P1]` = high impact, `[P2]` = should-fix, `[P3]` = polish.
 
-### 7.1 Make the build & test suite green again (P0 — currently RED)
+Everything `[P0]` is now closed; 7.4 (CI/build), 7.5 (docs/hygiene) and 7.6 (testing) remain.
 
-- [x] **[P0]** `internal/geojson` test suite does not compile — `converter_test.go` referenced the
-      removed field `Civic`; renamed to `Urban` in `types/feature.go:39`. Fixed the field names (and the
-      stale log label) so the package builds and tests pass.
-- [x] **[P0]** `internal/watercolor` **panics (SIGSEGV)** — `TestPaintLayerAppliesMaskTintAndEdge`
-      hit a nil-pointer deref at `mask/processor.go:290` because a per-layer style
-      `MaskNoiseStrength: 0.18` overrode the test's `NoiseStrength = 0` and entered the noise branch
-      with a nil `PerlinNoise`. Added a nil-guard in `processMask` (skip noise when `PerlinNoise == nil`;
-      production always sets it) and made the test's no-noise intent explicit via `style.MaskNoiseStrength = 0`.
-      Fixing the panic also unmasked two pre-existing failures in `quality_test.go` (blur/threshold tests
-      varied global params that per-layer style overrides) — fixed those too. Package is now green.
-- [x] **[P0]** `docker/Dockerfile` **does not build** — `RUN` blocks at lines 22, 55, 71 ended in a
-      dangling `&&` with no trailing `\` (verified via `cat -A`). Likely caused by shfmt reformatting
-      the Dockerfile (see 7.4). Restored the line continuations. (Still TODO in 7.4: stop shfmt touching it.)
-- [x] **[P0]** CI `test-unit.yaml` installed no Mapnik, so renderer/pipeline/server/cmd never
-      compiled in CI and geojson (above) failed regardless — the unit job cannot have been green.
-      Added the `libmapnik-dev` install step (mirroring `test-can-build`). (Follow-up in 7.6: split pure-Go
-      tests behind a build tag so they can run without Mapnik.)
+### 7.1-7.3, 7.7 ✅ COMPLETE — build, tile-server hardening, code quality
 
-### 7.2 Security & robustness of the tile server (P0/P1 — not internet-safe)
+All closed. Summary of what landed:
 
-- [x] **[P0]** Validate tile coordinates at parse time (`tile/coords.go` `ParseCoords`): added
-      `MaxZoom = 22` plus a `Coords.Validate()` enforcing `z ≤ 22` and `x,y < 2^z`, with distinct
-      sentinels `ErrCoordsFormat` / `ErrCoordsOutOfRange` so handlers can answer 404 vs **400**.
-      `parseTilePath` now returns the error instead of swallowing it into a bool, and both tile backends
-      map it via the shared `writeTilePathError`. Also found that `fmt.Sscanf` silently ignores trailing
-      input, so `z13_x1_y2JUNK` parsed cleanly — closed with a `c.String() != s` round-trip check (which
-      also rejects zero-padded aliases like `z013_x1_y2` that would have split the disk cache).
-      Deleted the dead duplicate `parseTilePathMBTiles`, and moved the MBTiles `Content-Type: image/png`
-      below its error branch so 404 bodies are no longer served as PNG.
-- [x] **[P0]** Add `recover()` to background workers — added `internal/safe` (`Do`/`Go`), the repo's
-      first panic recovery of any kind, and applied it to the fetch workers and the retry worker.
-      Recovery is deliberately **per job**, not per goroutine: a goroutine-level recover would leave the
-      worker dead and silently shrink the pool. Two things this surfaced: a panicking fetch job must
-      still deliver a `FetchResult`, or the caller blocked in `SubmitAndWait` is stranded until its own
-      context expires; and `retryWorker` released the semaphore by hand on each branch, so a panic
-      leaked a generation slot for the life of the process — the job body is now extracted into
-      `runRetryJob` with `defer`ed release.
-- [x] **[P1]** Add per-IP rate limiting + bounded request-admission queue on `/tiles/`.
-      Admission lives **inside** `OnDemandTiles`, not in middleware: middleware cannot tell a cache hit
-      from a miss and would shed requests for tiles already on disk. The gate sits before the per-tile
-      lock, because that lock is taken before the semaphore and held across the whole fetch+render, so
-      requests blocked there are the biggest pool of stuck goroutines — and are invisible to
-      `queuedRenders`. New `MaxPendingGenerations` (default `max(32, MaxConcurrentGenerations*8)`) →
-      503 + `Retry-After`. Rate limiting uses `golang.org/x/time/rate` keyed by client IP, with
-      TTL+cap eviction so it does not become another unbounded map; `X-Forwarded-For` is honoured only
-      from `--trusted-proxies`, and IPv6 keys collapse to /64 (a client controls its whole /64 and could
-      otherwise rotate freely). Status endpoints are exempt — rate-limiting SSE causes a reconnect storm.
-      Also added a bounded retry to the demo's tile loader: Leaflet never retries, so the first shed
-      request would otherwise leave a permanently blank tile and make backpressure look like a bug.
-- [x] **[P1]** Use `QueryContext(ctx, query)` in `datasource/overpass.go` — the fork already exposes
-      a context-aware `Client.QueryContext`, so this was a one-line swap off the deprecated `Query`.
-      Also gave the default HTTP client an actual `Timeout` (3m): it was `http.DefaultClient`, which has
-      none, so a hung upstream pinned a fetch worker even with the context now threaded.
-- [x] **[P1]** Set `ReadTimeout`, `IdleTimeout`, `WriteTimeout`, `MaxHeaderBytes` and `ErrorLog` on
-      the `http.Server`, plus graceful shutdown via `signal.NotifyContext` + `srv.Shutdown` + `od.Stop()`.
-      Rather than a separate SSE handler, the two long-lived routes extend their own socket deadline with
-      `http.ResponseController` (`http.TimeoutHandler` is not usable — it buffers the whole response and
-      breaks `http.Flusher`). That forced `sendStatusEvent` to start returning an error: with a deadline
-      in play, a dead client would otherwise make the 250ms loop spin forever on a broken connection.
-      Three further findings: `srv.Shutdown` never ends the SSE stream, so shutting down with a demo tab
-      open burned the full timeout (fixed with `BeginShutdown` via `RegisterOnShutdown` — measured 1ms
-      instead of 30s); `od.Stop()` returned without waiting, so the retry worker could be killed
-      mid-`GenerateWithData` leaving a truncated PNG that the cache would serve forever (now a bounded
-      `WaitGroup` wait, bounded because Mapnik is cgo and may ignore cancellation); and
-      `FetchQueue.Stop` closed the jobs channel while `Submit` could still be sending — a
-      send-on-closed-channel panic that was unreachable only because nothing ever called `Stop`.
-- [x] **[P2]** Bound Overpass response reads — the unbounded `io.ReadAll` is _inside_ the go-overpass
-      dependency (`query.go:84`), not this repo, so it cannot be fixed at the call site. Capped instead
-      at the transport: a `limitedTransport` RoundTripper wraps the injectable `OverpassConfig.HTTPClient`
-      and enforces `MaxResponseBytes` (default 64 MiB), rejecting an oversized `Content-Length` before
-      reading a byte and failing mid-stream for chunked responses. It errors rather than truncating —
-      a silently truncated body would either fail to parse confusingly or parse into a partial result
-      that renders as a plausible but wrong tile.
-- [x] **[P2]** Stop leaking raw internal error strings (incl. backend server names) to HTTP clients —
-      all five sites now log the detail and return a generic message via the new `writeTileError`, which
-      also sets `Cache-Control: no-store`. Error bodies previously inherited the tile `Cache-Control`
-      header, so a cacheable failure could pin a tile to "broken" in browsers and proxies.
-- [x] **[P2]** Evict from the per-tile lock map — replaced the never-pruned `sync.Map` with a
-      refcounted `map[string]*tileLock` behind a small mutex (`lockTile` returns its unlock func).
-      Entries are dropped once the last holder _or waiter_ is gone; the refcount is taken before
-      releasing the map lock so a concurrent release cannot evict an entry someone is still waiting on.
-      Steady-state memory is now proportional to concurrent requests, not to distinct tiles ever seen.
+- **7.1 (P0, build was RED)**: fixed the non-compiling `internal/geojson` tests, a SIGSEGV in
+  `internal/watercolor` (nil `PerlinNoise` reached via a per-layer style override), a
+  `docker/Dockerfile` broken by shfmt-mangled line continuations, and a CI unit job that installed
+  no Mapnik and therefore never compiled half the repo.
+- **7.2 (P0/P1, server was not internet-safe)**: tile-coordinate validation with 400-vs-404
+  sentinels, per-job `recover()` in background workers (`internal/safe`), per-IP rate limiting plus
+  a bounded admission queue inside `OnDemandTiles`, context-aware Overpass queries with a real HTTP
+  timeout, full `http.Server` timeouts and graceful shutdown, a transport-level Overpass response
+  cap, generic error bodies with `Cache-Control: no-store`, and an evicting per-tile lock map.
+- **7.3 (P1/P2)**: unique per-renderer GeoJSON temp dirs (the shared path raced 256px against
+  `@2x`), removal of `debugCtx interface{}`, `sync.Pool` buffer reuse in painting and the distance
+  transform, Web-Mercator math consolidated into the new leaf package `internal/geo` (six
+  implementations, two of them disagreeing on argument order), one authoritative
+  `composite.DefaultOrder`, option structs in `cmd/generate.go`, de-duplicated threshold/noise and
+  Overpass query builders behind golden tests, and MBTiles storing raw PNG per spec.
+- **7.7**: `worker/pool.go` now guarantees `len(results) == len(tasks)`; two Overpass query
+  oddities resolved (duplicate `natural=heath` dropped; the z8-9 roads regex confirmed intentional
+  and documented as such).
 
-### 7.3 Code quality & correctness (P1/P2)
-
-- [x] **[P0]** CI `test-lint` never installed Mapnik (out of scope for 7.3, fixed here to unblock it) —
-      golangci-lint builds the packages it lints, so `internal/renderer`'s cgo import failed typecheck with
-      `mapnik/version.hpp: No such file or directory` and the lint job was red on `main` and on every PR.
-      7.1 added the install step to `test-unit.yaml` and `test-can-build.yaml` already had it, but
-      `test-lint.yaml` was missed. All four CI jobs now pass. (PR #17)
-- [x] **[P1]** Shared, non-unique GeoJSON temp path (`renderer/multipass.go`) — the directory was a fixed
-      `os.TempDir()/watercolormap` and the filename `{coords}_{layer}.geojson`, but `Coords.String()` is
-      `z{z}_x{x}_y{y}` and carries no tile size. Base (256px) and `@2x` (512px) renders are separate
-      `*pipeline.Generator` instances cached in the same `sync.Map`, so concurrent requests for one z/x/y
-      wrote and `defer os.Remove`d the identical file; that path is also substituted into the style XML as
-      `DATASOURCE_PLACEHOLDER` **and** used as the Mapnik layer name, so a lost race fed Mapnik the wrong
-      geometry or no file at all. Parallel `go test` binaries shared it too. Replaced with a per-renderer
-      `os.MkdirTemp("", "watercolormap-geojson-*")` removed in `Close()` — chosen over salting the filename
-      because it also sweeps orphans and keeps the derived layer name readable. Two constructor error paths
-      were leaking the Mapnik renderer and the temp dir; both now unwind, and `Close()` is idempotent. (PR #13)
-- [x] **[P1]** Replaced `debugCtx interface{}` (`pipeline/generator.go`) — the unchecked type assertion had
-      already been `ok`-checked in earlier work, so what actually remained was the `interface{}` typing, which
-      existed only because `worker.Generator` declared it that way. No production caller ever passed a non-nil
-      value; the single non-nil caller in the repo was one test. Rather than make the interface depend on the
-      concrete `*DebugContext`, the debug parameter was dropped from `worker.Generator` entirely, so `worker`
-      keeps a 4-arg `Generate` and needs no dependency on `pipeline` at all; `GenerateWithDebug` covers the
-      debug case. (PR #15)
-- [x] **[P2]** Wired the bypassed buffer-pooling infrastructure up — a package-level `sync.Pool` (the repo
-      had no `sync.Pool` anywhere before) now backs `paintFromFinalMask` and `EuclideanDistanceTransform`,
-      reusing the existing `EnsureCapacity`; no signatures changed. BenchmarkPaintFromMask: allocs/op −73%,
-      B/op −78%, and since painting runs on the padded metatile (padPx ≥ 64) the real saving is larger than
-      the 256px benchmark suggests. Pooling surfaced two latent bugs that a throwaway context had hidden: the
-      shade-branch buffer swap left `ctx.painted` and `ctx.tempNRGBA` aliasing the same buffer (harmless until
-      reuse, then corrupting), and because `EnsureCapacity` grows but never shrinks while the result bounds
-      are read back off the buffers, an oversized pooled context would have returned an oversized image —
-      such contexts are now dropped instead of reused. (PR #19)
-- [x] **[P2]** `worker/pool.go` `break` inside `select` — the lint finding (staticcheck SA4011) was removed
-      during the 7.1 lint cleanup (PR #10, commit `cc7acca`): the `break` never left the feeder loop, so it
-      was deleted without changing behaviour. What was **not** fixed is the cancellation semantics behind it.
-      `taskCh` is buffered to `len(tasks)`, so a send is always ready; once `ctx` is done both `select` arms
-      are ready and Go picks at random, which means a cancelled run still drops an arbitrary subset of the
-      remaining tasks and returns a nondeterministic number of `Result`s. The empty cancellation arm now
-      documents that behaviour instead of hiding it. This item covers the lint cleanup only; the real fix
-      (making the `Result` count predictable) was tracked separately in 7.7 and has since landed there —
-      the feeder now feeds unconditionally, so `len(results) == len(tasks)` always.
-- [x] **[P2]** Consolidated duplicated Web-Mercator math — there were six implementations, not the three the
-      review found: forward in `tile/coords.go`, `renderer/mapnik.go` and `raster/raster.go`, plus two
-      different inverses (`tile.mercatorToLonLat`, and `types.mercatorToLat` via `Sinh`) and an unshared clamp
-      constant in `types`. All now route through a new leaf package `internal/geo`, which imports nothing from
-      `internal/` so it cannot introduce a cycle. The truncated `3.14159265359` turned out to be cosmetic —
-      max deviation 1.3e-6 m, about 1 part in 1.5e13; the real hazard was `latLonToWebMercator` taking
-      `(lat, lon)` while everything around it took `(lon, lat)`. Also fixed: `raster.lonLatToLocalPx` had no
-      latitude clamp, so lat = ±90 produced a garbage pixel ordinate. (PR #16)
-- [x] **[P2]** Single source of truth for layer compositing order — three orders disagreed: the hard-coded
-      slice in `pipeline/generator.go` (the one that actually shipped), the stale `composite.DefaultOrder`
-      (9 entries, no rivers, water at the bottom, buildings below roads) and a third in `cmd/wasm/main.go`.
-      `DefaultOrder` is now authoritative and holds the live generator slice verbatim, so production rendering
-      is byte-for-byte unchanged; WASM now follows production, which _does_ change WASM output — it previously
-      drew water below land and civic above parks. (PR #15)
-- [x] **[P2]** Replaced the 12–18 positional-arg functions in `cmd/generate.go` — `runBatchGenerate` had
-      already been converted to a `batchOptions` struct, so `runSingleGenerate`'s remaining 12 positional
-      params now take a `singleOptions` struct following that same in-repo pattern (fields grouped by type to
-      satisfy `fieldalignment`). Kept separate from `batchOptions` rather than sharing an embedded struct:
-      only nine fields overlap, and embedding would have rewritten every `opts.` reference across six
-      helpers. (PR #12)
-- [x] **[P3]** De-duplicated the threshold/noise funcs and the Overpass query builders. `ApplyNoiseToMask`
-      was `ApplyNoiseToMaskAdaptive` with `noiseScale == 1`, and the two antialiased-threshold functions
-      differed in three lines of polarity; both collapsed behind thin wrappers keeping the exported names,
-      with the loop-invariant `lower`/`upper` hoisted, the existing `smoothstep` reused, and both doc comments
-      corrected (they claimed "smootherstep (3t²-2t³)" while computing plain smoothstep). Bit-identity was
-      verified exhaustively over all 256 thresholds × 256 gray levels × both polarities. The Overpass builders
-      became `featureRule` tables with `[minZoom,maxZoom]` windows, guarded by golden tests landed _first_
-      (38 goldens: zooms 0–18 × both `clipGeomToBbox` values) and verified byte-identical across the rewrite.
-      Tabulating them exposed three latent oddities. Two were behaviour-preserving to leave alone here and
-      were tracked in 7.7, where both have since been closed (the duplicate `natural=heath` is gone; the
-      roads z8-9 regex was confirmed intentional and the docs aligned to it); the third — identical z8-9
-      and z10-11 road regexes — collapsed into a
-      single 8-11 rule as part of the rewrite, with byte-identical output. (PRs #19 and #14)
-- [x] **[P3]** MBTiles no longer gzips PNG payloads — tiles are stored as raw PNG per the MBTiles 1.3 spec
-      (gzip applies to `pbf` vector tiles, not raster), so QGIS and tileserver-gl can read them; the metadata
-      already said `format: png` with no compression key, so the files were actively mislabelled. The reader
-      sniffs the gzip magic `1f 8b` and passes non-gzipped payloads straight through, so already-generated
-      files stay readable and this is not a breaking change. Two adjacent defects fixed in the same area:
-      `ToMap` omitted `minzoom`/`maxzoom` when `<= 0`, silently dropping z0 (now `*int`, since a `-1` sentinel
-      would collide with Go's zero value), and `metadata(name)` gained its missing PRIMARY KEY. (PR #18)
-- [x] **[P3]** `Close()` errors on files being written — already fixed in the work that landed as PR #10.
-      `texture.writePNG` uses a named return and reports the close error, and the pipeline write path was
-      replaced by `encodePNGAtomic`, which closes explicitly and checks. The remaining unchecked closes are
-      all on read/cleanup paths and are annotated as such.
+Per-item detail, including the reasoning that keeps several of these from being "fixed" back into
+bugs → [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
 
 ### 7.4 CI / build / tooling (P1/P2)
 
@@ -949,10 +622,12 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
       aren't implemented.
 - [ ] **[P2]** Resolve the MeKo-Tech vs MeKo-Christian identity split (module/README say `MeKo-Tech`;
       all CHANGELOG links and both demo links say `MeKo-Christian` → likely 404s). Pick one, fix links.
-- [ ] **[P2]** Prune/consolidate `docs/` status reports (`PHASE-2-COMPLETE.md`, three overlapping
-      `WASM-PLAYGROUND-*.md`, reconcile `PLAN.md` vs `docs/goal.md`); fix the `--port` (→ `--addr`) and
-      MBTiles usage examples in this file (lines ~699). Update the stale Phase 3 "IN PROGRESS" / 4.10
-      "BLOCKER" markers to reflect actual state.
+- [ ] **[P2]** Prune/consolidate `docs/` status reports (`PHASE-2-COMPLETE.md` — now superseded by
+      `docs/history/phases-1-2-foundation.md`, three overlapping `WASM-PLAYGROUND-*.md`, reconcile
+      `PLAN.md` vs `docs/goal.md`); fix the `--port` (→ `--addr`) and MBTiles usage examples in this
+      file. The stale Phase 3 "IN PROGRESS" marker is fixed (Phase 3 is complete and archived to
+      `docs/watercolor-mask-design.md`); the 4.10 "BLOCKER" marker still needs verifying against
+      actual state.
 - [ ] **[P3]** Improve commit hygiene (the CHANGELOG inherits "more progress"/"recent work"/7× identical
       "playground issues fixed"); add `CONTRIBUTING.md`, package-level godoc, and an architecture overview.
 
@@ -968,39 +643,6 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
 - [ ] **[P3]** Replace timing-based assertions (`worker/pool_test.go:90,174`) with deterministic
       synchronization; switch file-producing tests to `t.TempDir()` (currently write shared
       `testdata/output/...`); adopt `t.Parallel()` where safe (0 uses today).
-
-### 7.7 Follow-ups surfaced while completing 7.3 (P2/P3)
-
-Items the 7.3 work uncovered but deliberately did not change, so that each 7.3 PR stayed scoped and
-behaviour-preserving. They were listed here rather than left as prose inside 7.3, so that nothing in
-this plan claims a follow-up exists without an entry to point at. **All three are now closed.**
-
-- [x] **[P2]** `worker/pool.go` cancellation semantics — resolved as "one `Result` per task, always".
-      The fix turned out to be a deletion rather than an addition: the worker side was already correct
-      (`Pool.worker` does a non-blocking `ctx.Done()` check per task and emits `Result{Err: ctx.Err()}`),
-      so the only source of loss was the feeder's `select`. Since `taskCh` is buffered to `len(tasks)` a
-      send can never block, which makes the `ctx.Done()` arm pure downside — it could only ever drop a
-      task that was guaranteed to be deliverable. Feeding unconditionally makes
-      `len(results) == len(tasks)` an unconditional invariant, which is what `runTilePool` needs since it
-      counts failures off that slice. The feed **goroutine** went too: with no blocking send there is
-      nothing to run concurrently, so `Run` now fills and closes `taskCh` inline. Chosen over a
-      deterministic early exit because a short slice would have pushed "the rest were never attempted"
-      onto every caller. Regression cover: `TestPool_CancelledBeforeRun` (table-driven over 1/8/4 workers)
-      asserts one result per task and `context.Canceled` on all of them, and `TestPool_Cancellation` now
-      asserts the count invariant instead of only logging it. Verified with `-race -count=5`.
-- [x] **[P3]** `buildParksQuery`'s duplicate `natural=heath` removed — the way-only rule at z ≥ 10 was
-      dropped; the way+relation pair at z ≥ 8 already emits the identical `way[...]` line from z8 up.
-      Behaviour-preserving (Overpass's union de-duplicates), so this only shrinks the query. The 18
-      affected goldens (z10–z18 × plain/`-clipped`) were regenerated and audited line by line: each shows
-      exactly one deletion, all 18 the same `way["natural"="heath"](...)` line, and z00–z09 stayed
-      byte-identical.
-- [x] **[P3]** `buildRoadsQuery` z8-9 — resolved in favour of the **behaviour**, not the old comment.
-      Matching `primary` from z8 is what has always shipped and what every existing tile and golden was
-      generated with, so "fixing" it to motorway+trunk would have silently invalidated already-generated
-      z8-9 tiles for no reported defect. PR #14 had already corrected the doc block to name trunk and
-      primary at z8-11, so all that remained was deleting the stale `NOTE` that pointed at this very
-      follow-up, and folding a one-line rationale into the `roadsRules` doc comment so the next reader
-      does not "correct" it back. Comment-only: zero golden churn.
 
 ---
 
