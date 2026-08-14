@@ -1,0 +1,107 @@
+# AGENTS.md
+
+Orientation for coding agents (and new humans) working in this repository.
+
+WaterColorMap generates Stamen Watercolor–style raster map tiles from
+OpenStreetMap data: Mapnik renders clean per-layer masks, the masks are distorted
+organically (blur → deterministic Perlin noise → threshold → antialias),
+watercolor textures are applied through them, and the layers are composited into
+web-ready PNG tiles.
+
+Module: `github.com/cwbudde/watercolormap` (Go 1.25, cgo — Mapnik 3.1+ required).
+
+## Where things live
+
+| Path                            | What it is                                                             |
+| ------------------------------- | ---------------------------------------------------------------------- |
+| `cmd/watercolormap`             | CLI entrypoint (thin `main`)                                           |
+| `internal/cmd`                  | Cobra commands: `generate`, `serve`, `convert`, `textures`, `version`  |
+| `cmd/wasm`                      | Browser playground build (no Mapnik; delegates rendering to a backend) |
+| `internal/datasource`           | Overpass fetching, query builders, caching, retry                      |
+| `internal/geojson`              | OSM → GeoJSON conversion                                               |
+| `internal/renderer`             | Mapnik wrapper + multi-pass layer rendering (cgo lives here)           |
+| `internal/mask`                 | Mask ops, blur (`blurkernel`, incl. AVX2 asm), noise, threshold, edges |
+| `internal/texture`              | Texture tiling and tinting                                             |
+| `internal/watercolor`           | Per-layer painting and watercolor styling                              |
+| `internal/composite`            | Layer compositing order and blending                                   |
+| `internal/pipeline`             | End-to-end tile generation                                             |
+| `internal/server`               | Tile HTTP server, on-demand generation, admission control              |
+| `internal/worker`               | Batch worker pool and progress reporting                               |
+| `internal/tile`, `internal/geo` | Tile coords and Web-Mercator math (`geo` is a leaf package)            |
+| `internal/mbtiles`              | MBTiles reader/writer                                                  |
+| `internal/safe`                 | Panic recovery helpers for background work                             |
+| `assets/`                       | Mapnik layer styles and watercolor textures                            |
+
+## Common commands
+
+```bash
+just build          # build ./bin/watercolormap
+just test           # full test suite (needs Mapnik)
+just test-purego    # portable (no-assembly) build of the blur kernels
+just lint           # golangci-lint
+just check          # fmt + lint + test
+just serve          # tile server + Leaflet demo, generates missing tiles
+just bench-blur     # blur kernel benchmarks
+just update-goldens # regenerate golden images (TestPipelineStages)
+```
+
+## Documentation map
+
+Start with `PLAN.md` for **open** work — completed phases have been archived out
+of it into the documents below, so anything still listed there is genuinely
+outstanding.
+
+**Planning and status**
+
+- [PLAN.md](PLAN.md) — remaining phases and work items
+- [README.md](README.md) — user-facing overview, install, quick start
+- [SETUP.md](SETUP.md) — environment setup
+- [docs/goal.md](docs/goal.md) — long-form project goal and background
+- [ELEMENTS.md](ELEMENTS.md) — map elements and styling reference
+
+**Design and reference**
+
+- [docs/watercolor-mask-design.md](docs/watercolor-mask-design.md) — the
+  cross-layer mask pipeline the renderer implements (Stamen-aligned). Read this
+  before touching `internal/mask` or `internal/watercolor`.
+- [docs/3.1-mask-processing-pipeline.md](docs/3.1-mask-processing-pipeline.md) —
+  per-stage mask detail; siblings `3.2`–`3.6` cover noise consistency across
+  tiles, texture application, edge darkening, layer-specific processing and
+  visual quality testing.
+- [docs/performance/blur-optimization.md](docs/performance/blur-optimization.md) —
+  the blur rewrite: kernel selection, AVX2 path, RMSE budgets, and **why the
+  default sigmas were rescaled**. Read before changing any blur sigma.
+- [docs/MULTI-SERVER-OVERPASS.md](docs/MULTI-SERVER-OVERPASS.md) — multi-endpoint
+  Overpass configuration.
+
+**History (completed work, kept for the rationale)**
+
+- [docs/history/phases-1-2-foundation.md](docs/history/phases-1-2-foundation.md) —
+  data prep, tooling, and base-layer rendering, including the layer colour map and
+  the layer-isolation / edge-buffer fixes everything else depends on.
+- [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md) —
+  the 2026-08 quality review: build repair, tile-server hardening, and code-quality
+  work. Several entries record _why_ something is the way it is; check here before
+  "simplifying" server admission control, the per-tile lock map, the Overpass query
+  rules, or `worker/pool.go` cancellation.
+
+**WASM playground**
+
+- [docs/WASM-PLAYGROUND-QUICKSTART.md](docs/WASM-PLAYGROUND-QUICKSTART.md),
+  [docs/WASM-PLAYGROUND-IMPLEMENTATION.md](docs/WASM-PLAYGROUND-IMPLEMENTATION.md),
+  [docs/WASM-PLAYGROUND-STATUS.md](docs/WASM-PLAYGROUND-STATUS.md)
+  (these three overlap; consolidating them is tracked in PLAN.md § 7.5)
+
+## Conventions worth knowing
+
+- **Determinism matters.** Noise, texture offsets and mask processing are anchored
+  to world coordinates so adjacent tiles have no visible seam. Anything that makes
+  output depend on tile identity rather than world position is a bug.
+- **Rendering runs on a padded metatile** and is cropped afterwards, so blur and
+  edge effects do not clip at tile borders.
+- **`internal/geo` imports nothing from `internal/`** — keep it that way, it exists
+  to prevent an import cycle.
+- **Golden tests** guard the Overpass query builders and the pipeline stages.
+  Regenerate deliberately (`just update-goldens`) and audit the diff.
+- Keep completed plan sections out of `PLAN.md`: archive the rationale under
+  `docs/` and leave a one-paragraph summary plus a link behind.

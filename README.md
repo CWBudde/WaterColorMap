@@ -140,7 +140,11 @@ During generation, intermediate layer renders and processed masks may be stored 
 5. Apply seamless watercolor textures as alpha-masked fills
 6. Composite layers in the correct order into a final tile
 
-Mask processing details: [docs/3.1-mask-processing-pipeline.md](docs/3.1-mask-processing-pipeline.md)
+Mask design and rationale: [docs/watercolor-mask-design.md](docs/watercolor-mask-design.md)
+Per-stage detail: [docs/3.1-mask-processing-pipeline.md](docs/3.1-mask-processing-pipeline.md)
+
+A full map of the documentation — design notes, performance write-ups and the
+archived records of completed phases — is in [AGENTS.md](AGENTS.md).
 
 ## Configuration
 
