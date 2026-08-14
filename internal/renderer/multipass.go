@@ -2,6 +2,7 @@ package renderer
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/geojson"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/watercolor"
 )
 
 // MultiPassRenderer renders tiles in multiple passes, one per layer
@@ -57,10 +59,13 @@ func NewMultiPassRenderer(stylesDir, outputDir string, tileSize int, padPx int) 
 
 	// Set buffer size to ensure features near the render bounds aren't clipped.
 	// When padPx is used we keep the buffer at least as large as the pad.
-	buf := 128
-	if padPx > buf {
-		buf = padPx
-	}
+	//
+	// The 128 floor is a distance on the ground, not a count of device pixels,
+	// so it scales with the tile size. Left unscaled it would reach half as far
+	// on an @2x tile as on the 256px tile covering the same area, and features
+	// just outside the bounds would be clipped on one and not the other.
+	minBuf := int(math.Ceil(128 * watercolor.ScaleForTileSize(tileSize)))
+	buf := max(padPx, minBuf)
 	mapnikRenderer.SetBufferSize(buf)
 
 	// Create a private temp directory for GeoJSON files.

@@ -76,3 +76,46 @@ rendering:
     forest: "#81c784"
     road: "#ffffff"
     building: "#e0e0e0"
+
+# Watercolor tuning (optional).
+#
+# This block is commented out on purpose: with no `watercolor:` key present the
+# renderer uses DefaultParams verbatim, with no arithmetic in between, which is
+# what keeps the golden images stable. Uncommenting a key overrides exactly that
+# key; everything else keeps its default.
+#
+# All lengths below are in pixels at the 256px reference tile size. They are
+# scaled automatically for larger tiles (@2x renders at scale 2), so do not
+# double them by hand.
+#
+# Unknown keys and unknown layer names are startup errors, not silent no-ops.
+# See docs/watercolor-tuning.md for what each knob does and the order they
+# apply in.
+#
+# watercolor:
+#   defaults:
+#     blur-sigma: 2.45       # mask blur before threshold; the main softness knob
+#     antialias-sigma: 1.41  # final edge smoothing after threshold
+#     noise-scale: 30.0      # Perlin feature size in px; larger = coarser grain
+#     noise-strength: 0.28   # 0..1, how far noise displaces the mask
+#     threshold: 50          # 0..255, global cutoff turning the blurred mask binary
+#
+#   layers:
+#     # Valid layer names: land, water, rivers, parks, urban, civic,
+#     # buildings, roads, railroads, highways.
+#     water:
+#       mask-threshold: 144        # per-layer override of `threshold`
+#       mask-blur-sigma: 2.45      # omit to inherit defaults.blur-sigma (0 is NOT "no blur")
+#       mask-noise-strength: 0.18  # omit to inherit defaults.noise-strength
+#       adaptive-noise: true       # scale noise by distance from the edge
+#       noise-min-dist: 2.0        # px from edge below which noise is minimal
+#       noise-max-dist: 10.0       # px from edge above which noise is at full strength
+#       edge-strength: 0.2         # 0..1, darkness of the edge halo (0 disables it)
+#       edge-sigma: 3.5            # px; the halo radius is edge-sigma * 3
+#       edge-gamma: 9.3            # falloff steepness; higher = tighter halo
+#       shade-sigma: 0             # px; broad interior shading (land only, by default)
+#       shade-strength: 0          # 0..1
+#       invert-mask: false         # land is the only layer that inverts by default
+#       tint:
+#         color: "#8ab4c8"         # recolours this layer's paper texture
+#         strength: 0.25           # 0..1; 0 is untinted, 1 is flat colour

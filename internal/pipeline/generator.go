@@ -69,14 +69,23 @@ func (dc *DebugContext) SortedStages() []StageCapture {
 }
 
 // GeneratorOptions controls output and encoding behavior.
+//
+// Field order follows govet's fieldalignment: the pointer-bearing fields come
+// first so the GC scans as little of the struct as possible.
 type GeneratorOptions struct {
-	// PNGCompression controls PNG encoding. Supported values:
-	// "default", "speed", "best", "none".
-	PNGCompression string
-
 	// TileWriter optionally writes tiles to an alternative storage backend (e.g., MBTiles).
 	// If nil, tiles are written to disk in outputDir.
 	TileWriter TileWriter
+
+	// Watercolor optionally overrides the watercolor parameters from config.
+	// Nil means "use DefaultParams verbatim", with no arithmetic in between.
+	// It is validated in NewGenerator so a bad config fails at startup rather
+	// than at tile 5000.
+	Watercolor *watercolor.Overrides
+
+	// PNGCompression controls PNG encoding. Supported values:
+	// "default", "speed", "best", "none".
+	PNGCompression string
 
 	// FolderStructure controls file naming for folder format. Supported values:
 	// "flat" (z{z}_x{x}_y{y}.png), "nested" ({z}/{x}/{y}.png).
@@ -102,6 +111,7 @@ type Generator struct {
 	ds         DataSource
 	textures   map[geojson.LayerType]image.Image
 	logger     *slog.Logger
+	tuner      *watercolor.Tuner
 	options    GeneratorOptions
 	stylesDir  string
 	outputDir  string
@@ -121,6 +131,14 @@ func NewGenerator(ds DataSource, stylesDir, texturesDir, outputDir string, tileS
 		return nil, err
 	}
 
+	// Validate and precompute here, not per tile: an invalid config should stop
+	// the run before the first Overpass request, and tinting a texture is an
+	// allocation we do exactly once.
+	tuner, err := watercolor.NewTuner(opts.Watercolor, textures)
+	if err != nil {
+		return nil, fmt.Errorf("invalid watercolor configuration: %w", err)
+	}
+
 	return &Generator{
 		ds:         ds,
 		stylesDir:  stylesDir,
@@ -131,6 +149,7 @@ func NewGenerator(ds DataSource, stylesDir, texturesDir, outputDir string, tileS
 		keepLayers: keepLayers,
 		logger:     logger,
 		options:    opts,
+		tuner:      tuner,
 	}, nil
 }
 
@@ -245,18 +264,46 @@ func (g *Generator) log() *slog.Logger {
 	return slog.Default()
 }
 
-// CalculateFetchBounds returns the bounding box needed to fetch data for a tile.
-// This includes padding for metatile rendering to avoid edge artifacts.
-func (g *Generator) CalculateFetchBounds(coords tile.Coords) types.BoundingBox {
-	// Create watercolor parameters to calculate padding
+// watercolorParams builds the watercolor parameters and the metatile padding
+// for a tile, and is the single source of truth for both.
+//
+// Both the Overpass fetch bbox and the metatile size are derived from the same
+// padding, which in turn is derived from every sigma in the params. If the two
+// were computed separately and ever disagreed, the fetched data would not cover
+// the metatile and polygons would clip at its edge — an error the final crop
+// hides at 256px but not at 512. Keeping one accessor makes that divergence
+// impossible rather than merely unlikely.
+// The three steps below are ordered, not interchangeable:
+//
+//  1. the tuner, on values still at the 256px reference size, because config
+//     keys are lengths on the ground and the user should not have to restate
+//     them per tile size;
+//  2. ApplyScale, which converts every length to device pixels;
+//  3. ZoomAdjustedBlurSigma, which is a per-zoom look adjustment and must see
+//     the sigma that will actually be applied.
+//
+// With no config present the tuner is nil and step 1 performs no arithmetic at
+// all, which is what keeps the 256px goldens byte-identical.
+func (g *Generator) watercolorParams(zoom int) (watercolor.Params, int) {
 	params := watercolor.DefaultParams(g.tileSize, g.seed, g.textures)
-	params.BlurSigma = watercolor.ZoomAdjustedBlurSigma(params.BlurSigma, int(coords.Z))
-	params.AntialiasSigma = watercolor.ZoomAdjustedBlurSigma(params.AntialiasSigma, int(coords.Z))
+	g.tuner.Apply(&params)
+	params.ApplyScale(watercolor.ScaleForTileSize(g.tileSize))
+
+	params.BlurSigma = watercolor.ZoomAdjustedBlurSigma(params.BlurSigma, zoom)
+	params.AntialiasSigma = watercolor.ZoomAdjustedBlurSigma(params.AntialiasSigma, zoom)
 
 	padPx := watercolor.RequiredPaddingPx(params)
 	if padPx > g.tileSize {
 		padPx = g.tileSize
 	}
+
+	return params, padPx
+}
+
+// CalculateFetchBounds returns the bounding box needed to fetch data for a tile.
+// This includes padding for metatile rendering to avoid edge artifacts.
+func (g *Generator) CalculateFetchBounds(coords tile.Coords) types.BoundingBox {
+	_, padPx := g.watercolorParams(int(coords.Z))
 
 	tileCoord := types.TileCoordinate{
 		Zoom: int(coords.Z),
@@ -285,16 +332,7 @@ func (g *Generator) renderLayersWithData(
 	coords tile.Coords,
 	prefetchedData *types.TileData,
 ) (*renderLayersResult, error) {
-	// Create watercolor parameters with zoom adjustments
-	params := watercolor.DefaultParams(g.tileSize, g.seed, g.textures)
-	params.BlurSigma = watercolor.ZoomAdjustedBlurSigma(params.BlurSigma, int(coords.Z))
-	params.AntialiasSigma = watercolor.ZoomAdjustedBlurSigma(params.AntialiasSigma, int(coords.Z))
-
-	// Calculate padding for metatile to avoid edge artifacts
-	padPx := watercolor.RequiredPaddingPx(params)
-	if padPx > g.tileSize {
-		padPx = g.tileSize
-	}
+	params, padPx := g.watercolorParams(int(coords.Z))
 
 	// Switch the pipeline to operate on a padded metatile
 	metatileSize := g.tileSize + 2*padPx
@@ -315,11 +353,10 @@ func (g *Generator) renderLayersWithData(
 		Y:    int(coords.Y),
 	}
 
-	dataBounds := types.TileToBounds(tileCoord)
-	if padPx > 0 {
-		padFrac := float64(padPx) / float64(g.tileSize)
-		dataBounds = dataBounds.ExpandByFraction(padFrac)
-	}
+	// Deliberately reuses CalculateFetchBounds rather than recomputing the
+	// expansion: the fetched data must cover exactly this metatile, so the two
+	// need to be the same expression, not two copies of it.
+	dataBounds := g.CalculateFetchBounds(coords)
 
 	// Use prefetched data if available, otherwise fetch from datasource
 	var data *types.TileData
@@ -582,7 +619,7 @@ func paintLandLayer(
 	dc.Capture("10_painted_land", "Watercolor-painted land layer", paintedLand, 10)
 
 	// Create composite of land on white canvas for debugging
-	whiteCanvas := texture.TileTexture(textures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY)
+	whiteCanvas := texture.TileTextureScaled(textures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY, params.Scale)
 	landOnCanvas, err := composite.CompositeLayersOverBase(
 		whiteCanvas,
 		map[geojson.LayerType]image.Image{geojson.LayerLand: paintedLand},
@@ -741,7 +778,7 @@ func (g *Generator) compositeAndWrite(
 	dc *DebugContext,
 ) (string, string, error) {
 	// Paper base: fill the entire tile with a white texture so road cutouts show through
-	base := texture.TileTexture(g.textures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY)
+	base := texture.TileTextureScaled(g.textures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY, params.Scale)
 
 	composited, err := composite.CompositeLayersOverBase(
 		base,

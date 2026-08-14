@@ -19,7 +19,19 @@ const MinGeometryPaddingPx = 64
 // Additionally, polygon geometry that crosses tile boundaries needs extra space
 // to render correctly. The returned padding is the maximum of blur requirements
 // and geometry requirements (MinGeometryPaddingPx).
+//
+// The whole calculation is done in world pixels and scaled to device pixels
+// only at the end. That ordering is not cosmetic: a tile's metatile origin is
+// (tileX*tileSize - pad)/scale in world units, so a @2x metatile covers the same
+// ground as its @1x twin only if pad(2x) == 2*pad(1x) exactly. Scaling a single
+// number at the end guarantees that; scaling the sigmas and then adding an
+// unscaled "+2" and an unscaled 64px floor would not.
 func RequiredPaddingPx(params Params) int {
+	scale := params.Scale
+	if scale <= 0 {
+		scale = 1
+	}
+
 	maxSigma := float32(0)
 
 	consider := func(s float32) {
@@ -37,15 +49,17 @@ func RequiredPaddingPx(params Params) int {
 		consider(style.EdgeSigma)
 	}
 
+	// Back to world pixels: the sigmas in params have already been scaled.
+	maxSigmaWorld := float64(maxSigma) / scale
+
 	// 3*sigma captures the vast majority of the kernel energy.
-	blurPad := int(math.Ceil(float64(maxSigma)*3.0)) + 2
-	if blurPad < 1 {
-		blurPad = 1
-	}
+	blurPadWorld := max(int(math.Ceil(maxSigmaWorld*3.0))+2, 1)
 
 	// Use the larger of blur padding and geometry padding
-	if blurPad < MinGeometryPaddingPx {
-		return MinGeometryPaddingPx
+	padWorld := max(blurPadWorld, MinGeometryPaddingPx)
+
+	if scale == 1 {
+		return padWorld
 	}
-	return blurPad
+	return int(math.Ceil(float64(padWorld) * scale))
 }

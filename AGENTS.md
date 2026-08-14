@@ -71,6 +71,12 @@ outstanding.
 - [docs/performance/blur-optimization.md](docs/performance/blur-optimization.md) —
   the blur rewrite: kernel selection, AVX2 path, RMSE budgets, and **why the
   default sigmas were rescaled**. Read before changing any blur sigma.
+- [docs/watercolor-tuning.md](docs/watercolor-tuning.md) — the `watercolor:` config
+  block: every knob, which of the five pipeline stages it belongs to, and the
+  current defaults. Supersedes the stale parameter list in `3.6`.
+- [docs/seam-inspection.md](docs/seam-inspection.md) — manual Leaflet checklist for
+  tile seams, and what the automated `TestCompositedTileSeams` does and does not
+  cover. Use it after touching blur, noise, texture or metatile padding.
 - [docs/MULTI-SERVER-OVERPASS.md](docs/MULTI-SERVER-OVERPASS.md) — multi-endpoint
   Overpass configuration.
 
