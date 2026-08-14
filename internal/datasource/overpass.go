@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/cwbudde/go-overpass"
@@ -29,6 +30,27 @@ type OverpassConfig struct {
 	Workers int
 }
 
+// PublicEndpoint is the public Overpass API, used whenever no endpoint is
+// configured and WATERCOLORMAP_OVERPASS_ENDPOINT is unset.
+const PublicEndpoint = "https://overpass-api.de/api/interpreter"
+
+// EndpointEnvVar overrides the endpoint used when a caller passes none.
+//
+// The CLI resolves its endpoint from config.yaml, but the integration tests
+// construct datasources directly and would otherwise always hit the public API —
+// which is slow, rate-limited, and currently answers 406. Point this at a local
+// instance to run them against it. See docs/local-overpass.md.
+const EndpointEnvVar = "WATERCOLORMAP_OVERPASS_ENDPOINT"
+
+// DefaultEndpoint returns the endpoint used when a caller configures none:
+// WATERCOLORMAP_OVERPASS_ENDPOINT if set, otherwise PublicEndpoint.
+func DefaultEndpoint() string {
+	if ep := os.Getenv(EndpointEnvVar); ep != "" {
+		return ep
+	}
+	return PublicEndpoint
+}
+
 // defaultHTTPTimeout bounds a single Overpass request. http.DefaultClient has
 // no timeout at all, so a hung upstream previously pinned a fetch worker
 // indefinitely — and with only two workers by default, two hung requests
@@ -43,7 +65,7 @@ func defaultHTTPClient() *http.Client {
 func DefaultOverpassConfig() OverpassConfig {
 	retryConfig := overpass.DefaultRetryConfig()
 	return OverpassConfig{
-		Endpoint:         "https://overpass-api.de/api/interpreter",
+		Endpoint:         DefaultEndpoint(),
 		Workers:          2,
 		RetryConfig:      &retryConfig,
 		HTTPClient:       defaultHTTPClient(),
@@ -100,7 +122,7 @@ func NewOverpassDataSourceWithWorkers(endpoint string, workers int) *OverpassDat
 // This is the recommended way to create a datasource with retry support.
 func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 	if cfg.Endpoint == "" {
-		cfg.Endpoint = "https://overpass-api.de/api/interpreter"
+		cfg.Endpoint = DefaultEndpoint()
 	}
 	if cfg.Workers < 1 {
 		cfg.Workers = 2
@@ -529,7 +551,7 @@ func NewMultiOverpassDataSource(configs ...ServerConfig) *MultiOverpassDataSourc
 
 		// Apply defaults if needed
 		if ovConfig.Endpoint == "" {
-			ovConfig.Endpoint = "https://overpass-api.de/api/interpreter"
+			ovConfig.Endpoint = DefaultEndpoint()
 		}
 		if ovConfig.Workers < 1 {
 			ovConfig.Workers = 2
