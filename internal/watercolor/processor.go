@@ -102,20 +102,32 @@ func ptr(v uint8) *uint8 { return &v }
 
 // DefaultParams returns sensible defaults for the watercolor pipeline.
 // textures provides base textures per layer; caller may omit entries for layers they won't process.
+//
+// The blur sigmas look oddly precise (2.45, 1.41, 7.48) because they are not
+// hand-picked: they are the blur widths this renderer was already producing.
+// The previous blur derived a single box radius as int(sqrt(12σ²/3 + 1)) and
+// applied it three times, which blurred about twice as hard as the sigma asked
+// for — a nominal 1.2 came out at 2.45, a nominal 0.5 at 1.41, and 3.5 at 7.48.
+// The sigmas that fed it had been tuned by eye against that behaviour. Now that
+// BoxBlurSigma applies the sigma it is given, the tuned appearance is preserved
+// by asking for what was actually being rendered.
+//
+// So these are a look, not a law. Retune them freely — but retune them as blur
+// widths in pixels, which is now what they mean.
 func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]image.Image) Params {
 	return Params{
 		TileSize:       tileSize,
-		BlurSigma:      1.2,
+		BlurSigma:      2.45,
 		NoiseScale:     30.0,
 		NoiseStrength:  0.28,
 		Threshold:      50,
-		AntialiasSigma: 0.5,
+		AntialiasSigma: 1.41,
 		Seed:           seed,
 		Styles: map[geojson.LayerType]LayerStyle{
 			geojson.LayerLand: {
 				Layer:         geojson.LayerLand,
 				Texture:       textures[geojson.LayerLand],
-				ShadeSigma:    3.5,
+				ShadeSigma:    7.48,
 				ShadeStrength: 0.12,
 				EdgeStrength:  0.3,  // Match old generator shadow strength
 				EdgeSigma:     3.0,  // radius = 3.0 * 3 = 9.0 (matches old)
@@ -125,7 +137,7 @@ func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]imag
 			geojson.LayerWater: {
 				Layer:             geojson.LayerWater,
 				Texture:           textures[geojson.LayerWater],
-				MaskBlurSigma:     0.9,  // Moderate blur for subtle softening
+				MaskBlurSigma:     2.45, // Moderate blur for subtle softening
 				MaskNoiseStrength: 0.18, // Moderate noise for organic edges
 				AdaptiveNoise:     true, // Protect thin roads from fragmentation
 				NoiseMinDist:      2.0,  // Minimal noise below 2px from edge
@@ -141,7 +153,7 @@ func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]imag
 				Layer:             geojson.LayerRivers,
 				Texture:           textures[geojson.LayerWater], // Use same texture as water
 				MaskThreshold:     ptr(98),                      // Balanced threshold for rivers
-				MaskBlurSigma:     0.7,                          // Light blur for natural edges
+				MaskBlurSigma:     1.41,                         // Light blur for natural edges
 				MaskNoiseStrength: 0.15,                         // Subtle noise for organic feel
 				AdaptiveNoise:     true,                         // Protect narrow streams from fragmentation
 				NoiseMinDist:      2.0,                          // Minimal noise below 2px from edge
@@ -166,7 +178,7 @@ func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]imag
 				Layer:             geojson.LayerRoads,
 				Texture:           textures[geojson.LayerRoads],
 				MaskThreshold:     ptr(100), // Balanced threshold for roads
-				MaskBlurSigma:     0.9,      // Moderate blur for subtle softening
+				MaskBlurSigma:     2.45,     // Moderate blur for subtle softening
 				MaskNoiseStrength: 0.18,     // Moderate noise for organic edges
 				AdaptiveNoise:     true,     // Protect thin roads from fragmentation
 				NoiseMinDist:      2.0,      // Minimal noise below 2px from edge
@@ -181,7 +193,7 @@ func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]imag
 				Layer:             geojson.LayerRailroads,
 				Texture:           textures[geojson.LayerRailroads],
 				MaskThreshold:     ptr(100), // Balanced threshold for railroads
-				MaskBlurSigma:     0.9,      // Moderate blur for subtle softening
+				MaskBlurSigma:     2.45,     // Moderate blur for subtle softening
 				MaskNoiseStrength: 0.18,     // Moderate noise for organic edges
 				AdaptiveNoise:     true,     // Protect thin railroad lines from fragmentation
 				NoiseMinDist:      2.0,      // Minimal noise below 2px from edge
@@ -196,7 +208,7 @@ func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]imag
 				Layer:             geojson.LayerHighways,
 				Texture:           textures[geojson.LayerHighways],
 				MaskThreshold:     ptr(120), // Higher threshold for layers after land
-				MaskBlurSigma:     1.1,
+				MaskBlurSigma:     2.45,
 				MaskNoiseStrength: 0.18,
 				AdaptiveNoise:     true, // Protect highways from fragmentation
 				NoiseMinDist:      4.0,  // Minimal noise below 4px from edge

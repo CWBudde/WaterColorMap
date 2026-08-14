@@ -507,7 +507,9 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 - [x] Create comprehensive benchmark suite (`internal/watercolor/benchmark_test.go`)
 - [x] Run CPU profiling on tile generation pipeline
 - [x] Run memory profiling on tile generation pipeline
-- [x] Analyze bottlenecks and create performance report (`PERFORMANCE_ANALYSIS.md`)
+- [x] Analyze bottlenecks (the referenced `PERFORMANCE_ANALYSIS.md` was never committed; the
+      numbers below came from a `cpu.prof` that predates the box-blur work and the module rename,
+      so treat them as historical)
 - [x] Optimize Perlin noise generation (eliminated 6-7x redundant allocations)
 
 **Current Performance** (256x256 tile, 5 layers):
@@ -516,25 +518,95 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 - Memory per tile: ~29MB
 - Allocations: 1.3M
 
-**Key Findings**:
+**Key Findings** (historical, from the stale profile):
 
-- Gaussian blur: 39.6% of CPU time (PRIMARY BOTTLENECK)
+- Gaussian blur: 39.6% of CPU time
 - Image buffer allocations: 37.8% of memory (64-bit RGBA overhead)
 - Pixel access overhead: 17.7% of memory (color.NRGBA allocations per At() call)
 - Perlin noise: ✅ Already optimized (40ms saved per tile)
 
-#### 5.11.2 Gaussian Blur Optimization 🔴 CRITICAL
+**Current profile** (after 5.11.2, `BenchmarkFullPipeline`, top flat entries):
 
-**Target**: Reduce blur time from 39.6% → <20% (Expected gain: 25-35% overall speedup)
+- Distance transform: ~25% (`distanceTransform1DWithBuffers`, `distanceTransformRows/Columns`)
+- Per-pixel accessors: ~25% (`NRGBAAt`, `SetNRGBA`, `GrayAt`, `SetGray`, `PixOffset`, `Point.In`) —
+  this is what 5.11.4 is about, and it is now the largest single theme
+- Noise and colour conversion: ~13% (`applyNoise`, `hslToRGB`, `rgbToHSL`)
+- Blur: no longer in the top 14
 
-- [ ] Research blur algorithm alternatives (Box blur, Kawase blur, IIR blur)
-- [ ] Benchmark alternative algorithms vs current Gaussian blur quality
-- [ ] Implement selected fast blur algorithm
-- [ ] Add quality comparison tests (current vs optimized)
-- [ ] Measure performance improvement
-- [ ] Update golden tests if visual differences exist
+#### 5.11.2 Blur Optimization ✅ COMPLETE
 
-**Context**: Gaussian blur is called 15-20 times per tile (mask processing, antialiasing, edge creation for each layer). Replacing with a faster algorithm (2-3x speedup) would significantly improve overall performance.
+**Result**: 9-13x faster blur on the sigmas production uses; blur is no longer a bottleneck.
+
+- [x] Re-measure: the "39.6% Gaussian blur" figure was stale. `gift.GaussianBlur` had already been
+      replaced by a 3-pass box blur, and the profile it came from predated that change.
+- [x] Benchmark alternatives against the true Gaussian at realistic sizes (256 and the 384 padded
+      metatile) and realistic sigmas (0.35-4.9)
+- [x] Implement the selected kernels in `internal/mask/blurkernel`
+- [x] Add an AVX2 assembly path with a portable fallback
+- [x] Add quality tests measuring RMSE against a true Gaussian
+- [x] Regenerate golden stage images
+
+**What was actually wrong**: the box blur was not faster than the Gaussian it replaced (960µs vs
+918µs at sigma 1.2 on a 256 tile), and it was inaccurate. `radius := int(sqrt(12σ²/3 + 1))` applied
+three times blurred roughly twice as hard as the nominal sigma at every setting, and up to four
+times at sigma 0.35. Its inner loops were branchy and its vertical pass walked columns, touching one
+byte per cache line.
+
+**What replaced it**: `blurkernel.PlanFor` picks the kernel from sigma. Below sigma 4 it convolves a
+true Gaussian directly with 16-bit fixed-point weights; above it, a 3-pass box blur with three
+distinct radii. The direct path exists because a box approximation cannot represent sigma
+below ~0.8 at all — the narrowest non-trivial box is already sigma 0.82 — which is where most of
+this renderer's sigmas live. Both passes share one kernel shape (a weighted sum at fixed offsets
+from a base pointer), so both are served by one AVX2 implementation in
+`internal/mask/blurkernel/asm/amd64`, dispatched on `cpu.X86.HasAVX2` with a portable Go fallback
+for other architectures, `-tags purego`, and js/wasm.
+
+**Measured** (`just bench-blur`, i7-1255U, 384 padded metatile, at the sigmas the renderer now
+produces). The old blur was flat in sigma — a fixed six box passes — at 2.14-2.22ms for every sigma
+measured, so one baseline column covers all rows. `gift` is the true-Gaussian reference:
+
+| sigma | old blur | gift   | new    | vs old |
+| ----- | -------- | ------ | ------ | ------ |
+| 0.99  | ~2150µs  | 2520µs | 198µs  | 10.9x  |
+| 1.41  | ~2150µs  | 3417µs | 263µs  | 8.2x   |
+| 2.45  | ~2150µs  | 3916µs | 345µs  | 6.2x   |
+| 3.43  | ~2150µs  | 8424µs | 543µs  | 4.0x   |
+| 7.48  | ~2150µs  | 8679µs | 1081µs | 2.0x   |
+
+Sigma 7.48 gains least: it is the only production sigma left on the box path, which has no assembly
+implementation. Vectorising `BoxCols` is the obvious follow-up if blur ever matters again.
+
+Allocations per blur dropped from 12 to 1 (a pooled `BlurContext` holds the scratch buffers). At the
+pipeline level (`benchstat`, 8 runs each, vs `main`):
+
+| benchmark        | time | bytes/op | allocs/op |
+| ---------------- | ---- | -------- | --------- |
+| `MaskProcessing` | -16% | -47%     | -36%      |
+| `FullPipeline`   | -33% | -38%     | -31%      |
+
+These are with the rescaled sigmas below, which roughly double the kernel widths; before the rescale
+`MaskProcessing` was -42%. The blur itself is 8-11x faster either way — the pipeline numbers are
+smaller because blur was never the whole of it.
+
+Accuracy against a true Gaussian is now within 0.2 levels RMSE on the direct path and 0.8 on the box
+path; the old implementation was never measured against one.
+
+**Default sigmas were rescaled to keep the look.** Because the old blur ran about twice as wide as
+its nominal sigma, the sigma values in `DefaultParams` had been tuned by eye against that. They are
+now set to the widths that were actually being rendered — `BlurSigma` 1.2 → 2.45, `AntialiasSigma`
+0.5 → 1.41, `ShadeSigma` 3.5 → 7.48, per-layer `MaskBlurSigma` 0.7 → 1.41 and 0.9/1.1 → 2.45 — so
+tiles look as they did before while sigma now means blur width in pixels. Without this the map
+rendered visibly crisper and thin railway and highway lines, which the over-blur used to push under
+the threshold, started surviving it.
+
+One side effect: `ShadeSigma` 7.48 needs a radius of 23, which puts the land shade blur on the box
+path, the one with no assembly implementation.
+
+**Known gap, not fixed here**: `testdata/golden/watercolor-stages/` and
+`watercolor-stages-hannover/` are orphaned. The `TestWatercolorStagesGolden` tests they belong to no
+longer exist, so those PNGs (including `04_blur.png`) are not an active regression guard. The
+`update-goldens` recipes that referenced those dead test names have been repointed at
+`TestPipelineStages`, but the stale directories are still there.
 
 #### 5.11.3 Memory Allocation Optimization 🟡 HIGH PRIORITY
 

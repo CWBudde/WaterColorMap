@@ -60,6 +60,18 @@ test:
 test-unit:
     just test
 
+# Run the whole suite with assembly disabled (the js/wasm build uses this path)
+test-purego:
+    go test -tags purego -ldflags "{{mapnik_ldflags}}" ./...
+
+# Run all benchmarks
+bench *args:
+    go test -ldflags "{{mapnik_ldflags}}" -run '^$' -bench . -benchmem {{args}} ./internal/...
+
+# Run just the blur benchmarks
+bench-blur *args:
+    go test -ldflags "{{mapnik_ldflags}}" -run '^$' -bench 'Blur|Antialias' -benchmem {{args}} ./internal/mask/ ./internal/watercolor/
+
 # Run tests with coverage
 test-coverage:
     go test -ldflags "{{mapnik_ldflags}}" ./... -coverprofile=coverage.out
@@ -212,11 +224,11 @@ test-integration:
 
 # Update golden stage images (synthetic, deterministic)
 update-goldens:
-    UPDATE_GOLDEN=1 go test -ldflags "{{mapnik_ldflags}}" ./... -run 'TestWatercolorStagesGolden|TestPipelineStages/Synthetic'
+    UPDATE_GOLDEN=1 go test -ldflags "{{mapnik_ldflags}}" ./... -run 'TestPipelineStages/Synthetic'
 
 # Update Hannover real-tile golden stage images (requires Mapnik + Overpass)
 update-goldens-hannover:
-    UPDATE_GOLDEN=1 WATERCOLORMAP_INTEGRATION=1 go test ./... -run TestWatercolorStagesGolden_HannoverRealTile
+    UPDATE_GOLDEN=1 WATERCOLORMAP_INTEGRATION=1 go test -ldflags "{{mapnik_ldflags}}" ./... -run 'TestPipelineStages/Hannover'
 
 # Update all stage goldens (synthetic + Hannover)
 update-goldens-all:
