@@ -114,8 +114,15 @@ jobs:
       # Mapnik, so a missing mapnik-config is now a hard failure -- silently
       # shipping a font-less binary as a release asset is the worse outcome.
       #
-      # Builds straight to asset_name: `gh release upload` names the asset after
-      # the file, so this avoids a rename step.
+      # Built as plain `watercolormap` -- it is packaged into a tarball below,
+      # and the platform belongs in the archive name, not in the command the
+      # user ends up typing.
+      #
+      # The commit ldflag reads `git rev-parse HEAD`, not $GITHUB_SHA. On the
+      # workflow_dispatch path $GITHUB_SHA is the ref the run was dispatched
+      # from (usually main) and is *not* updated by the checkout of inputs.tag
+      # above, so backfilling an old release would stamp it with today's main
+      # commit. rev-parse reads the tree that was actually built.
       - name: Build binary
         env:
           CGO_ENABLED: "1"
@@ -130,10 +137,36 @@ jobs:
           LDFLAGS="$LDFLAGS -X github.com/omniscale/go-mapnik/v2.fontPath=$FONTS"
           LDFLAGS="$LDFLAGS -X github.com/omniscale/go-mapnik/v2.pluginPath=$PLUGINS"
           LDFLAGS="$LDFLAGS -X $MODULE.version=${TAG#v}"
-          LDFLAGS="$LDFLAGS -X $MODULE.commit=$GITHUB_SHA"
+          LDFLAGS="$LDFLAGS -X $MODULE.commit=$(git rev-parse HEAD)"
           LDFLAGS="$LDFLAGS -X $MODULE.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "ldflags: $LDFLAGS"
-          go build -trimpath -o "${{ matrix.asset_name }}" -ldflags "$LDFLAGS" ./cmd/watercolormap
+          go build -trimpath -o watercolormap -ldflags "$LDFLAGS" ./cmd/watercolormap
+
+      # A bare binary is not a usable release. internal/cmd/generate.go:221 and
+      # internal/cmd/serve.go:191 resolve filepath.Join("assets", ...) against
+      # the *working directory*, and nothing embeds those files for native
+      # builds -- assets/embed_wasm.go is //go:build js && wasm. So a downloaded
+      # binary run outside a source checkout fails on the first missing texture
+      # (`generate` exits 1; `serve` starts, then 500s on every tile).
+      #
+      # Shipping the assets alongside the binary is the fix that fits in a
+      # release workflow. It leaves the paths CWD-relative, so the archive must
+      # be entered before running -- see 7.8 for making resolution independent
+      # of the working directory, which is a source change.
+      #
+      # Only the tarball is uploaded: publishing the bare binary too would just
+      # hand people back the broken artifact.
+      - name: Package release archive
+        run: |
+          set -euo pipefail
+          DIST="${{ matrix.asset_name }}"
+          mkdir -p "dist/$DIST"
+          cp watercolormap "dist/$DIST/"
+          cp -R assets "dist/$DIST/assets"
+          cp LICENSE README.md config.example.yaml "dist/$DIST/"
+          rm -f "dist/$DIST/assets/embed_wasm.go"
+          tar -czf "$DIST.tar.gz" -C dist "$DIST"
+          ls -lh "$DIST.tar.gz"
 
       # Replaces actions/upload-release-asset@v1, which is archived and whose
       # upload_url input is why the tag path could never work. gh is preinstalled
@@ -142,4 +175,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$TAG" "${{ matrix.asset_name }}" --clobber
+          gh release upload "$TAG" "${{ matrix.asset_name }}.tar.gz" --clobber

@@ -1010,6 +1010,22 @@ this plan claims a follow-up exists without an entry to point at. **All three ar
       `osv-scanner` (Go dependency CVEs) is the one with the clearest value here.
 - [ ] **[P3]** `rootCmd` never sets cobra's `Version` field, so `watercolormap --version` errors
       with "unknown flag" — the only surface is the `version` subcommand. One line to fix.
+- [ ] **[P2]** Asset paths are resolved against the **working directory**, not the executable.
+      `internal/cmd/generate.go:221,472` and `internal/cmd/serve.go:191` hardcode
+      `filepath.Join("assets", …)`, there is no flag or config key for them (`textures.dir` is read
+      only by the `textures` subcommand, and `config.example.yaml:56`'s `textures.path` is dead), and
+      nothing embeds them natively — `assets/embed_wasm.go` is `//go:build js && wasm`. The 7.4
+      release archive works around this by shipping `assets/` next to the binary, but the user still
+      has to `cd` into the extracted directory. Real fix: resolve relative to `os.Executable()`, add
+      an `--assets-dir` flag, or embed natively (Mapnik needs real paths for the XML, so an embed
+      would have to extract to a temp dir).
+- [ ] **[P2]** A missing **style** file produces blank tiles with **exit code 0** instead of an
+      error. `internal/renderer/multipass.go:173-177` sets `result.Error` but leaves `OutputPath`
+      empty; `RenderTile` (`multipass.go:148-156`) only prints `Warning:` and returns nil; and
+      `internal/pipeline/generator.go:369-376` checks `OutputPath == ""` _before_ `res.Error != nil`,
+      so the error is swallowed. Every layer is skipped and a blank paper-coloured PNG is written as
+      if it had succeeded. Reorder the two checks and propagate. Unlike the texture path — which
+      fails loudly — this one fails silently, which is why it survived this long.
 
 ---
 
