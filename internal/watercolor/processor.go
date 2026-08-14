@@ -69,11 +69,17 @@ type LayerStyle struct {
 
 // Params define the common watercolor processing knobs.
 type Params struct {
-	Styles         map[geojson.LayerType]LayerStyle
-	PerlinNoise    *image.Gray // Pre-generated noise texture, reused across all layers to avoid redundant allocations
-	TileSize       int
-	NoiseScale     float64
-	NoiseStrength  float64
+	Styles        map[geojson.LayerType]LayerStyle
+	PerlinNoise   *image.Gray // Pre-generated noise texture, reused across all layers to avoid redundant allocations
+	TileSize      int
+	NoiseScale    float64
+	NoiseStrength float64
+	// Scale is device pixels per world pixel: 1 for 256px tiles, 2 for @2x.
+	// Every length in this struct is already multiplied by it; it is kept so
+	// that consumers which need lengths back in world units (RequiredPaddingPx)
+	// or which sample a fixed-resolution bitmap (texture tiling) can undo it.
+	// Zero is treated as 1 so zero-valued Params stay usable.
+	Scale          float64
 	Seed           int64
 	OffsetX        int
 	OffsetY        int
@@ -117,6 +123,7 @@ func ptr(v uint8) *uint8 { return &v }
 func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]image.Image) Params {
 	return Params{
 		TileSize:       tileSize,
+		Scale:          1,
 		BlurSigma:      2.45,
 		NoiseScale:     30.0,
 		NoiseStrength:  0.28,
@@ -357,7 +364,7 @@ func paintFromFinalMaskWithContext(finalMask *image.Gray, layer geojson.LayerTyp
 	}
 
 	// Texture + mask using pooled buffers
-	texture.TileTextureInto(style.Texture, params.TileSize, params.OffsetX, params.OffsetY, ctx.tiledTex)
+	texture.TileTextureScaledInto(style.Texture, params.TileSize, params.OffsetX, params.OffsetY, params.Scale, ctx.tiledTex)
 	texture.ApplyMaskToTextureInto(ctx.tiledTex, finalMask, ctx.painted)
 
 	// result points to the current result buffer; we'll swap between painted and tempNRGBA

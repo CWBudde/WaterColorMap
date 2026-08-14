@@ -60,15 +60,16 @@ items done, parameters retuned.
 ### 4.4 Seam & Alignment Verification
 
 - [x] Use metatile padding + crop during generation to avoid blur/edge artifacts at tile borders
-- [ ] Add an integration test rendering adjacent tiles and checking border deltas stay within tolerance
-- [ ] Document a quick manual seam inspection checklist (Leaflet)
+- [x] Add an integration test rendering adjacent tiles and checking border deltas stay within tolerance (`TestCompositedTileSeams` in `internal/pipeline/seam_test.go` renders a 2×2 block at z13 through `Generator.Generate` and judges each border against an in-tile control step, since composited tiles are grainy everywhere and a fixed per-pixel threshold would measure grain rather than seams)
+- [x] Document a quick manual seam inspection checklist (Leaflet) — `docs/seam-inspection.md`, linked from `AGENTS.md`
 
 ### 4.5 Output Formats & Hi-DPI
 
 - [x] Add `--hidpi`/config toggle to emit 512px `@2x` tiles alongside 256px output
-- [ ] Ensure watercolor offsets/noise/texture stay globally aligned between 256px and 512px outputs (same world anchoring)
+- [x] Ensure watercolor offsets/noise/texture stay globally aligned between 256px and 512px outputs (same world anchoring) — `internal/watercolor/scale.go` (`ScaleForTileSize`, `ApplyScale`, `DefaultParamsForTileSize`), world-space `RequiredPaddingPx`, and `texture.TileTextureScaled`. The offsets were always right; every _length_ they were measured against was a fixed device-px constant, so @2x grain, texture and blur were half the ground size of @1x
 - [x] Define the on-disk naming/layout for retina (`@2x`) and document the matching Leaflet config
 - [x] Use `png.Encoder` with configurable compression level; keep defaults fast and add a reproducible “best compression” mode
+- [ ] **Deferred follow-up (found while doing 4.5): scale Mapnik strokes for @2x.** `stroke-width` in `assets/styles/layers/*.xml` is a fixed device-pixel value (e.g. `highways.xml` motorway `stroke-width="14.0"`, `rivers.xml` `stroke-width="2"`), so a 512 px `@2x` tile draws roads at the same pixel width as the 256 px tile — i.e. half as wide in ground terms. The clean fix is to pass a scale factor to Mapnik instead of duplicating the stylesheets: `mapnik.RenderOpts{ScaleFactor: s}` in `internal/renderer/mapnik.go` (`RenderTile` :71, `RenderToFile` :97, `RenderCurrentToFile` :117 currently pass only `Format: "png32"`). Verified: go-mapnik v2.0.1 does expose `RenderOpts.ScaleFactor float64` and treats `0` as `1.0` (`mapnik.go:342-343`, defaulting at `:350`, `:381`, `:403`), so adding the field is backwards compatible.
 
 ### 4.6 Leaflet Demo & Local Serving
 
@@ -88,7 +89,7 @@ items done, parameters retuned.
   - [x] `GET /tiles/...` → serve tile PNGs from disk (with on-demand generation if missing)
 - [x] Friendly 404 for missing tiles (include requested z/x/y in the response)
 - [x] Correct headers for PNG (`Content-Type: image/png`) and optional dev-friendly caching (`Cache-Control: no-store` by default)
-- [ ] Optional CORS toggle for tile requests (off by default; useful for embedding the demo elsewhere)
+- [x] Optional CORS toggle for tile requests (off by default; useful for embedding the demo elsewhere) — `--cors-origin` / `serve.cors_origin`; `withCORS` is now the sole owner of the headers and the four hardcoded `*` duplicates are gone
 
 **Leaflet demo page requirements**
 
@@ -104,7 +105,7 @@ items done, parameters retuned.
 **Developer ergonomics**
 
 - [x] Add `just serve` to run the server against `./tiles` (and optionally `just demo` as an alias)
-- [ ] Document quickstart in README: generate a tile set → run server → open browser URL
+- [x] Document quickstart in README: generate a tile set → run server → open browser URL (also fixed the nonexistent `--tile` flag and the `--min-zoom`/`--max-zoom`/`--bounds` names)
 
 **Smoke test / acceptance**
 
@@ -117,20 +118,24 @@ items done, parameters retuned.
 
 ### 4.7 Visual Tuning Controls
 
-- [ ] Expose per-layer watercolor params (tint, blur sigma, noise strength, edge colors) via config with Phase 3 defaults
-- [ ] Add golden/snapshot render for a known tile to catch regressions when tuning
-- [ ] Document tuning guidance referencing the Stamen process steps (blur → noise → threshold → edge darkening)
+- [x] Expose per-layer watercolor params via config with Phase 3 defaults — `internal/watercolor/tuning.go` (`Overrides`/`Tuner`), `watercolor:` block in `config.example.yaml`, threaded through `generate`, `serve` and the batch path. **Scope correction:** "edge colors" do not exist and cannot be exposed — the edge pass only reduces HSL lightness — so the keys are `edge-strength` / `edge-sigma` / `edge-gamma`. `tint` does exist and is now wired (it was dead code before)
+- [x] Add golden/snapshot render for a known tile to catch regressions when tuning (`TestPipelineStages` in `internal/pipeline/pipeline_stages_test.go:22`, goldens in `testdata/golden/pipeline-stages/`)
+- [x] Document tuning guidance referencing the Stamen process steps (blur → noise → threshold → edge darkening) — `docs/watercolor-tuning.md`, which supersedes the stale parameter list in `docs/3.6-visual-quality-testing.md`
 
 ### 4.8 Hanover Coverage Generation
 
-- [ ] Add CLI flags for bbox/zoom-range batch generation (reuse `tile.TileRange`)
-- [ ] Script batch generation for Hanover (z10–15) with progress logging, `--force`, and resumable output dirs
-- [ ] Verify the produced set in the Leaflet demo and record bounds/zooms used
+- [x] Add CLI flags for bbox/zoom-range batch generation (reuse `tile.TileRange`) — all present on `generate` (`internal/cmd/generate.go`): `--bbox` (:40), `--zoom-min` (:41), `--zoom-max` (:42), `--workers`/`-w` (:43), `--progress` (:44, default `true`), `--force` (:48). Also available and used by the recipes: `--allow-failures` (:45), `--hidpi` (:50).
+- [x] Script batch generation for Hanover with progress logging, `--force`, and resumable output dirs — the `Justfile` provides `prebuild-hannover` (:243) plus the `-quick` (z10–12), `-detailed` (z10–15) and `-full` (z10–16) wrappers (:254–263).
+  - bbox: `9.65,52.32,9.85,52.43` (`hannover_bbox`, `Justfile:240`)
+  - default zoom range of the recipe: **z10–14**; `just prebuild-hannover 10 15` gives the z10–15 set this phase targets
+  - recipe always passes `--hidpi --allow-failures` and forwards extra `*args` (so `--force`, `--workers`, `--progress` can be appended)
+  - resume: output dirs are resumable by "skip if the file already exists" — `Generator.GenerateWithData` does `if !force { if _, err := os.Stat(finalPath); err == nil { … return finalPath }}` (`internal/pipeline/generator.go:173`), logging "Tile already exists; skipping". There is no separate state/manifest file; re-running the same recipe simply fills the gaps, and `--force` overrides it.
+- [ ] **Remaining manual step**: run `just prebuild-hannover 10 15` once (needs network access to Overpass and a working Mapnik install; it is long-running, so it is deliberately not executed from tests or CI), then verify the produced set in the Leaflet demo (`just serve`, pan/zoom over Hanover, check `@2x` tiles and seams) and record the actual bounds/zooms and tile count here.
 
 ### 4.9 TileJSON / Delivery Metadata
 
-- [ ] Emit a minimal `tilejson.json` (bounds, min/max zoom, format, tile URL template) for the generated set
-- [ ] Include required attribution text (Stamen-style / OSM) in the metadata and demo
+- [x] Emit a minimal `tilejson.json` (bounds, min/max zoom, format, tile URL template) for the generated set — new `internal/tilejson` package, written next to the tiles by batch folder generation and served at `GET /tiles/tilejson.json`
+- [x] Include required attribution text (Stamen-style / OSM) in the metadata (`© OpenStreetMap contributors · Watercolor-inspired rendering`). The Leaflet demo already carries the OSM half; adding the watercolor note there is still open
 
 ### 4.10 Ocean/Coastline Rendering 🔴 CRITICAL - BLOCKER FOR LOW ZOOM TILES
 
@@ -183,7 +188,7 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 
 **Proposed Solutions**:
 
-#### Option 1: Use OSM Processed Water Polygons (RECOMMENDED)
+#### Option 1: Use OSM Processed Water Polygons (CHOSEN — see decision below)
 
 **Pros**: Production-ready, used by professional renderers, comprehensive coverage
 
@@ -244,13 +249,15 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 
 **Implementation**: NOT RECOMMENDED - this is what osmcoastline tool does, and it's complex enough to be its own project.
 
-**Decision Required**: Choose between Option 1 (proper solution) or Option 2 (quick fix) based on project timeline and requirements.
+**Decision (resolved): Option 1 — OSM processed water polygons.**
 
-**Recommended Path**:
+We take the processed water polygons from <https://osmdata.openstreetmap.de/data/water-polygons.html> as the ocean source. Option 2 is explicitly rejected: hardcoded ocean bounding boxes plus a "zero features means ocean" heuristic would ship a wrong-by-construction rule that we would then have to unpick, and it does nothing for the coastal tiles that are the actual visual problem. Option 3 (reimplementing `osmcoastline`) stays out of scope.
 
-1. Implement Option 2 (quick fix) for immediate unblocking
-2. Plan Option 1 (water polygons) as proper long-term solution
-3. Document both approaches in configuration
+**Why this is a project, not a patch** — three things in the current code have to move before water polygons can render at all:
+
+1. `validateFeatureResponse` (`internal/datasource/overpass.go:627`) currently _errors_ on empty z8–13 tiles: `if zoom >= 8 && zoom <= 13 && totalFeatures == 0 { return fmt.Errorf("%w: zoom %d tile has no features …", ErrEmptyOverpassResponse, zoom) }`. A genuine open-ocean tile in that zoom band is exactly the "zero features" case, so it fails before rendering. Emptiness has to become "empty _and_ not covered by a water polygon" rather than an unconditional error.
+2. `renderLayer` (`internal/renderer/multipass.go:167`) skips any layer with zero features — `if len(features) == 0 { result.OutputPath = ""; return result }` (`:191`). Ocean coverage therefore cannot arrive as "no Overpass features + a blue background"; the water polygons must be injected as real features (or as a dedicated ocean layer with its own render path) before this check.
+3. **No new Go geometry dependency is needed.** Mapnik reads ESRI shapefiles natively through its `shape` input plugin (present in the local install, `/usr/lib/mapnik/*/input/shape.input`), so the downloaded `.shp` can be pointed at directly from a Mapnik datasource instead of being parsed in Go and re-emitted as GeoJSON. The Go-side work is download/cache management and per-tile layer wiring, not geometry.
 
 **Testing Requirements**:
 
@@ -264,8 +271,12 @@ The rendering pipeline assumes all features (water, land, parks, etc.) are expli
 
 **Related Code**:
 
-- `internal/datasource/overpass.go` - buildWaterQuery() (lines 249-283)
-- `internal/datasource/overpass_extract.go` - isWater() (lines 270-277)
+(Pointers below verified against the current tree — the previously listed `buildWaterQuery()` does not exist.)
+
+- `internal/datasource/overpass.go` — `buildTileQuery()` (`:229`) builds the whole tile query from the per-layer rule tables; the water layer is registered at `:315` and its tag rules live in `var waterRules` (`:332`), rendered into Overpass QL lines by `renderRules()` (`:295`). This is where an ocean/water-polygon source would have to be joined in, or deliberately bypassed.
+- `internal/datasource/overpass.go` — `validateFeatureResponse()` (`:627`), the empty-tile error described above.
+- `internal/datasource/overpass_extract.go` — `isWater()` (`:317`), used at `:101`, `:125` and `:292` to classify extracted tags into the water layer.
+- `internal/renderer/multipass.go` — `renderLayer()` (`:167`), zero-feature skip at `:191`.
 - `assets/styles/layers/water.xml` - water rendering style
 - `assets/styles/layers/land.xml` - background color definition
 

@@ -36,7 +36,7 @@ cp config.example.yaml config.yaml
 just build
 
 # Generate a single tile (Hanover example)
-./bin/watercolormap generate --tile z13_x4297_y2754
+./bin/watercolormap generate --zoom 13 --x 4317 --y 2692
 ```
 
 More setup details (including troubleshooting) are in [SETUP.md](SETUP.md).
@@ -53,47 +53,82 @@ docker run --rm \
   -v "$PWD/cache:/app/cache" \
   -v "$PWD/assets:/app/assets:ro" \
   -e WATERCOLORMAP_CONFIG=/app/config.yaml \
-  watercolormap:latest generate --tile z13_x4297_y2754
+  watercolormap:latest generate --zoom 13 --x 4317 --y 2692
 ```
 
 ## Usage
 
-### Generate tiles
-
-Generate a single tile:
-
-```bash
-watercolormap generate --tile z13_x4297_y2754
-```
-
-Generate a tile using explicit coordinates:
+Generate a few tiles, then look at them in the built-in Leaflet demo. This is
+the whole path, end to end:
 
 ```bash
-watercolormap generate --zoom 13 --x 4297 --y 2754
+# 1. Generate a small batch around Hanover (zoom 12-13)
+./bin/watercolormap generate \
+  --bbox "9.65,52.32,9.85,52.43" \
+  --zoom-min 12 --zoom-max 13 \
+  --allow-failures
+
+# 2. Serve the tiles plus the demo UI
+just serve
+# equivalently: ./bin/watercolormap serve --addr 127.0.0.1:8080
+
+# 3. Open the demo
+#    http://127.0.0.1:8080/demo/
 ```
 
-Generate a batch for a bounding box / zoom range (see `watercolormap generate --help` for the exact flags supported by your build):
+`just smoke` does steps 1 and 2 in one go for a 3×3 block at zoom 13.
+
+### Generating tiles
+
+A single tile, by coordinate:
 
 ```bash
-watercolormap generate --min-zoom 10 --max-zoom 16 --bounds "9.60,52.30,9.90,52.50"
+watercolormap generate --zoom 13 --x 4317 --y 2692
 ```
 
-### Serve tiles in Leaflet
+A batch, by bounding box (`minLon,minLat,maxLon,maxLat`) and zoom range:
 
-WaterColorMap can generate static PNG tiles; you can serve them with any web server and view them in Leaflet.
-
-If you serve the `tiles/` folder (for example with `python3 -m http.server 8000` from the repo root), you can point Leaflet at the default flat file naming scheme (`z{z}_x{x}_y{y}.png`) like this:
-
-```js
-const layer = L.tileLayer("", {
-  maxZoom: 16,
-  attribution: "© OpenStreetMap contributors",
-});
-
-layer.getTileUrl = ({ x, y, z }) =>
-  `http://localhost:8000/tiles/z${z}_x${x}_y${y}.png`;
-layer.addTo(map);
+```bash
+watercolormap generate \
+  --bbox "9.65,52.32,9.85,52.43" \
+  --zoom-min 10 --zoom-max 16 \
+  --hidpi --allow-failures
 ```
+
+Useful flags: `--force` (regenerate existing tiles), `--workers`,
+`--hidpi` (also write `@2x` tiles), `--png-compression`,
+`--folder-structure` (`flat` or `nested`), and `--format mbtiles` with
+`--output-file` to write an MBTiles file directly. See
+`watercolormap generate --help` for the full list.
+
+### Serving tiles
+
+`serve` hosts the tiles and the Leaflet demo, and generates any tile that is
+missing on the fly (`--generate-missing`, on by default):
+
+```bash
+# Serve a tile folder (defaults to --output-dir)
+watercolormap serve --addr 127.0.0.1:8080 --tiles-dir ./tiles
+
+# Or serve an MBTiles file instead
+watercolormap serve --mbtiles ./tiles.mbtiles
+```
+
+Routes: `/demo/` (Leaflet UI), `/tiles/z{z}_x{x}_y{y}.png`, `/tiles/status`
+(JSON) and `/tiles/status/stream` (SSE), `/healthz`.
+
+Cross-origin requests are **off by default**. A page served from another
+origin — the WASM playground, a GitHub Pages demo — needs the header switched
+on explicitly:
+
+```bash
+watercolormap serve --cors-origin '*'          # any origin
+watercolormap serve --cors-origin https://example.com
+# or: just serve-cors
+```
+
+The value is also settable as `serve.cors_origin` in `config.yaml`. An empty
+value (the default) sends no `Access-Control-*` headers at all.
 
 ## Browser Playground (WASM)
 
@@ -107,10 +142,11 @@ just build-wasm-local
 # open http://localhost:8000/wasm-playground/
 ```
 
-Note: in-browser rendering is limited because Mapnik is a native dependency; for on-demand tile generation, run the backend server locally:
+Note: in-browser rendering is limited because Mapnik is a native dependency; for on-demand tile generation, run the backend server locally. The playground page is served from a different origin than the tile server, so CORS has to be switched on:
 
 ```bash
-./bin/watercolormap serve --addr 127.0.0.1:8080
+./bin/watercolormap serve --addr 127.0.0.1:8080 --cors-origin '*'
+# or: just serve-cors
 ```
 
 ## Output layout

@@ -39,6 +39,11 @@ run *args:
 serve *args:
     go run ./cmd/watercolormap serve {{args}}
 
+# CORS is off by default, so a browser on another origin needs it switched on.
+# Serve tiles with CORS on, for a cross-origin page (WASM playground, Pages demo)
+serve-cors *args:
+    go run ./cmd/watercolormap serve --cors-origin '*' {{args}}
+
 # Build WASM module for browser playground
 build-wasm:
     @echo "Building WASM module..."
@@ -216,7 +221,22 @@ docker-dev:
 # Generate a test tile (example)
 generate-test-tile:
     @echo "Generating test tile..."
-    ./bin/watercolormap generate --tile z13_x4317_y2692
+    ./bin/watercolormap generate --zoom 13 --x 4317 --y 2692
+
+# Needs Mapnik and a reachable Overpass endpoint. Ctrl-C stops the server.
+# Smoke test: generate a 3x3 z13 block around a tile, then serve it
+smoke zoom="13" x="4317" y="2692" addr="127.0.0.1:8080":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Generating a 3x3 block at zoom {{zoom}} around x={{x}} y={{y}}..."
+    for dx in -1 0 1; do
+      for dy in -1 0 1; do
+        go run ./cmd/watercolormap generate \
+          --zoom {{zoom}} --x $(( {{x}} + dx )) --y $(( {{y}} + dy ))
+      done
+    done
+    echo "Serving on http://{{addr}}/demo/ ..."
+    go run ./cmd/watercolormap serve --addr {{addr}}
 
 # Run integration tests (requires Mapnik installed and Overpass reachable)
 test-integration:

@@ -74,6 +74,34 @@ func TileTexture(src image.Image, tileSize int, offsetX, offsetY int) *image.NRG
 // TileTextureInto tiles a source texture into an existing destination buffer.
 // This avoids allocation when the caller can reuse a buffer.
 func TileTextureInto(src image.Image, tileSize int, offsetX, offsetY int, dst *image.NRGBA) {
+	TileTextureScaledInto(src, tileSize, offsetX, offsetY, 1, dst)
+}
+
+// TileTextureScaled is TileTexture with a device-pixels-per-texture-pixel scale.
+func TileTextureScaled(src image.Image, tileSize int, offsetX, offsetY int, scale float64) *image.NRGBA {
+	if src == nil || tileSize <= 0 {
+		return nil
+	}
+
+	dst := image.NewNRGBA(image.Rect(0, 0, tileSize, tileSize))
+	TileTextureScaledInto(src, tileSize, offsetX, offsetY, scale, dst)
+	return dst
+}
+
+// TileTextureScaledInto tiles a texture into dst, magnifying it by scale.
+//
+// scale is device pixels per texture pixel. At scale 1 the texture is laid down
+// 1:1 and this is the plain integer tiling. At scale 2 (a @2x tile) each texture
+// pixel covers 2x2 device pixels, so the pattern keeps the same footprint on the
+// ground as it has on the matching 256px tile — which is the entire point:
+// offsets are in device pixels, so without this the grain would be half the
+// ground size at @2x and the two tile sets would not match.
+//
+// Magnified sampling is bilinear, and the wrap happens *inside* the
+// interpolation. Upscaling first and taking the modulus afterwards would blend
+// the texture's last column with black instead of with its first column, laying
+// a visible seam at every texture period.
+func TileTextureScaledInto(src image.Image, tileSize int, offsetX, offsetY int, scale float64, dst *image.NRGBA) {
 	if src == nil || tileSize <= 0 || dst == nil {
 		return
 	}
@@ -86,20 +114,73 @@ func TileTextureInto(src image.Image, tileSize int, offsetX, offsetY int, dst *i
 		return
 	}
 
-	mod := func(a, b int) int {
-		r := a % b
-		if r < 0 {
-			r += b
+	if scale == 1 || scale <= 0 {
+		for y := 0; y < tileSize; y++ {
+			sy := bounds.Min.Y + mod(offsetY+y, height)
+			for x := 0; x < tileSize; x++ {
+				sx := bounds.Min.X + mod(offsetX+x, width)
+				dst.SetNRGBA(x, y, getNRGBA(src, sx, sy))
+			}
 		}
-		return r
+		return
+	}
+
+	// The x mapping is the same for every row, so resolve it once. This keeps
+	// the inner loop to four texel fetches and the blend.
+	x0 := make([]int, tileSize)
+	x1 := make([]int, tileSize)
+	fx := make([]float64, tileSize)
+	for x := 0; x < tileSize; x++ {
+		u := float64(offsetX+x) / scale
+		fu := math.Floor(u)
+		i := mod(int(fu), width)
+		x0[x] = bounds.Min.X + i
+		x1[x] = bounds.Min.X + mod(i+1, width)
+		fx[x] = u - fu
 	}
 
 	for y := 0; y < tileSize; y++ {
-		sy := bounds.Min.Y + mod(offsetY+y, height)
+		v := float64(offsetY+y) / scale
+		fv := math.Floor(v)
+		j := mod(int(fv), height)
+		y0 := bounds.Min.Y + j
+		y1 := bounds.Min.Y + mod(j+1, height)
+		fy := v - fv
+
 		for x := 0; x < tileSize; x++ {
-			sx := bounds.Min.X + mod(offsetX+x, width)
-			dst.SetNRGBA(x, y, getNRGBA(src, sx, sy))
+			c00 := getNRGBA(src, x0[x], y0)
+			c10 := getNRGBA(src, x1[x], y0)
+			c01 := getNRGBA(src, x0[x], y1)
+			c11 := getNRGBA(src, x1[x], y1)
+			dst.SetNRGBA(x, y, bilerpNRGBA(c00, c10, c01, c11, fx[x], fy))
 		}
+	}
+}
+
+// mod is a modulus that returns a non-negative result for negative operands,
+// which matters because tile offsets go negative at the metatile's left/top pad.
+func mod(a, b int) int {
+	r := a % b
+	if r < 0 {
+		r += b
+	}
+	return r
+}
+
+// bilerpNRGBA blends four texels. Channels are interpolated independently;
+// alpha in these textures is effectively constant, so no premultiplication
+// round-trip is warranted.
+func bilerpNRGBA(c00, c10, c01, c11 color.NRGBA, fx, fy float64) color.NRGBA {
+	blend := func(a, b, c, d uint8) uint8 {
+		top := float64(a) + (float64(b)-float64(a))*fx
+		bot := float64(c) + (float64(d)-float64(c))*fx
+		return uint8(top + (bot-top)*fy + 0.5)
+	}
+	return color.NRGBA{
+		R: blend(c00.R, c10.R, c01.R, c11.R),
+		G: blend(c00.G, c10.G, c01.G, c11.G),
+		B: blend(c00.B, c10.B, c01.B, c11.B),
+		A: blend(c00.A, c10.A, c01.A, c11.A),
 	}
 }
 
