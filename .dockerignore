@@ -1,0 +1,52 @@
+# Build context exclusions.
+#
+# The image needs exactly three things from the repo: the Go sources, `assets/`
+# and `config.example.yaml` (both COPYed in the runtime stage). Everything else
+# only inflates the context and busts the `COPY . .` layer cache whenever it
+# changes -- `docs/wasm-playground/wasm.wasm` alone is ~20 MB.
+#
+# Stricter than .gitignore on purpose: these are tracked files the build does
+# not need.
+.git
+.github
+.claude
+docs
+testdata
+scripts
+*.md
+
+# Build outputs
+bin/
+dist/
+/watercolormap
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Generated / cached data
+tiles/
+cache/
+.gocache/
+*.mbtiles
+
+# Test and profiling artifacts
+*.test
+*.out
+*.prof
+coverage.html
+
+# Local config (the image installs config.example.yaml as /app/config.yaml)
+config.yaml
+local.yaml
+
+# WASM artifacts
+*.wasm
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*~
