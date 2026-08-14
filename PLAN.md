@@ -503,7 +503,8 @@ several things advertised as working were in fact **broken or non-functional**, 
 sense of safety. This phase tracks fixing what can be fixed. Items are ordered by priority;
 `[P0]` = broken/red today, `[P1]` = high impact, `[P2]` = should-fix, `[P3]` = polish.
 
-Everything `[P0]` is now closed; 7.4 (CI/build), 7.5 (docs/hygiene) and 7.6 (testing) remain.
+Everything `[P0]` is now closed; 7.4 (CI/build) and 7.6 (testing) remain, plus the follow-ups 7.9
+collected while closing 7.5.
 
 ### 7.1-7.3, 7.7 ✅ COMPLETE — build, tile-server hardening, code quality
 
@@ -553,27 +554,81 @@ bugs → [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
       personal fork) or bring it in-org; emit `vX.Y.Z` release tags (release-please currently produces
       bare `0.2.0`, which Go module tooling won't resolve).
 
-### 7.5 Documentation & repo hygiene (P1/P2)
+### 7.5 Documentation & repo hygiene ✅ COMPLETE (P3 remainder deferred to 7.9)
 
-- [ ] **[P1]** Fix the README quick-start commands — `--tile z13_x4297_y2754` (no such flag; use
-      `--zoom N --x N --y N`) at `README.md:39,56,66`, and `--min-zoom/--max-zoom/--bounds` →
-      `--zoom-min/--zoom-max/--bbox` at `README.md:78`. The first command every user runs currently errors.
-- [ ] **[P1]** Remove the committed 20 MB `docs/wasm-playground/wasm.wasm` (and `wasm_exec.js`) from
-      git — pure build artifacts, ~95% of repo bloat; build them in CI for Pages and gitignore `*.wasm`.
-- [ ] **[P1]** Rewrite `config.example.yaml` to match the code — the `tile:`, `rendering:`,
-      `test-area:` and `overpass.timeout/rate-limit/retry` blocks are read by nothing (silently ignored),
-      texture filenames (`park.png`/`forest.png`) don't exist, and `protomaps/openmaptiles` data-sources
-      aren't implemented.
-- [ ] **[P2]** Resolve the MeKo-Tech vs MeKo-Christian identity split (module/README say `MeKo-Tech`;
-      all CHANGELOG links and both demo links say `MeKo-Christian` → likely 404s). Pick one, fix links.
-- [ ] **[P2]** Prune/consolidate `docs/` status reports (`PHASE-2-COMPLETE.md` — now superseded by
-      `docs/history/phases-1-2-foundation.md`, three overlapping `WASM-PLAYGROUND-*.md`, reconcile
-      `PLAN.md` vs `docs/goal.md`); fix the `--port` (→ `--addr`) and MBTiles usage examples in this
-      file. The stale Phase 3 "IN PROGRESS" marker is fixed (Phase 3 is complete and archived to
-      `docs/watercolor-mask-design.md`); the 4.10 "BLOCKER" marker still needs verifying against
-      actual state.
-- [ ] **[P3]** Improve commit hygiene (the CHANGELOG inherits "more progress"/"recent work"/7× identical
-      "playground issues fixed"); add `CONTRIBUTING.md`, package-level godoc, and an architecture overview.
+- [x] **[P1]** README quick-start commands fixed. `--tile z13_x4297_y2754` is not a flag and never
+      was — it appeared three times, including as the first command in the quick start, so the first
+      thing a new user ran errored. Replaced with `--zoom 13 --x 4317 --y 2692`
+      (`internal/cmd/generate.go:35-37`), which the README already showed one example later; that
+      duplicate is now the only copy. Batch generation used `--min-zoom/--max-zoom/--bounds`, none of
+      which exist either → `--zoom-min/--zoom-max/--bbox` (`generate.go:40-42`); `--bounds` belongs to
+      `convert`. `Justfile`'s `generate-test-tile` carried the same bogus `--tile` and was fixed to
+      match the already-correct `generate-tile` recipe. Also swept up in the same pass: `cd watercolormap`
+      after a clone that creates `WaterColorMap/`; a ` ```text ` fence that was never closed, so
+      the `--hidpi`/`--png-compression` prose rendered as code; and the previously undocumented
+      `convert` and `textures` subcommands, which now get an example each. Verified by running every
+      command, not by reading: batch enumerated its 13 tiles and `convert` wrote a 335-tile MBTiles.
+- [x] **[P1]** `docs/wasm-playground/wasm.wasm` and `wasm_exec.js` untracked (`git rm --cached`);
+      `wasm_exec.js` added to `.gitignore` next to the `*.wasm` rule that was already there but had
+      been bypassed with a forced add. Safe because nothing consumed the committed copies: CI rebuilds
+      both (`wasm-deploy.yml` "Build WASM" + `scripts/copy-wasm-exec.sh`) and uploads
+      `docs/wasm-playground` as the Pages artifact, and `just build-wasm` produces them locally. This
+      also unbreaks `just check-formatted`, which aborts on a dirty worktree and therefore failed after
+      any local wasm build. The bullet's **"~95% of repo bloat" was wrong**: the seven historical
+      `wasm.wasm` revisions are ~52 MB of a ~161 MB loose-object store — large, but not 95%. Untracking
+      stops future growth only; purging the existing blobs needs a history rewrite, which is deliberately
+      out of this PR and tracked separately.
+- [x] **[P1]** `config.example.yaml` rewritten against the code. About three quarters of it was
+      silently ignored — there is no config package, every value is read by a `viper.Get*` call in
+      `internal/cmd/*.go`, and the `tile:`, `test-area:` and `rendering:` blocks plus
+      `overpass.timeout/rate-limit/retry` had no reader at all. Deleted rather than corrected: a key
+      that looks configurable and isn't is worse than an absent one, and `tile.width/height` in
+      particular invited setting a tile size that only `--tile-size` controls. The dead blocks were
+      wrong on their own terms too — `park.png`/`forest.png` don't exist and `forests` is not a
+      `LayerType` (`internal/geojson/converter.go:16-26`); the real per-layer texture mapping is
+      hard-coded at `internal/texture/processor.go:44-53`, which the file now states. In their place:
+      commented-out `generate:`/`serve:`/`convert:`/`textures:` sections covering all 52 keys that are
+      read, each with its real default, commented so a fresh copy still changes nothing. Two traps are
+      called out — keys inside those sections are **underscored** while the matching flag is hyphenated
+      (`--zoom-min` → `generate.zoom_min`), and everything under `overpass:` is honoured by `serve`
+      only, since `generate` always builds a default single-server source (`generate.go:361-368`). Same
+      deletions applied to `config.multi-overpass.example.yaml`. Verified every remaining key against
+      the extracted list of `viper.Get*` call sites.
+- [x] **[P2]** Identity links fixed — but **the bullet's premise was already false when written**.
+      Nothing in the module or README said `MeKo-Tech`: `go.mod:1` is `github.com/cwbudde/watercolormap`
+      and the remote is `github.com/cwbudde/WaterColorMap`; `MeKo-Tech` appeared nowhere outside this
+      plan's own prose. The real split was narrower: 46 `MeKo-Christian/WaterColorMap` links in
+      `CHANGELOG.md` (the v0.3.0 block already used `CWBudde`) and two `meko-christian.github.io` demo
+      links in `README.md`. Both repointed at `CWBudde`/`cwbudde`. Commit SHAs survived the repo move,
+      so the rewritten CHANGELOG links resolve, and release-please only appends, so editing historical
+      entries is safe. Nothing in CI hardcodes an owner (`wasm-deploy.yml` uses
+      `steps.deployment.outputs.page_url`).
+- [x] **[P2]** `docs/` consolidated. `WASM-PLAYGROUND-{IMPLEMENTATION,STATUS,QUICKSTART}.md` (662 lines
+      across three files, ~85% the same document written twice with the third a strict subset) became a
+      single `docs/wasm-playground.md`; `docs/wasm-playground/README.md` is now a pointer. Dropped the
+      one-time build transcripts and the file-size inventories — the latter still claimed 3.1 MB for a
+      19.7 MB binary, which is exactly how that kind of table ages. `PHASE-2-COMPLETE.md` deleted: it
+      duplicated the Phase 2 checklist above and linked to a `docs/2.1-layer-design.md` that does not
+      exist. `docs/goal.md` kept with a header marking it as the superseded research brief — it carries
+      21 sourced Stamen citations that exist nowhere else — and flagging that it still describes PostGIS
+      as live where the implementation went Overpass-only. In this file: `--port=8080` → `--addr` in the
+      MBTiles serve example (the pointer to "lines ~699" was wrong; it is in the MBTiles Usage section
+      at the end), and the "gzip compression" bullet dropped as it contradicted 7.4's own fix above.
+      Phase 3's `🟨 IN PROGRESS` → `✅ COMPLETE`, since all six of its 3.4 work items are `[x]`.
+      **4.10's `BLOCKER` marker was left alone: it is accurate, not stale.** All 21 of its checkboxes are
+      unchecked, there is no water-polygon datasource anywhere in the tree, and the only coastline
+      handling is the way-only Overpass query at `internal/datasource/overpass.go:334` — precisely the
+      lines-not-polygons failure the section describes.
+      Two claims in the old docs turned out to be false and are corrected in the merged file rather than
+      carried over: there is **no IndexedDB cache** (`wasm.js` contains no IndexedDB at all), and the
+      playground does **not** need a backend — `cmd/wasm` imports `internal/raster` and renders the full
+      pipeline in-browser from Overpass. `README.md` repeated both and was fixed to match.
+- [ ] **[P3]** Commit hygiene, `CONTRIBUTING.md`, package-level godoc, architecture overview. The
+      commit-hygiene half is **not fixable** — those commits are in released history, and the CHANGELOG
+      entries they generated ("more progress", "recent work", 7× "playground issues fixed") can only be
+      prevented going forward, which the conventional-commit discipline used since Phase 7 already does.
+      The three documents are deferred to 7.9 rather than rushed into a docs PR: an architecture
+      overview is worth writing properly, and package godoc touches ~20 packages.
 
 ### 7.6 Testing improvements (P2/P3)
 
@@ -587,6 +642,43 @@ bugs → [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
 - [ ] **[P3]** Replace timing-based assertions (`worker/pool_test.go:90,174`) with deterministic
       synchronization; switch file-producing tests to `t.TempDir()` (currently write shared
       `testdata/output/...`); adopt `t.Parallel()` where safe (0 uses today).
+
+### 7.9 Follow-ups surfaced while completing 7.5 (P2/P3)
+
+Defects the documentation audit found in the **code**. None were fixed under 7.5, because changing
+behaviour inside a docs PR is how a docs PR stops being reviewable. The docs were corrected to
+describe what the code actually does; these entries track making the code do the documented thing.
+
+- [ ] **[P2]** All `WATERCOLORMAP_*` environment variables are dead. `cfgFile` is a plain cobra
+      `StringVar` that is never `viper.BindPFlag`-ed (`internal/cmd/root.go:40,61`), so
+      `WATERCOLORMAP_CONFIG` does nothing — it was in the README's Docker example and in
+      `Justfile`'s `docker-run`, both of which have carried a no-op flag for as long as they've existed.
+      Worse, `viper.AutomaticEnv()` (`root.go:70`) has no `SetEnvKeyReplacer`, so every nested or
+      hyphenated key maps to a name no shell can set (`WATERCOLORMAP_SERVE.ADDR`,
+      `WATERCOLORMAP_OUTPUT-DIR`). The README's env-var precedence claim was removed rather than
+      repaired. Fix: bind `cfgFile`, add `SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))`.
+- [ ] **[P2]** `generate` ignores the entire `overpass:` config block. `newTileDataSource`
+      (`internal/cmd/generate.go:361-368`) always constructs a default single-server Overpass source, so
+      neither `overpass.endpoint` nor the geographic routing in `overpass.servers` has any effect on
+      batch generation — only `serve` reads them (`serve.go:313-321`). This makes
+      `config.multi-overpass.example.yaml` misleading for exactly the workload (bulk generation) that
+      most wants multiple servers. Both example files now carry the caveat; the fix is to have
+      `generate` build its datasource the same way `serve` does.
+- [ ] **[P3]** `wasm-deploy.yml` has no push-to-`main` trigger, so merging to main never redeploys the
+      playground — only a release, a version tag, the weekly cron, or a manual dispatch does. Combined
+      with the weekly cron having failed since January 2026, the deployed page can silently lag main
+      indefinitely. Decide whether that is intended before adding a trigger; a 20 MB artifact rebuilt on
+      every merge is not obviously desirable.
+- [ ] **[P3]** `CONTRIBUTING.md`, an architecture overview, and package-level godoc — the deferred half
+      of 7.5's P3 item. Nothing today describes the end-to-end datasource → raster → mask → texture →
+      composite → serve flow in one place; the closest was `docs/PHASE-2-COMPLETE.md`, which 7.5 deleted
+      because it was frozen at a Phase 2 snapshot.
+- [ ] **[P3]** Purge the historical `wasm.wasm` blobs from git history. 7.5 untracked the file, which
+      stops future growth, but seven revisions (~52 MB) remain reachable and every fresh clone still
+      pays for them. Needs `git filter-repo` plus a force-push of `main` and all branches; it rewrites
+      every SHA, which breaks the ~56 CHANGELOG commit links 7.5 just repaired and invalidates the open
+      release-please PR and every existing clone. Do it deliberately, when no long-lived branch is
+      outstanding — not opportunistically.
 
 ---
 
@@ -639,13 +731,13 @@ watercolormap convert \
 ### Serve tiles from MBTiles
 
 ```bash
-watercolormap serve --mbtiles=hanover.mbtiles --port=8080
+watercolormap serve --mbtiles=hanover.mbtiles --addr=127.0.0.1:8080
 ```
 
 MBTiles format provides:
 
 - Single file portability (no thousands of individual files)
-- Efficient storage with gzip compression
+- Tiles stored as raw PNG, per the MBTiles 1.3 spec (gzip applies to `pbf` vector tiles, not raster)
 - Standard SQLite format compatible with most map tools
 - TMS coordinate system (Y-axis inverted from XYZ)
 
