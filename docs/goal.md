@@ -1,5 +1,13 @@
 # Plan for Creating Watercolor-Style Map Tiles in Go (Hanover Example)
 
+> **Historical document.** This is the original research brief that started the project, kept for its
+> sourced references to the Stamen Watercolor articles. It has been superseded by
+> [PLAN.md](../PLAN.md), which is the live tracker for scope and status — where the two disagree,
+> PLAN.md wins.
+>
+> Notably, this brief still treats PostGIS/osm2pgsql as a live option for data storage. The
+> implementation went Overpass-only (`internal/datasource/overpass.go`); there is no database.
+
 To build a **Stamen Watercolor-style map** for Hanover (Niedersachsen) and eventually global coverage, we can break the project into clear phases. Each phase focuses on a key part of the pipeline - from data prep to rendering, image processing, and deployment. This approach replicates the _"old school"_ Stamen method (raster-based styling with hand-crafted textures[\[1\]](https://stamen.com/watercolor-process-3dd5135861fe/#:~:text=To%20begin%20with%2C%20we%20wanted,we%E2%80%99re%20actually%20running%20this%20process)) using **modern tools (Go, updated data, etc.)**. Below is a comprehensive plan with phased steps:
 
 ## Phase 1: Data Preparation and Tool Setup
