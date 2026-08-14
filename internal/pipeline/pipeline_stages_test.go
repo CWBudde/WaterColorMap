@@ -42,6 +42,11 @@ func TestPipelineStages(t *testing.T) {
 	})
 }
 
+// buildingsMinZoom mirrors the minZoom on the ["building"] rule in
+// internal/datasource. Below it, no buildings are fetched and no buildings
+// layer is rendered.
+const buildingsMinZoom = 16
+
 // Shared test runner
 func runPipelineStagesTest(t *testing.T, caseName string, ds DataSource, coords tile.Coords) {
 	goldenDir := filepath.Join("..", "..", "testdata", "golden", "pipeline-stages", caseName)
@@ -72,7 +77,7 @@ func runPipelineStagesTest(t *testing.T, caseName string, ds DataSource, coords 
 
 	// CRITICAL ASSERTIONS
 	assertRiversIncluded(t, stages)
-	assertBuildingsIncluded(t, stages, caseName)
+	assertBuildingsIncluded(t, stages, caseName, coords.Z)
 	assertMetatileCropped(t, stages)
 
 	// Write debug outputs
@@ -106,9 +111,18 @@ func assertRiversIncluded(t *testing.T, stages []StageCapture) {
 }
 
 // Critical assertion: Buildings must be captured (integration tests only)
-func assertBuildingsIncluded(t *testing.T, stages []StageCapture, caseName string) {
+//
+// Gated on zoom, not on the case name: buildingsRules only queries
+// ["building"] from z16 up, so demanding a buildings layer at z13/z15 asserts
+// something the datasource never fetches. Both Hannover cases sit below that
+// threshold, which is why this held nothing until the tests could reach an
+// Overpass instance again.
+func assertBuildingsIncluded(t *testing.T, stages []StageCapture, caseName string, zoom uint32) {
 	if caseName == "synthetic" {
 		return // Skip for synthetic test
+	}
+	if zoom < buildingsMinZoom {
+		return
 	}
 	found := false
 	for _, stage := range stages {

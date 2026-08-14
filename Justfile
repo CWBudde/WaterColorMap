@@ -242,6 +242,29 @@ smoke zoom="13" x="4317" y="2692" addr="127.0.0.1:8080":
 test-integration:
     WATERCOLORMAP_INTEGRATION=1 go test -ldflags "{{mapnik_ldflags}}" ./... -v
 
+# Local Overpass instance, see docs/local-overpass.md and ../overpass-niedersachsen
+local_overpass := "http://localhost:12345/api/interpreter"
+
+# Fail early with a useful message instead of letting every fetch time out.
+require-local-overpass:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! curl -sf -m 5 -o /dev/null -X POST "{{local_overpass}}" -d '[out:json];out count;'; then
+      echo "Local Overpass is not answering at {{local_overpass}}." >&2
+      echo "Start it with:  cd ../overpass-niedersachsen && just up" >&2
+      echo "See docs/local-overpass.md" >&2
+      exit 1
+    fi
+
+# Integration tests against the local Overpass instance (much faster, no rate limits)
+test-integration-local: require-local-overpass
+    WATERCOLORMAP_INTEGRATION=1 WATERCOLORMAP_OVERPASS_ENDPOINT="{{local_overpass}}" \
+        go test -ldflags "{{mapnik_ldflags}}" ./... -v
+
+# Smoke test against the local Overpass instance
+smoke-local zoom="13" x="4317" y="2692" addr="127.0.0.1:8080": require-local-overpass
+    just smoke {{zoom}} {{x}} {{y}} {{addr}}
+
 # Update golden stage images (synthetic, deterministic)
 update-goldens:
     UPDATE_GOLDEN=1 go test -ldflags "{{mapnik_ldflags}}" ./... -run 'TestPipelineStages/Synthetic'
