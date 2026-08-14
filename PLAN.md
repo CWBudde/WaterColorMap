@@ -680,7 +680,9 @@ sense of safety. This phase tracks fixing what can be fixed. Items are ordered b
       varied global params that per-layer style overrides) — fixed those too. Package is now green.
 - [x] **[P0]** `docker/Dockerfile` **does not build** — `RUN` blocks at lines 22, 55, 71 ended in a
       dangling `&&` with no trailing `\` (verified via `cat -A`). Likely caused by shfmt reformatting
-      the Dockerfile (see 7.4). Restored the line continuations. (Still TODO in 7.4: stop shfmt touching it.)
+      the Dockerfile (see 7.4). Restored the line continuations. (The shfmt half is **done**, and was
+      already done before 7.4 started: `treefmt.toml` scopes shfmt to `includes = ["*.sh"]`, with the
+      reason recorded at `treefmt.toml:68-71`.)
 - [x] **[P0]** CI `test-unit.yaml` installed no Mapnik, so renderer/pipeline/server/cmd never
       compiled in CI and geojson (above) failed regardless — the unit job cannot have been green.
       Added the `libmapnik-dev` install step (mirroring `test-can-build`). (Follow-up in 7.6: split pure-Go
@@ -913,13 +915,15 @@ emitting bare tags — `v0.2.0` and `v0.3.0` both exist and are correctly `v`-pr
       on Node 24, since the release runs warn that Node 20 is deprecated and being force-migrated.
       First-party `actions/*` stay on major tags — GitHub controls that namespace, and pinning them
       buys Dependabot churn for no threat-model gain.
-- [ ] **[P3]** Pin the core dependency `CWBudde/go-overpass` (untagged pseudo-version
-      `v0.0.0-20260418190031-ddf15fac5067` on a personal fork of `serjvanilla/go-overpass`, which
-      currently has **no tags at all**) or bring it in-org. Needs an action in _that_ repo, so it is
-      not closable from here: tag `v0.1.0` at the already-pinned commit `ddf15fac5067` and
-      `go get github.com/cwbudde/go-overpass@v0.1.0`, which is behaviour-identical since the commit
-      does not move. Bringing it into MeKo-Tech instead interacts with the identity split tracked in
-      7.5. The release-tag half of this item was **incorrect** and is withdrawn — see the note above.
+- [x] **[P3]** `CWBudde/go-overpass` pinned to `v0.1.0`, replacing the untagged pseudo-version
+      `v0.0.0-20260418190031-ddf15fac5067`. The fork had **no tags at all**, so the tag was created
+      in _that_ repo at the commit already pinned (`ddf15fac5067`) — its `master` was clean and
+      already pushed, so nothing else moved. Behaviour-identical by construction: the `/go.mod` hash
+      in `go.sum` is unchanged and only the `h1` ziphash differs, which is expected since it covers
+      version-prefixed paths. Verified against the public checksum database, not with `GOPRIVATE`.
+      Bringing it into MeKo-Tech is the larger option and still interacts with the identity split
+      tracked in 7.5; that is left open there rather than here. The release-tag half of this item was
+      **incorrect** and is withdrawn — see the note above.
 
 ### 7.5 Documentation & repo hygiene (P1/P2)
 
