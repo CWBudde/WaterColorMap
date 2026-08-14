@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **watercolor:** anchor hi-DPI rendering to world position. Noise scale, all blur/shade/edge
+  sigmas, the adaptive-noise distances and the paper/layer texture period are lengths, and they
+  were fixed **device**-pixel constants while the sampling offsets scaled with the tile size. An
+  `@2x` tile therefore drew grain, texture and blur at half the ground size of the 256px tile
+  covering the same area. They are now scaled by `tileSize / 256`, so a 512px tile samples the
+  same field as its 256px twin, just at twice the resolution.
+
+  Behaviour change worth knowing about: **`--tile-size 512` without `@2x` now renders at scale 2.**
+  That is correct and consistent, but it is a visible look change for anyone running a non-256
+  base tile size. Output at the default 256px is bit-identical — the scale path is a no-op there.
+
+  Still mismatched, tracked separately: Mapnik `stroke-width` in `assets/styles/layers/*.xml` is
+  fixed device px, so `@2x` roads remain half as wide in ground terms.
+
 ## [0.3.0](https://github.com/CWBudde/WaterColorMap/compare/v0.2.0...v0.3.0) (2026-08-13)
 
 ### Features

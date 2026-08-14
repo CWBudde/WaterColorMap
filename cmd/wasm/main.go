@@ -122,6 +122,31 @@ func tileSizeForRequest(req GenerateTileRequest) int {
 	return 256
 }
 
+// wasmTuner is the browser build's watercolor configuration. It is nil, and
+// deliberately so: the playground ships no config file, and a nil *Tuner is the
+// documented "DefaultParams verbatim, no arithmetic" path. It exists as a named
+// variable rather than a literal nil so that wiring a JS-side tuning entry point
+// later is a one-line change with no call sites to hunt down.
+var wasmTuner *watercolor.Tuner
+
+// wasmWatercolorParams mirrors pipeline.Generator.watercolorParams.
+//
+// The two Overpass/render entry points below both need the params and the
+// padding, and they must agree: the padding drives both the fetch bbox handed
+// to JavaScript and the metatile the tile is rendered into. Computing it twice
+// is how they silently drift apart.
+func wasmWatercolorParams(tileSize int) (watercolor.Params, int) {
+	params := watercolor.DefaultParams(tileSize, defaultSeed, embeddedTextures)
+	wasmTuner.Apply(&params)
+	params.ApplyScale(watercolor.ScaleForTileSize(tileSize))
+
+	padPx := watercolor.RequiredPaddingPx(params)
+	if padPx > tileSize {
+		padPx = tileSize
+	}
+	return params, padPx
+}
+
 func buildOverpassQuery(bounds types.BoundingBox) string {
 	bbox := fmt.Sprintf("%.6f,%.6f,%.6f,%.6f", bounds.MinLat, bounds.MinLon, bounds.MaxLat, bounds.MaxLon)
 	return fmt.Sprintf(`
@@ -166,11 +191,7 @@ func watercolorOverpassQueryForTile(this js.Value, args []js.Value) interface{} 
 	}
 
 	tileSize := tileSizeForRequest(req)
-	params := watercolor.DefaultParams(tileSize, defaultSeed, embeddedTextures)
-	padPx := watercolor.RequiredPaddingPx(params)
-	if padPx > tileSize {
-		padPx = tileSize
-	}
+	_, padPx := wasmWatercolorParams(tileSize)
 	metatileSize := tileSize + 2*padPx
 
 	tileCoord := types.TileCoordinate{Zoom: req.Zoom, X: req.X, Y: req.Y}
@@ -214,11 +235,7 @@ func watercolorRenderTileFromOverpassJSON(this js.Value, args []js.Value) interf
 	}
 
 	tileSize := tileSizeForRequest(req)
-	params := watercolor.DefaultParams(tileSize, defaultSeed, embeddedTextures)
-	padPx := watercolor.RequiredPaddingPx(params)
-	if padPx > tileSize {
-		padPx = tileSize
-	}
+	params, padPx := wasmWatercolorParams(tileSize)
 
 	metatileSize := tileSize + 2*padPx
 	params.TileSize = metatileSize
@@ -324,7 +341,7 @@ func watercolorRenderTileFromOverpassJSON(this js.Value, args []js.Value) interf
 		painted[geojson.LayerCivic] = civicPainted
 	}
 
-	base := texture.TileTexture(embeddedTextures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY)
+	base := texture.TileTextureScaled(embeddedTextures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY, params.Scale)
 	composited, err := composite.CompositeLayersOverBase(
 		base,
 		painted,

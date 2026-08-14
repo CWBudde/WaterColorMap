@@ -20,6 +20,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/server"
+	"github.com/cwbudde/watercolormap/internal/tilejson"
 	"github.com/cwbudde/watercolormap/internal/types"
 )
 
@@ -36,6 +37,7 @@ func init() {
 	serveCmd.Flags().String("tiles-dir", "", "Directory containing tiles (defaults to --output-dir)")
 	serveCmd.Flags().String("demo-dir", filepath.Join("docs", "leaflet-demo"), "Directory for demo static files")
 	serveCmd.Flags().String("mbtiles", "", "Path to MBTiles file (alternative to tiles-dir)")
+	serveCmd.Flags().String("cors-origin", "", "Value for Access-Control-Allow-Origin on tile and status routes (empty = no CORS headers; use '*' for any origin)")
 
 	serveCmd.Flags().Bool("generate-missing", true, "Generate missing tiles on-demand and cache them to disk")
 	serveCmd.Flags().Bool("disable-cache", false, "Always regenerate tiles (still writes to disk)")
@@ -69,6 +71,7 @@ func init() {
 	mustBind("serve.tiles_dir", "tiles-dir")
 	mustBind("serve.demo_dir", "demo-dir")
 	mustBind("serve.mbtiles", "mbtiles")
+	mustBind("serve.cors_origin", "cors-origin")
 	mustBind("serve.generate_missing", "generate-missing")
 	mustBind("serve.disable_cache", "disable-cache")
 	mustBind("serve.max_concurrent_generations", "max-concurrent-generations")
@@ -104,6 +107,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	demoDir := viper.GetString("serve.demo_dir")
 	mbtilesPath := viper.GetString("serve.mbtiles")
+	corsOrigin := viper.GetString("serve.cors_origin")
 	generateMissing := viper.GetBool("serve.generate_missing")
 	disableCache := viper.GetBool("serve.disable_cache")
 	maxConc := viper.GetInt("serve.max_concurrent_generations")
@@ -158,6 +162,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 	fs := http.FileServer(http.Dir(demoDir))
 	mux.Handle("/demo/", http.StripPrefix("/demo/", fs))
 
+	// TileJSON. Registered as its own exact pattern so it wins over the
+	// "/tiles/" subtree below, whose handler would reject it as a malformed
+	// tile path.
+	tileJSONHandler, err := newTileJSONHandler(mbtilesPath)
+	if err != nil {
+		return err
+	}
+	mux.Handle("/tiles/"+tilejson.FileName, withCORS(corsOrigin, tileJSONHandler))
+
 	// Tiles handler - use MBTiles if specified, otherwise folder-based with on-demand generation
 	if mbtilesPath != "" {
 		logger.Info("Using MBTiles for tile serving", "path", mbtilesPath)
@@ -174,7 +187,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			}
 		}()
 
-		mux.Handle("/tiles/", withCORS(rateLimiter.Middleware(mbHandler.Handler())))
+		mux.Handle("/tiles/", withCORS(corsOrigin, rateLimiter.Middleware(mbHandler.Handler())))
 	} else {
 		logger.Info("Using folder-based tile serving with on-demand generation", "tiles_dir", tilesDir)
 		dataSourceName := viper.GetString("data-source")
@@ -186,7 +199,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("unsupported data source: %s", dataSourceName)
 		}
 
+		wcOverrides, err := loadWatercolorOverrides()
+		if err != nil {
+			return err
+		}
+
 		od, err := server.NewOnDemandTiles(ds, server.OnDemandTilesConfig{
+			Watercolor:               wcOverrides,
 			TilesDir:                 tilesDir,
 			StylesDir:                filepath.Join("assets", "styles"),
 			TexturesDir:              filepath.Join("assets", "textures"),
@@ -212,9 +231,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// The status endpoints are deliberately not rate limited: the SSE
 		// stream reconnects after any error, so throttling it produces a
 		// reconnect storm. /healthz and /demo/ are likewise exempt.
-		mux.Handle("/tiles/status", withCORS(od.StatusHandler()))
-		mux.Handle("/tiles/status/stream", withCORS(od.StatusStreamHandler()))
-		mux.Handle("/tiles/", withCORS(rateLimiter.Middleware(od.Handler())))
+		mux.Handle("/tiles/status", withCORS(corsOrigin, od.StatusHandler()))
+		mux.Handle("/tiles/status/stream", withCORS(corsOrigin, od.StatusStreamHandler()))
+		mux.Handle("/tiles/", withCORS(corsOrigin, rateLimiter.Middleware(od.Handler())))
 	}
 
 	logger.Info("demo server listening",
@@ -235,6 +254,31 @@ func runServe(cmd *cobra.Command, args []string) error {
 	srv.RegisterOnShutdown(onShutdown)
 
 	return runHTTPServer(srv, shutdownTimeout, logger)
+}
+
+// serveTileTemplate is the tile URL template the server exposes. Both tile
+// backends parse the flat "z{z}_x{x}_y{y}.png" form; the nested layout that
+// `generate --folder-structure=nested` can write is not served.
+const serveTileTemplate = "/tiles/z{z}_x{x}_y{y}.png"
+
+// newTileJSONHandler builds the /tiles/tilejson.json handler.
+//
+// With an MBTiles backend the real bounds and zoom range come from the file's
+// metadata table. On-demand folder serving has no such manifest -- it renders
+// whatever tile is asked for, so nothing in the serve path knows the extent of
+// the set -- and the document falls back to the whole world at
+// tilejson.DefaultMinZoom..DefaultMaxZoom.
+func newTileJSONHandler(mbtilesPath string) (http.Handler, error) {
+	if mbtilesPath == "" {
+		doc := tilejson.New(tilejson.Options{Tiles: []string{serveTileTemplate}})
+		return tilejson.Handler(doc, logger), nil
+	}
+
+	doc, err := tilejson.FromMBTilesFile(mbtilesPath, serveTileTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build TileJSON from MBTiles: %w", err)
+	}
+	return tilejson.Handler(doc, logger), nil
 }
 
 // newHTTPServer builds the tile server with timeouts on every phase of a
@@ -410,10 +454,27 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 	return 0
 }
 
-func withCORS(next http.Handler) http.Handler {
+// withCORS is the single owner of the CORS headers on the tile and status
+// routes; the handlers underneath deliberately set none of their own, so this
+// toggle cannot be silently overridden.
+//
+// An empty origin means no CORS at all: the headers are omitted and preflights
+// are passed through rather than answered. Cross-origin consumers -- the WASM
+// playground and any other browser demo served from a different origin --
+// need the server started with --cors-origin '*' (or a concrete origin).
+func withCORS(origin string, next http.Handler) http.Handler {
+	if origin == "" {
+		return next
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if origin != "*" {
+			// Any origin-specific policy must not be cached across origins.
+			w.Header().Add("Vary", "Origin")
+		}
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

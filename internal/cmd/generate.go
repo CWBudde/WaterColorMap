@@ -18,6 +18,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/tilejson"
 	"github.com/cwbudde/watercolormap/internal/worker"
 )
 
@@ -221,9 +222,15 @@ func runSingleGenerate(opts *singleOptions) error {
 	stylesDir := filepath.Join("assets", "styles")
 	texturesDir := filepath.Join("assets", "textures")
 
+	wcOverrides, err := loadWatercolorOverrides()
+	if err != nil {
+		return err
+	}
+
 	gen, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize, opts.seed, opts.keepLayers, logger, pipeline.GeneratorOptions{
 		PNGCompression:  opts.pngCompression,
 		FolderStructure: opts.folderStructure,
+		Watercolor:      wcOverrides,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to init generator: %w", err)
@@ -244,6 +251,7 @@ func runSingleGenerate(opts *singleOptions) error {
 		gen2x, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize*2, opts.seed, opts.keepLayers, logger, pipeline.GeneratorOptions{
 			PNGCompression:  opts.pngCompression,
 			FolderStructure: opts.folderStructure,
+			Watercolor:      wcOverrides,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to init hidpi generator: %w", err)
@@ -343,6 +351,10 @@ func runBatchGenerate(opts *batchOptions) error {
 		}
 	}
 
+	if err := writeFolderTileJSON(opts, bbox); err != nil {
+		return err
+	}
+
 	return flushMBTilesWriters(opts, mbtilesWriter, mbtilesWriterHiDPI)
 }
 
@@ -387,6 +399,53 @@ func logBatchStart(opts *batchOptions, tileCount int) {
 	)
 }
 
+// batchMetadata describes the tile set produced by a batch run. Both the
+// MBTiles metadata table and the folder tilejson.json are built from it, so the
+// two deliveries describe the same set.
+func batchMetadata(opts *batchOptions, bbox [4]float64) mbtiles.Metadata {
+	return mbtiles.Metadata{
+		Name:    tilejson.DefaultName,
+		Format:  tilejson.DefaultFormat,
+		MinZoom: mbtiles.Zoom(opts.zoomMin),
+		MaxZoom: mbtiles.Zoom(opts.zoomMax),
+		// bbox is already [minLon, minLat, maxLon, maxLat], the TileJSON
+		// bounds order.
+		Bounds: bbox,
+		Center: [3]float64{
+			(bbox[0] + bbox[2]) / 2,
+			(bbox[1] + bbox[3]) / 2,
+			float64((opts.zoomMin + opts.zoomMax) / 2),
+		},
+		Attribution: tilejson.DefaultAttribution,
+		Description: tilejson.DefaultDescription,
+		Type:        "baselayer",
+		Version:     "1.0",
+	}
+}
+
+// writeFolderTileJSON emits tilejson.json next to the tiles of a folder run, so
+// a client can discover bounds, zoom range and attribution without the CLI
+// flags that produced them. MBTiles output carries the same information in its
+// metadata table and needs no sidecar.
+func writeFolderTileJSON(opts *batchOptions, bbox [4]float64) error {
+	if opts.format != "folder" {
+		return nil
+	}
+
+	doc := tilejson.FromMBTilesMetadata(
+		batchMetadata(opts, bbox),
+		tilejson.FolderTileTemplate(opts.folderStructure),
+	)
+
+	path, err := tilejson.WriteFile(opts.outputDir, doc)
+	if err != nil {
+		return fmt.Errorf("failed to write tilejson: %w", err)
+	}
+
+	logger.Info("TileJSON written", "path", path, "tiles", doc.Tiles[0])
+	return nil
+}
+
 // openMBTilesWriters creates the MBTiles writers for the run. It returns nil
 // writers when the output format is not MBTiles.
 func openMBTilesWriters(opts *batchOptions, bbox [4]float64) (base, hidpi *mbtiles.Writer, err error) {
@@ -394,26 +453,7 @@ func openMBTilesWriters(opts *batchOptions, bbox [4]float64) (base, hidpi *mbtil
 		return nil, nil, nil
 	}
 
-	// Calculate bounds from bbox for metadata
-	bounds := [4]float64{bbox[0], bbox[1], bbox[2], bbox[3]}
-	center := [3]float64{
-		(bbox[0] + bbox[2]) / 2,
-		(bbox[1] + bbox[3]) / 2,
-		float64((opts.zoomMin + opts.zoomMax) / 2),
-	}
-
-	metadata := mbtiles.Metadata{
-		Name:        "WaterColorMap",
-		Format:      "png",
-		MinZoom:     mbtiles.Zoom(opts.zoomMin),
-		MaxZoom:     mbtiles.Zoom(opts.zoomMax),
-		Bounds:      bounds,
-		Center:      center,
-		Attribution: "© OpenStreetMap contributors",
-		Description: "Watercolor-styled map tiles",
-		Type:        "baselayer",
-		Version:     "1.0",
-	}
+	metadata := batchMetadata(opts, bbox)
 
 	base, err = mbtiles.New(opts.outputFile, metadata)
 	if err != nil {
@@ -467,6 +507,11 @@ func flushMBTilesWriters(opts *batchOptions, base, hidpi *mbtiles.Writer) error 
 
 // newBatchGenerator builds a pipeline generator for the given tile size.
 func newBatchGenerator(opts *batchOptions, ds pipeline.DataSource, tileSize int, tileWriter pipeline.TileWriter) (*pipeline.Generator, error) {
+	wcOverrides, err := loadWatercolorOverrides()
+	if err != nil {
+		return nil, err
+	}
+
 	return pipeline.NewGenerator(
 		ds,
 		filepath.Join("assets", "styles"),
@@ -480,6 +525,7 @@ func newBatchGenerator(opts *batchOptions, ds pipeline.DataSource, tileSize int,
 			PNGCompression:  opts.pngCompression,
 			TileWriter:      tileWriter,
 			FolderStructure: opts.folderStructure,
+			Watercolor:      wcOverrides,
 		},
 	)
 }

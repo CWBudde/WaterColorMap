@@ -21,9 +21,13 @@ import (
 	"github.com/cwbudde/watercolormap/internal/safe"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/types"
+	"github.com/cwbudde/watercolormap/internal/watercolor"
 )
 
 type OnDemandTilesConfig struct {
+	// Watercolor optionally overrides the watercolor parameters from config.
+	// Nil keeps the renderer on the untouched DefaultParams path.
+	Watercolor               *watercolor.Overrides
 	TilesDir                 string
 	StylesDir                string
 	TexturesDir              string
@@ -337,7 +341,6 @@ func (t *OnDemandTiles) Status() TileStatus {
 func (t *OnDemandTiles) StatusHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "no-store")
 
 		status := t.Status()
@@ -358,7 +361,6 @@ func (t *OnDemandTiles) StatusStreamHandler() http.Handler {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -441,11 +443,11 @@ func (t *OnDemandTiles) Handler() http.Handler {
 	return http.HandlerFunc(t.serveTile)
 }
 
+// serveTile answers a tile request. CORS is deliberately absent here: it is
+// owned entirely by the serve command's withCORS middleware, which also
+// answers preflights, so the toggle there cannot be overridden from inside
+// the handler.
 func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
-	if writeTileCORS(w, r) {
-		return
-	}
-
 	coords, suffix, err := parseTilePath(r.URL.Path)
 	if err != nil {
 		writeTilePathError(w, r, t.log(), err)
@@ -558,23 +560,6 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t.serveTileFile(w, r, fullPath)
-}
-
-// writeTileCORS sets the tile CORS headers and answers a preflight request,
-// reporting whether the request has already been fully handled.
-//
-// Browser-based playgrounds (including GitHub Pages) are allowed to request
-// tiles. Note: HTTPS pages cannot fetch from HTTP backends due to
-// mixed-content rules.
-func writeTileCORS(w http.ResponseWriter, r *http.Request) bool {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return true
-	}
-	return false
 }
 
 // serveTileFile serves a rendered tile with the configured cache policy.
@@ -727,7 +712,10 @@ func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) 
 		t.cfg.Seed,
 		t.cfg.KeepLayers,
 		t.logger,
-		pipeline.GeneratorOptions{PNGCompression: t.cfg.PNGCompression},
+		pipeline.GeneratorOptions{
+			PNGCompression: t.cfg.PNGCompression,
+			Watercolor:     t.cfg.Watercolor,
+		},
 	)
 	if err != nil {
 		return nil, err
