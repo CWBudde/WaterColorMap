@@ -5,6 +5,8 @@ import (
 	"image/color"
 	"math"
 	"testing"
+
+	"github.com/cwbudde/watercolormap/internal/mask/blurkernel"
 )
 
 // rmseVsGaussian measures how far a blur is from a true Gaussian of the same
@@ -60,36 +62,60 @@ func qualityPattern() *image.Gray {
 // a true Gaussian, at the sigmas the renderer actually uses.
 //
 // This replaces an earlier test that only asserted "centre bright, corners
-// dark", which passed just as happily when the blur was three times stronger
+// dark", which passed just as happily when the blur ran two to four times wider
 // than its nominal sigma.
 func TestBlurAccuracyVsGaussian(t *testing.T) {
-	// The direct-convolution path is a real Gaussian, quantised to 16-bit
-	// weights, so it should track gift closely. The box path is an
-	// approximation by construction and gets a wider budget.
+	// Budgets are per kernel family, not per sigma. The direct path is a real
+	// Gaussian quantised to 16-bit weights and tracks gift to within ~0.2
+	// levels; the box path approximates by construction and drifts with sigma,
+	// reaching ~1.6 at the widest sigma in use. Both budgets sit a little above
+	// the measured worst case so quantisation noise cannot flake the test.
+	const (
+		convBudget = 0.5
+		boxBudget  = 2.5
+	)
+
+	// Each case states which kernel it is meant to exercise. Asserting that
+	// keeps the budgets honest: when maxConvRadius moved from 8 to 12, sigma
+	// 3.5 crossed from the box path to the direct one and silently kept a
+	// box-sized budget. Now that crossing fails the test instead.
 	tests := []struct {
-		sigma  float32
-		maxRMS float64
+		sigma float32
+		mode  blurkernel.Mode
 	}{
-		{0.35, 2.0},
-		{0.5, 2.0},
-		{0.7, 2.0},
-		{0.9, 2.0},
-		{1.1, 2.0},
-		{1.2, 2.0},
-		{1.68, 2.0},
-		{2.5, 2.0},
-		{3.5, 12.0},
-		{4.9, 12.0},
+		{0.35, blurkernel.ModeConv}, // antialias at zoom >= 14
+		{0.5, blurkernel.ModeConv},
+		{0.99, blurkernel.ModeConv}, // global blur at zoom >= 14
+		{1.41, blurkernel.ModeConv}, // antialias, rivers
+		{2.45, blurkernel.ModeConv}, // global blur, most layer masks
+		{3.43, blurkernel.ModeConv}, // global blur at zoom <= 11
+		{3.5, blurkernel.ModeConv},
+		{4.0, blurkernel.ModeConv}, // widest sigma still convolved
+		{4.9, blurkernel.ModeBox},  // narrowest sigma on the box path
+		{7.48, blurkernel.ModeBox}, // land shade
 	}
 
 	for _, tt := range tests {
+		mode := blurkernel.PlanFor(float64(tt.sigma)).Mode
+		if mode != tt.mode {
+			t.Errorf("sigma=%.2f: kernel is mode %v, test expects %v — "+
+				"the accuracy budget below no longer matches the path being taken",
+				tt.sigma, mode, tt.mode)
+			continue
+		}
+
+		budget := convBudget
+		if mode == blurkernel.ModeBox {
+			budget = boxBudget
+		}
+
 		got := BoxBlurSigma(qualityPattern(), tt.sigma)
 		rms := rmseVsGaussian(t, got, tt.sigma)
-		if rms > tt.maxRMS {
-			t.Errorf("sigma=%.2f: RMSE vs true Gaussian is %.2f levels, budget %.2f",
-				tt.sigma, rms, tt.maxRMS)
+		if rms > budget {
+			t.Errorf("sigma=%.2f (%v): RMSE vs true Gaussian is %.2f levels, budget %.2f",
+				tt.sigma, mode, rms, budget)
 		}
-		t.Logf("sigma=%.2f: RMSE %.2f levels", tt.sigma, rms)
+		t.Logf("sigma=%.2f (%v): RMSE %.2f levels", tt.sigma, mode, rms)
 	}
 }
 
@@ -136,4 +162,35 @@ func strongerOrWeaker(got, want float64) string {
 		return "stronger"
 	}
 	return "weaker"
+}
+
+// TestBlurDegenerateImages guards the entry points against images with a zero
+// dimension. The kernels assume at least one pixel each way — the row pass
+// replicates row[0] into its pad, the column pass clamps against h-1 — so a
+// missing guard here is a panic, not a wrong pixel.
+func TestBlurDegenerateImages(t *testing.T) {
+	bounds := []image.Rectangle{
+		image.Rect(0, 0, 0, 0),
+		image.Rect(0, 0, 0, 5),
+		image.Rect(0, 0, 5, 0),
+	}
+
+	for _, r := range bounds {
+		t.Run(r.String(), func(t *testing.T) {
+			for _, radius := range []int{0, 1, 4} {
+				got := BoxBlur(image.NewGray(r), radius)
+				if got.Bounds() != r {
+					t.Errorf("BoxBlur(radius=%d) bounds %v, want %v", radius, got.Bounds(), r)
+				}
+			}
+
+			// Cover both kernel families and the identity path.
+			for _, sigma := range []float32{0, 0.5, 2.45, 7.48} {
+				got := BoxBlurSigma(image.NewGray(r), sigma)
+				if got.Bounds() != r {
+					t.Errorf("BoxBlurSigma(sigma=%.2f) bounds %v, want %v", sigma, got.Bounds(), r)
+				}
+			}
+		})
+	}
 }

@@ -140,7 +140,11 @@ func BoxBlur(m *image.Gray, radius int) *image.Gray {
 	bounds := m.Bounds()
 	dst := image.NewGray(bounds)
 	w, h := bounds.Dx(), bounds.Dy()
-	if radius < 1 {
+
+	// The kernels assume at least one pixel in each direction: the row pass
+	// replicates row[0] into the pad, and the column pass clamps row indices
+	// against h-1. Both fault on a degenerate image.
+	if radius < 1 || w == 0 || h == 0 {
 		copyGray(dst, m, w, h)
 		return dst
 	}
