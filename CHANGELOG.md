@@ -28,6 +28,24 @@
   the default 256px is unchanged — the scale factor is exactly `1.0` there, which go-mapnik treats
   identically to the unset value the code passed before.
 
+- **cmd:** `generate` now honours the configured Overpass servers. It hardcoded an empty endpoint and
+  therefore always queried the public `overpass-api.de`, ignoring the `overpass.servers` /
+  `overpass.endpoint` config that `serve` has always read — so a configured local instance went
+  unused and every batch run took the public API's rate limits. Both commands now resolve their
+  datasource the same way. Adds `--overpass-workers` to `generate` for parity with `serve`.
+
+- **demo:** the Leaflet demo declares an inline `data:` favicon. Without it the browser requested
+  `/favicon.ico`, which the tile server has no route for and answered 404 — the page's only console
+  error.
+
+### Features
+
+- **datasource:** `WATERCOLORMAP_OVERPASS_ENDPOINT` overrides the endpoint used when a caller
+  configures none. Integration tests build their datasource directly and never see `config.yaml`,
+  so this is what points them at a local Overpass instance; an explicitly configured endpoint still
+  wins, and unset the default remains the public API. See `docs/local-overpass.md`, plus
+  `just test-integration-local` and `just smoke-local`.
+
 ## [0.3.0](https://github.com/CWBudde/WaterColorMap/compare/v0.2.0...v0.3.0) (2026-08-13)
 
 ### Features

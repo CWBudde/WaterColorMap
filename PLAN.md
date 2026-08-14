@@ -63,6 +63,15 @@ items done, parameters retuned.
 - [x] Add an integration test rendering adjacent tiles and checking border deltas stay within tolerance (`TestCompositedTileSeams` in `internal/pipeline/seam_test.go` renders a 2×2 block at z13 through `Generator.Generate` and judges each border against an in-tile control step, since composited tiles are grainy everywhere and a fixed per-pixel threshold would measure grain rather than seams)
 - [x] Document a quick manual seam inspection checklist (Leaflet) — `docs/seam-inspection.md`, linked from `AGENTS.md`
 
+  **Open, found while running the integration suite against a local Overpass:** the older
+  `TestRenderAdjacentTilesWithRealData/EdgeAlignment` (`internal/renderer/multipass_test.go`) fails
+  ~12 times. It is the naive version of the check above — a fixed ±60 per-pixel threshold between the
+  last pixel column of one tile and the first column of its neighbour. Those are adjacent but
+  _different_ pixels, so an antialiased edge crossing the seam legitimately differs; observed gaps
+  reach ~120. It fails identically on `837537a`, so it predates the hi-DPI work and is not caused by
+  it. Either the tolerance is wrong for raw layer masks or there is a real half-pixel offset — the
+  `TestCompositedTileSeams` control-step approach is the pattern to fold it into. Unresolved.
+
 ### 4.5 Output Formats & Hi-DPI
 
 - [x] Add `--hidpi`/config toggle to emit 512px `@2x` tiles alongside 256px output
@@ -113,12 +122,12 @@ items done, parameters retuned.
 
 **Smoke test / acceptance**
 
-- [ ] Generate a small Hanover set (e.g., a 3×3 grid at z13) and verify:
-  - [ ] Demo page loads without console errors
-  - [ ] Tiles load and pan smoothly
-  - [ ] HiDPI tiles render when present
-  - [ ] Missing tiles are generated on-demand and displayed
-  - [ ] Regenerated tiles are cached to disk for subsequent requests
+- [x] Generate a small Hanover set (e.g., a 3×3 grid at z13) and verify — run against the local Overpass instance (`docs/local-overpass.md`), 3×3 z13 block around `4317/2692`, base + `@2x`, 18 tiles in 62 s with no warnings:
+  - [x] Demo page loads without console errors — required one fix: the page had no `<link rel="icon">`, so the browser requested `/favicon.ico`, which the tile server has no route for and answered 404. That was the only console error. Now an inline `data:` SVG icon, so no request is made
+  - [x] Tiles load and pan smoothly — 30/30 tiles loaded at z13 and again at z15, 0 broken, 0 pending; after a real drag-pan (hash moved `52.375/9.732` → `52.335/9.822`) 43/43 loaded, 0 broken
+  - [x] HiDPI tiles render when present — the demo switches on `devicePixelRatio >= 2` (`docs/leaflet-demo/index.html:432`). At DPR 2 the server log shows `suffix=@2x` on-demand generations and the page holds 13 tiles with `naturalWidth` 512 drawn at 256 CSS px, i.e. the retina path end to end. Verified independently by URL as well: `z13_x4317_y2692@2x.png` is 512×512
+  - [x] Missing tiles are generated on-demand and displayed — 35 tiles generated on demand during browsing (`msg="tile generated on-demand"`), base and `@2x`, all displayed, 0 errors or warnings in the server log
+  - [x] Regenerated tiles are cached to disk for subsequent requests — a tile absent from `tiles/` returned in 6.66 s and appeared on disk at the same byte size; the second request for it returned in 3.7 ms
 
 ### 4.7 Visual Tuning Controls
 
