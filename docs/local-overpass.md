@@ -61,7 +61,10 @@ Hannover tile, so without this setting the suite fails semi-randomly.
 
 ### The CLI
 
-`config.yaml` already routes to it. Both `generate` and `serve` read the
+`config.yaml` already routes to it — but note `config.yaml` is gitignored, so a
+fresh checkout has no routing at all and falls back to the public API. That is
+why the `-local` recipes set `WATERCOLORMAP_OVERPASS_ENDPOINT` rather than
+relying on the config being present. Both `generate` and `serve` read the
 `overpass.servers` list and pick a server by geography, falling back to the
 public API for anything outside the coverage box:
 
@@ -102,7 +105,8 @@ caller passes no endpoint of its own. An explicitly configured endpoint — the
 
 ```bash
 just smoke              # 3x3 z13 block around Hannover, then serve it
-just smoke-local        # same, but asserts the local instance is up first
+just smoke-local        # same, but asserts the local instance is up and points
+                        # the run at it via WATERCOLORMAP_OVERPASS_ENDPOINT
 ```
 
 `just smoke` generates 9 tiles and serves them at
