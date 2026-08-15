@@ -155,7 +155,7 @@
   exactly the hung-server outage it exists for.
 
   Ocean rendering needed explicit care. It sets `AllowEmptyResponses` on every server, which turns
-  the empty response into a *success* — correct over open sea, but it would have let a regional
+  the empty response into a _success_ — correct over open sea, but it would have let a regional
   server's silent 200-with-no-data failure over land bake a featureless tile. A featureless
   response now gets a second opinion without being treated as an error: the next candidate is
   tried, and the empty result is returned only if none does better.

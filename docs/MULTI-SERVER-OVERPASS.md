@@ -29,13 +29,13 @@ which is fatal to a long bulk run.
 Two failures are deliberately **not** retried elsewhere, because another server
 cannot help:
 
-| Failure                                        | Retried elsewhere? | Why                                                      |
-| ---------------------------------------------- | ------------------ | -------------------------------------------------------- |
-| Connection refused, 5xx, 429, HTML error page  | ✅                 | A healthy second server answers it                       |
-| Server hangs until the HTTP client times out   | ✅                 | The server is the problem; that is what a fallback is for |
-| Empty response at z8–13                        | ✅                 | This is what a silent upstream failure looks like        |
-| The **caller's** context is cancelled or expired | ❌               | The caller is gone; another attempt only delays shutdown |
-| Response over the size cap                     | ❌                 | A property of the data and the cap, not of the server    |
+| Failure                                          | Retried elsewhere? | Why                                                       |
+| ------------------------------------------------ | ------------------ | --------------------------------------------------------- |
+| Connection refused, 5xx, 429, HTML error page    | ✅                 | A healthy second server answers it                        |
+| Server hangs until the HTTP client times out     | ✅                 | The server is the problem; that is what a fallback is for |
+| Empty response at z8–13                          | ✅                 | This is what a silent upstream failure looks like         |
+| The **caller's** context is cancelled or expired | ❌                 | The caller is gone; another attempt only delays shutdown  |
+| Response over the size cap                       | ❌                 | A property of the data and the cap, not of the server     |
 
 The caller-gone test reads the context, not the shape of the error, and the
 distinction is not academic: an `http.Client.Timeout` produces an error that
@@ -51,7 +51,7 @@ names them all.
 #### Empty responses under ocean rendering
 
 With ocean polygons configured, every server runs with `AllowEmptyResponses`,
-which turns the empty mid-zoom response into a *success* carrying no features —
+which turns the empty mid-zoom response into a _success_ carrying no features —
 because over open sea it is the truth, and the ocean polygons still have to
 render. That would quietly undo the empty-response row above: a regional server
 failing the 200-with-no-data way over land would have its featureless tile
