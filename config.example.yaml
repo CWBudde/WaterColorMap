@@ -93,8 +93,10 @@ overpass:
 #
 #   # Batch mode: set bbox to "minLon,minLat,maxLon,maxLat" to enable it.
 #   bbox: ""
-#   zoom_min: 0 # required (> 0) for batch mode
-#   zoom_max: 0 # required (> 0) for batch mode
+#   # Required for batch mode; -1 means "not set". 0 is a real zoom (the single
+#   # world tile), so it is accepted here.
+#   zoom_min: -1
+#   zoom_max: -1
 #   workers: 0 # 0 = one worker per CPU
 #   progress: true
 #   allow_failures: false # keep going when individual tiles fail
