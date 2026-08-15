@@ -187,7 +187,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			}
 		}()
 
-		mux.Handle("/tiles/", withCORS(corsOrigin, rateLimiter.Middleware(mbHandler.Handler())))
+		mux.Handle("/tiles/", withCORS(corsOrigin, withReadMethods(rateLimiter.Middleware(mbHandler.Handler()))))
 	} else {
 		logger.Info("Using folder-based tile serving with on-demand generation", "tiles_dir", tilesDir)
 		dataSourceName := viper.GetString("data-source")
@@ -231,9 +231,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// The status endpoints are deliberately not rate limited: the SSE
 		// stream reconnects after any error, so throttling it produces a
 		// reconnect storm. /healthz and /demo/ are likewise exempt.
-		mux.Handle("/tiles/status", withCORS(corsOrigin, od.StatusHandler()))
-		mux.Handle("/tiles/status/stream", withCORS(corsOrigin, od.StatusStreamHandler()))
-		mux.Handle("/tiles/", withCORS(corsOrigin, rateLimiter.Middleware(od.Handler())))
+		mux.Handle("/tiles/status", withCORS(corsOrigin, withReadMethods(od.StatusHandler())))
+		mux.Handle("/tiles/status/stream", withCORS(corsOrigin, withReadMethods(od.StatusStreamHandler())))
+		mux.Handle("/tiles/", withCORS(corsOrigin, withReadMethods(rateLimiter.Middleware(od.Handler()))))
 	}
 
 	logger.Info("demo server listening",
@@ -452,6 +452,25 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return float64(v)
 	}
 	return 0
+}
+
+// withReadMethods rejects everything except GET and HEAD.
+//
+// It has to sit *inside* withCORS and apply regardless of it: with CORS off
+// (the default) withCORS returns the handler untouched, and the tile handlers
+// themselves check no method — so an OPTIONS request was served like a GET and
+// could trigger a full Overpass fetch and Mapnik render on a cache miss. When
+// CORS is on, withCORS answers the preflight before this wrapper is reached, so
+// legitimate OPTIONS still get their 204.
+func withReadMethods(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withCORS is the single owner of the CORS headers on the tile and status

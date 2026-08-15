@@ -23,7 +23,12 @@ type MapnikRenderer struct {
 	// normalises that to 1.0, so a renderer that never calls SetScaleFactor
 	// issues exactly the same Mapnik call it always has.
 	scaleFactor float64
-	tileSize    int
+	// bufferSize is Mapnik's buffer around the render bounds, in device pixels.
+	// It is kept here rather than only on the map object because resetMapObject
+	// replaces that object between every layer pass; a value set once at
+	// construction would be silently dropped by the first LoadStyle/LoadXML.
+	bufferSize int
+	tileSize   int
 }
 
 func (r *MapnikRenderer) resetMapObject() {
@@ -31,6 +36,13 @@ func (r *MapnikRenderer) resetMapObject() {
 		r.mapObject.Free()
 	}
 	r.mapObject = mapnik.NewSized(r.tileSize, r.tileSize)
+	// The new map object starts with Mapnik's default buffer, so anything the
+	// caller configured has to be re-applied here or it only ever applies to
+	// the render before the first style load — which, in the multi-pass
+	// renderer, is no render at all.
+	if r.bufferSize > 0 {
+		r.mapObject.SetBufferSize(r.bufferSize)
+	}
 }
 
 // NewMapnikRenderer creates a new Mapnik renderer
@@ -221,8 +233,16 @@ func (r *MapnikRenderer) SetBounds(minX, minY, maxX, maxY float64) error {
 	return nil
 }
 
-// SetBufferSize sets the buffer size around the tile (for label placement, etc.)
+// SetBufferSize sets the buffer size around the tile (for label placement and
+// for features whose geometry crosses the render bounds).
+//
+// The value is remembered on the renderer, not just pushed to the current map
+// object, because LoadStyle/LoadXML reset that object between every layer pass.
 func (r *MapnikRenderer) SetBufferSize(pixels int) {
+	if pixels < 0 {
+		return
+	}
+	r.bufferSize = pixels
 	r.mapObject.SetBufferSize(pixels)
 }
 

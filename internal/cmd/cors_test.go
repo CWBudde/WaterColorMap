@@ -118,3 +118,58 @@ func TestWithCORSEnabledAnswersPreflight(t *testing.T) {
 		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "*")
 	}
 }
+
+// The tile handlers check no method themselves, and with CORS disabled withCORS
+// passes everything straight through — so before withReadMethods an OPTIONS on
+// a missing tile ran the whole on-demand fetch-and-render path.
+func TestWithReadMethodsRejectsNonReadMethods(t *testing.T) {
+	var called bool
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		method     string
+		wantStatus int
+		wantCalled bool
+	}{
+		{http.MethodGet, http.StatusOK, true},
+		{http.MethodHead, http.StatusOK, true},
+		{http.MethodOptions, http.StatusMethodNotAllowed, false},
+		{http.MethodPost, http.StatusMethodNotAllowed, false},
+		{http.MethodDelete, http.StatusMethodNotAllowed, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			called = false
+			rec := httptest.NewRecorder()
+			// CORS off: the guard is the only thing standing in front.
+			withCORS("", withReadMethods(inner)).ServeHTTP(
+				rec, httptest.NewRequest(tt.method, "/tiles/z13_x4317_y2692.png", nil))
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if called != tt.wantCalled {
+				t.Errorf("inner handler called = %v, want %v", called, tt.wantCalled)
+			}
+		})
+	}
+}
+
+// With CORS enabled the preflight must still be answered, not 405'd.
+func TestWithReadMethodsKeepsCORSPreflight(t *testing.T) {
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("inner handler must not run for a preflight")
+	})
+
+	rec := httptest.NewRecorder()
+	withCORS("*", withReadMethods(inner)).ServeHTTP(
+		rec, httptest.NewRequest(http.MethodOptions, "/tiles/z13_x4317_y2692.png", nil))
+
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", rec.Code)
+	}
+}

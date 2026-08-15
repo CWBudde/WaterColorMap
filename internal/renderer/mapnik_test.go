@@ -147,3 +147,29 @@ func TestMapnikRenderer_RenderToFile(t *testing.T) {
 
 	t.Logf("Successfully rendered tile to %s", outputPath)
 }
+
+// LoadStyle and LoadXML both call resetMapObject, which frees the map object and
+// builds a new one. Anything configured on the old object is gone unless the
+// renderer re-applies it — which is exactly how the buffer set once in
+// NewMultiPassRenderer used to be lost before the first layer was ever drawn.
+func TestBufferSizeSurvivesStyleReload(t *testing.T) {
+	requireIntegration(t)
+
+	r, err := NewMapnikRenderer("", 256)
+	if err != nil {
+		t.Fatalf("NewMapnikRenderer: %v", err)
+	}
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	r.SetBufferSize(128)
+	if got := r.bufferSize; got != 128 {
+		t.Fatalf("bufferSize after SetBufferSize = %d, want 128", got)
+	}
+
+	if err := r.LoadXML(`<?xml version="1.0" encoding="utf-8"?><Map srs="+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +no_defs +over"></Map>`); err != nil {
+		t.Fatalf("LoadXML: %v", err)
+	}
+	if got := r.bufferSize; got != 128 {
+		t.Errorf("bufferSize after LoadXML = %d, want 128 — the reset dropped it", got)
+	}
+}
