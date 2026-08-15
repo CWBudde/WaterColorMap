@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"errors"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -86,6 +87,105 @@ func TestWatermarkMatchesLongestSuccessfulPrefix(t *testing.T) {
 		if got := tr.Watermark(); got != want {
 			t.Fatalf("trial %d: watermark %d, want %d", trial, got, want)
 		}
+	}
+}
+
+// TestFrontierStaysBoundedAfterAFailure: an early permanent failure pins the
+// watermark for the rest of the run, and every later success used to be kept in
+// the frontier forever — O(tiles) memory, which is exactly what the streaming
+// path exists to avoid. Successes past the failure can be dropped, because a
+// resume re-attempts the whole suffix anyway.
+func TestFrontierStaysBoundedAfterAFailure(t *testing.T) {
+	tr := NewTracker(filepath.Join(t.TempDir(), FileName), testKey(), nil, 1_000_000)
+
+	if err := tr.Complete(4, false); err != nil {
+		t.Fatalf("Complete(4): %v", err)
+	}
+	for i := 5; i < 5000; i++ {
+		if err := tr.Complete(i, true); err != nil {
+			t.Fatalf("Complete(%d): %v", i, err)
+		}
+	}
+
+	if got := tr.Watermark(); got != 0 {
+		t.Errorf("watermark %d, want 0: index 4 failed and 0-3 never completed", got)
+	}
+	if got := len(tr.frontier); got != 0 {
+		t.Errorf("frontier holds %d entries after a failure at index 4, want none", got)
+	}
+
+	// Indices below the failure still count: they can still carry the watermark.
+	for i := 0; i < 4; i++ {
+		if err := tr.Complete(i, true); err != nil {
+			t.Fatalf("Complete(%d): %v", i, err)
+		}
+	}
+	if got := tr.Watermark(); got != 4 {
+		t.Errorf("watermark %d, want 4: 0-3 succeeded, 4 failed", got)
+	}
+}
+
+// TestFrontierDropsSuccessesPastALaterFailure: failures arrive out of order too,
+// so a lower one has to evict what a higher index already banked.
+func TestFrontierDropsSuccessesPastALaterFailure(t *testing.T) {
+	tr := NewTracker(filepath.Join(t.TempDir(), FileName), testKey(), nil, 1_000_000)
+
+	for _, i := range []int{7, 8, 9} {
+		if err := tr.Complete(i, true); err != nil {
+			t.Fatalf("Complete(%d): %v", i, err)
+		}
+	}
+	if got := len(tr.frontier); got != 3 {
+		t.Fatalf("frontier holds %d entries, want the 3 banked successes", got)
+	}
+
+	if err := tr.Complete(6, false); err != nil {
+		t.Fatalf("Complete(6): %v", err)
+	}
+	if got := len(tr.frontier); got != 0 {
+		t.Errorf("frontier holds %d entries after the failure at 6, want none", got)
+	}
+}
+
+// TestFlushRunsBeforeTheWatermarkIsPublished: for a buffering backend a
+// successful render is not yet a durable tile, so nothing may be written that
+// claims otherwise.
+func TestFlushRunsBeforeTheWatermarkIsPublished(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	tr := NewTracker(path, testKey(), nil, 1)
+
+	flushed := 0
+	tr.SetFlush(func() error {
+		if _, err := os.Stat(path); err == nil {
+			t.Error("checkpoint was written before the output was flushed")
+		}
+		flushed++
+		return nil
+	})
+
+	if err := tr.Complete(0, true); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if flushed != 1 {
+		t.Errorf("flush ran %d times, want once per save", flushed)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("no checkpoint after a successful flush: %v", err)
+	}
+}
+
+// TestFailedFlushSuppressesTheCheckpoint: an output that could not be committed
+// must not get a watermark claiming it was.
+func TestFailedFlushSuppressesTheCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	tr := NewTracker(path, testKey(), nil, 1)
+	tr.SetFlush(func() error { return errors.New("disk on fire") })
+
+	if err := tr.Complete(0, true); err == nil {
+		t.Fatal("Complete reported success although the flush failed")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a checkpoint was written despite the failed flush: %v", err)
 	}
 }
 

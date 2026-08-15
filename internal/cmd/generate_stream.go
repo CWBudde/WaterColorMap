@@ -105,7 +105,13 @@ func runStreamingTilePool(ctx context.Context, gen worker.Generator, bbox [4]flo
 	remaining := total - start
 	if remaining <= 0 {
 		logger.Info("Checkpoint covers the whole range; nothing to render", "tiles", total)
-		return tileRunResult{summary: fmt.Sprintf("0/0 tiles (all %d already checkpointed)", total)}
+		// Nothing left means the range is done, so the checkpoint has to go the
+		// same way it would after a clean run. Returning early without this
+		// leaves a watermark == total file behind that every later invocation
+		// reads and then re-writes, contradicting the documented cleanup.
+		run := tileRunResult{summary: fmt.Sprintf("0/0 tiles (all %d already checkpointed)", total)}
+		finishCheckpoint(opts.checkpoint, &run)
+		return run
 	}
 	if start > 0 {
 		logger.Info("Resuming from checkpoint", "skipped", start, "remaining", remaining, "tiles", total)
@@ -200,17 +206,59 @@ func finishCheckpoint(cp *checkpoint.Tracker, run *tileRunResult) {
 
 // checkpointPath resolves the configured checkpoint location, or "" when
 // checkpointing is off. `--checkpoint` with no value (or `generate.checkpoint:
-// auto` in config) means the default file inside the output directory.
+// auto` in config) means the default file next to the run's output.
+//
+// "Next to the output" is the MBTiles file's directory for an MBTiles run, not
+// the output directory: MBTiles generation deliberately never creates
+// `outputDir` (see Generator.GenerateWithData), so an automatic checkpoint
+// placed there would fail its very first CreateTemp on the usual fresh run and
+// checkpointing would silently do nothing.
 func checkpointPath(opts *batchOptions) string {
 	configured := viper.GetString("generate.checkpoint")
 	switch configured {
 	case "":
 		return ""
 	case checkpointAuto:
-		return filepath.Join(opts.outputDir, checkpoint.FileName)
+		return filepath.Join(checkpointDir(opts), checkpoint.FileName)
 	default:
 		return configured
 	}
+}
+
+// checkpointDir is the directory an automatic checkpoint lives in.
+func checkpointDir(opts *batchOptions) string {
+	if opts.format == "mbtiles" {
+		return filepath.Dir(opts.outputFile)
+	}
+	return opts.outputDir
+}
+
+// folderStructureKey is the layout part of the run key: the folder structure
+// for a folder run, empty for MBTiles, where tiles are rows and the flag is
+// inert.
+func folderStructureKey(opts *batchOptions) string {
+	if opts.format == "mbtiles" {
+		return ""
+	}
+	return opts.folderStructure
+}
+
+// checkpointTarget is the run's output destination, as recorded in the run key.
+//
+// Absolute, so that the same destination reached through a different working
+// directory or a relative path still compares equal; a path that cannot be made
+// absolute is used as given rather than silently dropped, since an unusable
+// target must still differ from every other one.
+func checkpointTarget(opts *batchOptions) string {
+	target := opts.outputDir
+	if opts.format == "mbtiles" {
+		target = opts.outputFile
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return target
+	}
+	return abs
 }
 
 // setupCheckpoint builds the run's checkpoint tracker, loading any existing
@@ -241,6 +289,13 @@ func setupCheckpoint(opts *batchOptions, bbox [4]float64) (*checkpoint.Tracker, 
 		ZoomMax:     opts.zoomMax,
 		Format:      opts.format,
 		ImageFormat: opts.imageFormat.String(),
+		// Where the tiles go is part of the run's identity, not a detail: a
+		// watermark says "the first N of the enumeration are in the output",
+		// and pointing the same checkpoint at another file or another layout
+		// makes that claim about tiles that were never written there.
+		Target: checkpointTarget(opts),
+		// Empty for MBTiles, where the layout has no effect on what is stored.
+		FolderStructure: folderStructureKey(opts),
 		// Batch runs render the base tiles only — `--hidpi` is rejected for a
 		// bbox — so the suffix is always empty today. It is in the key anyway
 		// because a suffixed pass would produce different files for the same

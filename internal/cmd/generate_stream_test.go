@@ -27,6 +27,16 @@ func streamTestOptions() *batchOptions {
 	}
 }
 
+// streamTestKey is the run key setupCheckpoint would build for opts, so a test
+// fixture resumes instead of being rejected as a different run.
+func streamTestKey(opts *batchOptions) checkpoint.RunKey {
+	return checkpoint.RunKey{
+		BBox: streamTestBBox, ZoomMin: opts.zoomMin, ZoomMax: opts.zoomMax,
+		Format: opts.format, ImageFormat: opts.imageFormat.String(),
+		Target: checkpointTarget(opts), FolderStructure: folderStructureKey(opts),
+	}
+}
+
 // TestStreamingRunRendersEveryTile: the streamed enumeration must cover exactly
 // what TilesInBBox would have.
 func TestStreamingRunRendersEveryTile(t *testing.T) {
@@ -63,10 +73,7 @@ func TestStreamingRunResumesFromCheckpoint(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), checkpoint.FileName)
-	key := checkpoint.RunKey{
-		BBox: streamTestBBox, ZoomMin: opts.zoomMin, ZoomMax: opts.zoomMax,
-		Format: opts.format, ImageFormat: opts.imageFormat.String(),
-	}
+	key := streamTestKey(opts)
 	opts.checkpoint = checkpoint.NewTracker(path, key, &checkpoint.State{
 		Schema: checkpoint.Schema, RunKey: key, Watermark: skipped, Completed: skipped,
 	}, 1)
@@ -103,10 +110,7 @@ func TestStreamingRunKeepsCheckpointAfterFailure(t *testing.T) {
 	const failIdx = 4
 
 	path := filepath.Join(t.TempDir(), checkpoint.FileName)
-	key := checkpoint.RunKey{
-		BBox: streamTestBBox, ZoomMin: opts.zoomMin, ZoomMax: opts.zoomMax,
-		Format: opts.format, ImageFormat: opts.imageFormat.String(),
-	}
+	key := streamTestKey(opts)
 	opts.checkpoint = checkpoint.NewTracker(path, key, nil, 1)
 
 	gen := newRecordingGenerator()
@@ -192,10 +196,7 @@ func TestSetupCheckpointIgnoresCheckpointUnderForce(t *testing.T) {
 	path := filepath.Join(dir, checkpoint.FileName)
 
 	opts := streamTestOptions()
-	key := checkpoint.RunKey{
-		BBox: streamTestBBox, ZoomMin: opts.zoomMin, ZoomMax: opts.zoomMax,
-		Format: opts.format, ImageFormat: opts.imageFormat.String(),
-	}
+	key := streamTestKey(opts)
 	if err := checkpoint.NewTracker(path, key, &checkpoint.State{
 		Schema: checkpoint.Schema, RunKey: key, Watermark: 3,
 	}, 0).Save(); err != nil {
@@ -260,5 +261,97 @@ func TestSetupCheckpointRejectsBandFetch(t *testing.T) {
 
 	if _, err := setupCheckpoint(opts, streamTestBBox); err == nil {
 		t.Error("--checkpoint with --band-fetch was accepted")
+	}
+}
+
+// TestCheckpointPathForMBTilesSitsBesideTheDatabase: an MBTiles run never
+// creates outputDir, so an automatic checkpoint placed there could not be
+// written at all. It belongs next to the file the run does create.
+func TestCheckpointPathForMBTilesSitsBesideTheDatabase(t *testing.T) {
+	opts := streamTestOptions()
+	opts.format = "mbtiles"
+	opts.outputDir = "/tmp/tiles"
+	opts.outputFile = "/var/data/hannover.mbtiles"
+
+	viper.Set("generate.checkpoint", checkpointAuto)
+	defer viper.Set("generate.checkpoint", "")
+
+	want := filepath.Join("/var/data", checkpoint.FileName)
+	if got := checkpointPath(opts); got != want {
+		t.Errorf("checkpointPath = %q, want %q", got, want)
+	}
+}
+
+// TestSetupCheckpointIgnoresAnotherOutputTarget: the watermark claims the first
+// N tiles are in the output. Pointed at a different file or a different layout
+// that claim is false, and the skipped prefix would never be rendered, because
+// skipped tiles are not emitted for the existence check either.
+func TestSetupCheckpointIgnoresAnotherOutputTarget(t *testing.T) {
+	cases := []struct {
+		mutate func(*batchOptions)
+		name   string
+	}{
+		{func(o *batchOptions) { o.outputDir = "elsewhere" }, "different output directory"},
+		{func(o *batchOptions) { o.folderStructure = "nested" }, "different folder structure"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), checkpoint.FileName)
+
+			written := streamTestOptions()
+			written.outputDir = "tiles"
+			written.folderStructure = "flat"
+			key := streamTestKey(written)
+			if err := checkpoint.NewTracker(path, key, &checkpoint.State{
+				Schema: checkpoint.Schema, RunKey: key, Watermark: 3,
+			}, 0).Save(); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+
+			viper.Set("generate.checkpoint", path)
+			defer viper.Set("generate.checkpoint", "")
+
+			opts := streamTestOptions()
+			opts.outputDir = "tiles"
+			opts.folderStructure = "flat"
+			tc.mutate(opts)
+
+			cp, err := setupCheckpoint(opts, streamTestBBox)
+			if err != nil {
+				t.Fatalf("setupCheckpoint: %v", err)
+			}
+			if cp.Watermark() != 0 {
+				t.Errorf("watermark %d: a checkpoint for another output was resumed", cp.Watermark())
+			}
+		})
+	}
+}
+
+// TestStreamingRunRemovesAFullyCoveredCheckpoint: a checkpoint covering the
+// whole range means the range is done. The early return must clean it up like
+// any other completed run, or every later invocation reads a stale file.
+func TestStreamingRunRemovesAFullyCoveredCheckpoint(t *testing.T) {
+	opts := streamTestOptions()
+	total := tile.TileCount(streamTestBBox, opts.zoomMin, opts.zoomMax)
+
+	path := filepath.Join(t.TempDir(), checkpoint.FileName)
+	key := streamTestKey(opts)
+	tracker := checkpoint.NewTracker(path, key, &checkpoint.State{
+		Schema: checkpoint.Schema, RunKey: key, Watermark: total, Completed: total,
+	}, 0)
+	if err := tracker.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	opts.checkpoint = tracker
+
+	gen := newRecordingGenerator()
+	run := runStreamingTilePool(context.Background(), gen, streamTestBBox, opts, "")
+
+	if run.completed != 0 || run.failedCount() != 0 {
+		t.Errorf("run = %d completed / %d failed, want an empty clean run", run.completed, run.failedCount())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a fully covered checkpoint was left behind: %v", err)
 	}
 }

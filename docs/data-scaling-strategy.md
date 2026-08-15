@@ -196,8 +196,10 @@ exist".
 
 ### Resume without re-statting the tileset
 
-`--checkpoint` (off by default; `<output>/.watercolormap-checkpoint.json` when
-the flag is given without a value) writes `internal/checkpoint`'s small JSON
+`--checkpoint` (off by default; `.watercolormap-checkpoint.json` next to the
+run's output when the flag is given without a value — `<output-dir>` for a
+folder run, the `--output-file`'s directory for an MBTiles run, which never
+creates `<output-dir>`) writes `internal/checkpoint`'s small JSON
 file every 2,000 tiles and again on shutdown, through the same
 temp-file + fsync + rename discipline as `encodeTileAtomic` — a checkpoint
 truncated by the very interrupt it exists to survive would be read by the next
@@ -209,7 +211,17 @@ of order, so a small frontier set holds successes ahead of the watermark until
 the gap closes; it is bounded by how far out of order workers can finish, not by
 the length of the run. A **failed tile blocks the watermark**, so a resume
 re-attempts it — the same rule as `tileExists` above: never skip something that
-might not be there.
+might not be there. A failure also _bounds_ the frontier: nothing at or beyond
+the lowest failed index can ever carry the watermark in this run, so those
+successes are dropped rather than accumulated — otherwise one failed tile early
+in a planet-sized run would grow the map to the length of the remainder, which is
+the allocation this whole path exists to remove.
+
+For MBTiles the watermark waits for durability. `mbtiles.Writer` batches rows and
+commits them a transaction at a time, so a successful render is not yet a written
+tile; the tracker flushes the writer before publishing a watermark that covers
+its buffered rows. Without that, a crash could leave a durable checkpoint over
+rows that never reached SQLite, and the resumed run would skip them for good.
 
 Resuming then costs nothing: the run fast-forwards the sequence past `watermark`
 items, which is arithmetic, and skip-existing still guards every tile that does
@@ -218,10 +230,12 @@ hundreds of thousands of tiles before rendering the first new one.
 
 Two refusals, both of the "a wrong success is worse than a wrong failure"
 family. A checkpoint whose `run_key` (bbox, zoom range, container format, image
-format, suffix) or schema does not match the current run is **ignored loudly**,
-never reinterpreted: resuming one bbox's watermark into another's enumeration
-would skip tiles nobody ever rendered, and skip-existing could not catch it
-because those tiles were never emitted to be checked. `--force` ignores it too.
+format, suffix, the absolute output target and, for folder runs, the folder
+structure) or schema does not match the current run is **ignored loudly**, never
+reinterpreted: resuming one bbox's watermark into another's enumeration — or one
+database's into an empty second one — would skip tiles nobody ever rendered, and
+skip-existing could not catch it because those tiles were never emitted to be
+checked. `--force` ignores it too.
 And `--checkpoint` is rejected together with `--band-fetch`, because a banded run
 renders out of enumeration order and its watermark would mean nothing.
 
