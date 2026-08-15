@@ -263,6 +263,13 @@ overpass:
 #   # behaviour of refetching everything.
 #   cache_control: "no-cache"
 #   max_pending_generations: 0 # 0 = auto; excess requests get 503
+#   # In-memory cache of tile-file metadata, in front of the tile directory. A
+#   # hit there answers a request without an os.Stat and, with a stale_* policy
+#   # set, without a stamp lookup either. A negative entry count disables it.
+#   # The TTL also bounds how long a tile deleted by `purge` (which runs out of
+#   # process) can still be served, which is why it is seconds, not minutes.
+#   tile_meta_cache_entries: 4096
+#   tile_meta_cache_ttl: "10s"
 #
 #   # Rendering (same meaning as under generate)
 #   tile_size: 256

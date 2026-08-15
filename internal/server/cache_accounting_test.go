@@ -20,10 +20,16 @@ func get(t *testing.T, od *OnDemandTiles, path string) *httptest.ResponseRecorde
 	return rec
 }
 
+// wantCache compares the per-request outcome counters only. The metadata-cache
+// statistics alongside them describe an implementation detail of the hit path,
+// not how a request was answered, and pinning them here would make every test
+// in this file a test of the cache's internals too.
 func wantCache(t *testing.T, od *OnDemandTiles, want CacheStatus) {
 	t.Helper()
 
-	if got := od.Status().Cache; got != want {
+	got := od.Status().Cache
+	got.MetaCacheHits, got.MetaCacheMisses, got.MetaCacheEvictions = 0, 0, 0
+	if got != want {
 		t.Fatalf("cache status = %+v, want %+v", got, want)
 	}
 }

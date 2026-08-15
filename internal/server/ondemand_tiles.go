@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cwbudde/watercolormap/internal/datasource"
+	"github.com/cwbudde/watercolormap/internal/lru"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/renderer"
 	"github.com/cwbudde/watercolormap/internal/safe"
@@ -75,6 +76,14 @@ type OnDemandTilesConfig struct {
 	FetchWorkers int
 	// DataSizeWarningMB logs a warning when tile data exceeds this size (default: 10)
 	DataSizeWarningMB int64
+	// TileMetaCacheEntries caps the in-process cache of tile-file metadata that
+	// sits in front of the tile directory. Zero uses
+	// DefaultTileMetaCacheEntries; negative disables the cache.
+	TileMetaCacheEntries int
+	// TileMetaCacheTTL bounds how long that cache may believe a tile is present
+	// and fresh -- and therefore how long a tile removed by an out-of-process
+	// `purge` can still be served. Zero uses DefaultTileMetaCacheTTL.
+	TileMetaCacheTTL time.Duration
 	// MaxPendingGenerations caps how many requests may be in the generation
 	// path at once (rendering, fetching, or waiting for either). Beyond this
 	// the server sheds load with 503 rather than queueing goroutines without
@@ -99,6 +108,9 @@ type OnDemandTiles struct {
 	// locks holds the per-tile locks, refcounted so entries can be dropped
 	// once nobody holds or waits for them. See tileLock.
 	locks map[string]*tileLock
+	// metaCache answers "is this tile on disk, fresh, and what is its ETag"
+	// without touching the filesystem or the stamp store. See tilemeta_cache.go.
+	metaCache *lru.Cache[string, tileMeta]
 	// newGenerator builds the generator for a tile size. Nil means the real
 	// pipeline generator; tests replace it to drive the request path without
 	// Mapnik. See tileGenerator.
@@ -182,6 +194,11 @@ type CacheStatus struct {
 	Misses        int64 `json:"misses"`
 	Stale         int64 `json:"stale"`
 	Bypasses      int64 `json:"bypasses"`
+	// MetaCache* describe the in-process cache of tile-file metadata. A hit
+	// there is a request answered without an os.Stat or a stamp lookup.
+	MetaCacheHits      uint64 `json:"meta_cache_hits"`
+	MetaCacheMisses    uint64 `json:"meta_cache_misses"`
+	MetaCacheEvictions uint64 `json:"meta_cache_evictions"`
 	// NotModified counts responses answered with a 304 because the client
 	// already held the tile. It overlaps the hit counters rather than adding to
 	// them: a revalidated hit is still a hit, just a cheap one.
@@ -250,6 +267,12 @@ func NewOnDemandTiles(ds pipeline.DataSource, cfg OnDemandTilesConfig, logger *s
 	if cfg.DataSizeWarningMB <= 0 {
 		cfg.DataSizeWarningMB = 10
 	}
+	if cfg.TileMetaCacheEntries == 0 {
+		cfg.TileMetaCacheEntries = DefaultTileMetaCacheEntries
+	}
+	if cfg.TileMetaCacheTTL <= 0 {
+		cfg.TileMetaCacheTTL = DefaultTileMetaCacheTTL
+	}
 	if cfg.MaxPendingGenerations <= 0 {
 		// Deep enough that a normal viewport load is never shed, shallow
 		// enough that the queue drains faster than a browser gives up.
@@ -281,6 +304,7 @@ func NewOnDemandTiles(ds pipeline.DataSource, cfg OnDemandTilesConfig, logger *s
 		retryCtx:    ctx,
 		retryCancel: cancel,
 		stopCh:      make(chan struct{}),
+		metaCache:   newTileMetaCache(cfg.TileMetaCacheEntries, cfg.TileMetaCacheTTL),
 	}
 
 	// Start retry worker. safe.Go is a backstop for the loop itself; each
@@ -400,6 +424,11 @@ func (t *OnDemandTiles) Status() TileStatus {
 		return true
 	})
 
+	var metaStats lru.Stats
+	if t.metaCache != nil {
+		metaStats = t.metaCache.Stats()
+	}
+
 	status := TileStatus{
 		Render: RenderStatus{
 			ActiveRenders: int(t.activeRenders.Load()),
@@ -426,6 +455,10 @@ func (t *OnDemandTiles) Status() TileStatus {
 			Stale:         t.cacheStale.Load(),
 			Bypasses:      t.cacheBypasses.Load(),
 			NotModified:   t.cacheNotModified.Load(),
+
+			MetaCacheHits:      metaStats.Hits,
+			MetaCacheMisses:    metaStats.Misses,
+			MetaCacheEvictions: metaStats.Evictions,
 		},
 	}
 
@@ -652,6 +685,11 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 	t.activeRenders.Add(-1)
 	t.currentRenders.Delete(tileKey)
 
+	// Whatever the render did to the file, the cached description of it is now
+	// a guess. Dropped on failure too: a partial or removed file is exactly the
+	// case where a stale validator would be served for the rest of the TTL.
+	t.invalidateTileMeta(fullPath)
+
 	if err != nil {
 		t.totalFailed.Add(1)
 		// Rendering error - only queue retry if it's a fetch-related transient error
@@ -669,14 +707,15 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 	t.totalRendered.Add(1)
 	t.log().Info("tile generated on-demand", "coords", coords.String(), "suffix", suffix, "ms", time.Since(start).Milliseconds())
 
-	if !fileExists(fullPath) {
-		t.log().Error("tile generation reported success but no file on disk", "path", fullPath)
+	fi, statErr := os.Stat(fullPath)
+	if statErr != nil {
+		t.log().Error("tile generation reported success but no file on disk", "path", fullPath, "error", statErr)
 		writeTileError(w, "tile generation failed", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set(cacheStatusHeader, cacheStatus)
-	t.serveTileFile(w, r, fullPath)
+	t.serveTileFile(w, r, fullPath, tileMeta{modTime: fi.ModTime(), etag: tileETag(fi)})
 }
 
 // noteGeneration records that this request is about to render the tile itself
@@ -700,34 +739,31 @@ func (t *OnDemandTiles) noteGeneration() string {
 // /etc/mime.types on Linux, which would make the header this server sends
 // depend on the machine it happens to run on.
 //
-// http.ServeContent rather than http.ServeFile: ServeFile stats the file
-// itself, and this path has just stat'ed it to build the validator, so going
-// through ServeContent spends one stat per request instead of two while leaving
-// the precondition and range handling to the stdlib.
-func (t *OnDemandTiles) serveTileFile(w http.ResponseWriter, r *http.Request, fullPath string) {
+// http.ServeContent rather than http.ServeFile: ServeFile would stat the file
+// again to build its own validator, and the caller already carries one, so this
+// spends a single stat per request -- none at all on a metadata-cache hit --
+// while leaving the precondition and range handling to the stdlib.
+func (t *OnDemandTiles) serveTileFile(w http.ResponseWriter, r *http.Request, fullPath string, meta tileMeta) {
 	f, err := os.Open(fullPath) // nolint:gosec // fullPath is built from validated tile coordinates
 	if err != nil {
+		// The metadata said this file was there. It is not, so whatever the
+		// cache believes about it is wrong -- most likely `purge` deleted it
+		// within the TTL.
+		t.invalidateTileMeta(fullPath)
 		t.log().Error("failed to open the tile file", "path", fullPath, "error", err)
 		writeTileError(w, "tile not found", http.StatusNotFound)
 		return
 	}
 	defer f.Close() // nolint:errcheck // read-only
 
-	fi, err := f.Stat()
-	if err != nil {
-		t.log().Error("failed to stat the tile file", "path", fullPath, "error", err)
-		writeTileError(w, "tile not found", http.StatusNotFound)
-		return
-	}
-
 	w.Header().Set("Cache-Control", t.cfg.CacheControl)
 	w.Header().Set("Content-Type", t.imageFormat().ContentType())
-	w.Header().Set("ETag", tileETag(fi))
+	w.Header().Set("ETag", meta.etag)
 
 	// The status is captured rather than the request pre-checked so that a 304
 	// from If-Modified-Since is counted too, not just one from If-None-Match.
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	http.ServeContent(rec, r, "", fi.ModTime(), f)
+	http.ServeContent(rec, r, "", meta.modTime, f)
 	if rec.status == http.StatusNotModified {
 		t.cacheNotModified.Add(1)
 	}
@@ -792,13 +828,14 @@ func (t *OnDemandTiles) serveCachedTile(
 	suffix string,
 	phase cachePhase,
 ) bool {
-	if t.cfg.DisableCache || !fileExists(fullPath) {
+	if t.cfg.DisableCache {
 		return false
 	}
 	// Staleness is counted in the initial phase only. The post-lock re-check
 	// looks at the same file whenever no other request rendered it, so counting
 	// there too would report one stale tile as two.
-	if !t.cachedTileIsFresh(coords, suffix, phase == cachePhaseInitial) {
+	meta, ok := t.lookupTileMeta(fullPath, coords, suffix, phase == cachePhaseInitial)
+	if !ok {
 		return false
 	}
 
@@ -810,7 +847,7 @@ func (t *OnDemandTiles) serveCachedTile(
 		w.Header().Set(cacheStatusHeader, cacheStatusHit)
 	}
 
-	t.serveTileFile(w, r, fullPath)
+	t.serveTileFile(w, r, fullPath, meta)
 	return true
 }
 
@@ -1178,14 +1215,6 @@ func tileSizeForSuffix(base int, suffix string) int {
 	return base
 }
 
-func fileExists(p string) bool {
-	st, err := os.Stat(p)
-	if err != nil {
-		return false
-	}
-	return !st.IsDir()
-}
-
 // isTransientError checks if an error is likely transient and worth retrying
 func isTransientError(err error) bool {
 	if err == nil {
@@ -1309,6 +1338,12 @@ func (t *OnDemandTiles) runRetryJob(job retryJob) bool {
 	}()
 
 	_, _, err = gen.GenerateWithData(ctx, job.coords, false, job.suffix, nil, tileData)
+
+	// A retry writes the same file a request would, so the cached description
+	// of it has to go the same way. Without this, a tile that failed in the
+	// foreground and succeeded here would keep serving whatever the cache last
+	// believed until the TTL ran out.
+	t.invalidateTileMeta(filepath.Join(t.cfg.TilesDir, job.coords.FileName(job.suffix, t.imageFormat().Ext())))
 
 	if err != nil {
 		t.totalFailed.Add(1)

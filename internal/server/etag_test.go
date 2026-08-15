@@ -77,8 +77,16 @@ func TestIfModifiedSinceIsCounted(t *testing.T) {
 
 // A re-rendered tile has to invalidate the client's copy, or a purge would be
 // invisible to everyone who already loaded the map.
+//
+// The metadata cache is switched off here: it is what makes an *out-of-process*
+// rewrite invisible for up to its TTL, which is a documented consequence of
+// caching and is covered on its own in tilemeta_cache_test.go. What this test
+// is about is the validator itself moving when the file does.
 func TestETagChangesWhenTheTileIsRewritten(t *testing.T) {
-	od, _ := newStubServer(t, OnDemandTilesConfig{GenerateMissing: true}, 0)
+	od, _ := newStubServer(t, OnDemandTilesConfig{
+		GenerateMissing:      true,
+		TileMetaCacheEntries: -1,
+	}, 0)
 	path := writeFixtureTile(t, od.cfg.TilesDir, "z1_x0_y0.png", "first")
 
 	before := get(t, od, "/tiles/z1_x0_y0.png").Header().Get("ETag")

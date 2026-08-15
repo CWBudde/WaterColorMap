@@ -62,6 +62,10 @@ func init() {
 	serveCmd.Flags().Int64("data-size-warning-mb", 10, "Warn when tile data exceeds this size in MB")
 
 	serveCmd.Flags().Int("max-pending-generations", 0, "Max requests in the generation path before returning 503 (0 = auto)")
+	serveCmd.Flags().Int("tile-meta-cache-entries", server.DefaultTileMetaCacheEntries,
+		"Tiles whose on-disk metadata is cached in memory, skipping a stat (and a stamp lookup) per cache hit; negative disables it")
+	serveCmd.Flags().Duration("tile-meta-cache-ttl", server.DefaultTileMetaCacheTTL,
+		"How long that metadata is trusted. It also bounds how long a tile deleted by `purge` can still be served")
 	serveCmd.Flags().Float64("tile-rate-limit", server.DefaultRateLimitRPS, "Per-client tile requests per second (0 disables)")
 	serveCmd.Flags().Int("tile-rate-burst", server.DefaultRateLimitBurst, "Per-client tile request burst")
 	serveCmd.Flags().Duration("tile-rate-ttl", server.DefaultRateLimitTTL, "Idle time before a rate-limit entry is evicted")
@@ -104,6 +108,8 @@ func init() {
 	mustBind("serve.data_size_warning_mb", "data-size-warning-mb")
 
 	mustBind("serve.max_pending_generations", "max-pending-generations")
+	mustBind("serve.tile_meta_cache_entries", "tile-meta-cache-entries")
+	mustBind("serve.tile_meta_cache_ttl", "tile-meta-cache-ttl")
 	mustBind("serve.tile_rate_limit", "tile-rate-limit")
 	mustBind("serve.tile_rate_burst", "tile-rate-burst")
 	mustBind("serve.tile_rate_ttl", "tile-rate-ttl")
@@ -143,6 +149,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	fetchWorkers := viper.GetInt("serve.fetch_workers")
 	dataSizeWarningMB := viper.GetInt64("serve.data_size_warning_mb")
 	maxPending := viper.GetInt("serve.max_pending_generations")
+	metaCacheEntries := viper.GetInt("serve.tile_meta_cache_entries")
+	metaCacheTTL := viper.GetDuration("serve.tile_meta_cache_ttl")
 	shutdownTimeout := viper.GetDuration("serve.shutdown_timeout")
 
 	proxyPolicy, err := server.ParseProxyPolicy(viper.GetString("serve.trusted_proxies"))
@@ -266,6 +274,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 			FetchWorkers:             fetchWorkers,
 			DataSizeWarningMB:        dataSizeWarningMB,
 			MaxPendingGenerations:    maxPending,
+			TileMetaCacheEntries:     metaCacheEntries,
+			TileMetaCacheTTL:         metaCacheTTL,
 		}, logger)
 		if err != nil {
 			return err
