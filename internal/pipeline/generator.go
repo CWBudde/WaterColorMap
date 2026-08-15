@@ -155,7 +155,7 @@ type TileProber interface {
 // so the pipeline neither owns the file nor forces a test to open one.
 type StampStore interface {
 	Put(tilestamp.Stamp) error
-	Get(z, x, y int, suffix string) (tilestamp.Stamp, bool, error)
+	Get(z, x, y int, suffix, format string) (tilestamp.Stamp, bool, error)
 }
 
 // FreshnessPolicy says which already-rendered tiles are nevertheless out of
@@ -371,7 +371,7 @@ func (g *Generator) tileIsFresh(coords tile.Coords, suffix string) bool {
 		return false
 	}
 
-	stamp, ok, err := store.Get(int(coords.Z), int(coords.X), int(coords.Y), suffix)
+	stamp, ok, err := store.Get(int(coords.Z), int(coords.X), int(coords.Y), suffix, g.stampFormat())
 	if err != nil {
 		g.log().Warn("Stamp lookup failed; rendering anyway",
 			"coords", coords.String(), "error", err)
@@ -396,6 +396,20 @@ func (g *Generator) tileIsFresh(coords tile.Coords, suffix string) bool {
 	return true
 }
 
+// stampFormat is the image encoding a stamp written by this generator records.
+//
+// Taken from the options rather than from g.enc: NewGenerator resolves one from
+// the other, so the two always agree, and this also answers on a Generator
+// assembled directly in a test, which has no encoder. The zero value is PNG,
+// exactly as it is for the encoder.
+func (g *Generator) stampFormat() string {
+	f := g.options.ImageFormat
+	if f == "" {
+		f = tileformat.PNG
+	}
+	return f.String()
+}
+
 // putStamp records what this tile was rendered from.
 //
 // A failure here is logged and swallowed on purpose: the tile is on disk and
@@ -414,6 +428,7 @@ func (g *Generator) putStamp(coords tile.Coords, suffix string, res *renderLayer
 		X:           int(coords.X),
 		Y:           int(coords.Y),
 		Suffix:      suffix,
+		Format:      g.stampFormat(),
 		OSMBase:     res.dataTimestamp,
 		RenderedAt:  time.Now(),
 		Source:      res.dataSource,
@@ -618,6 +633,13 @@ func (g *Generator) GenerateWithPrefetched(
 // Format returns the image format this generator writes.
 func (g *Generator) Format() tileformat.Format {
 	return g.enc.Format()
+}
+
+// StampStore returns the stamp store this generator records provenance in, or
+// nil when it records none. It exists so a caller that hands the same store to
+// several generators can verify that is what happened.
+func (g *Generator) StampStore() StampStore {
+	return g.options.StampStore
 }
 
 // TilePath returns where this generator writes the given tile, and the

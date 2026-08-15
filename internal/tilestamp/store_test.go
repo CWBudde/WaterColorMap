@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,7 +40,7 @@ func TestPutGetRoundTrip(t *testing.T) {
 	}
 
 	// Before the flush the stamp is only in the buffer, which Get has to see.
-	got, ok, err := store.Get(want.Z, want.X, want.Y, "")
+	got, ok, err := store.Get(want.Z, want.X, want.Y, "", "")
 	if err != nil || !ok {
 		t.Fatalf("Get before flush = %v, %v, %v", got, ok, err)
 	}
@@ -51,7 +52,7 @@ func TestPutGetRoundTrip(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	got, ok, err = store.Get(want.Z, want.X, want.Y, "")
+	got, ok, err = store.Get(want.Z, want.X, want.Y, "", "")
 	if err != nil || !ok {
 		t.Fatalf("Get after flush = %v, %v, %v", got, ok, err)
 	}
@@ -66,7 +67,7 @@ func TestPutGetRoundTrip(t *testing.T) {
 func TestGetMissing(t *testing.T) {
 	store := mustOpen(t)
 
-	if _, ok, err := store.Get(5, 1, 1, ""); err != nil || ok {
+	if _, ok, err := store.Get(5, 1, 1, "", ""); err != nil || ok {
 		t.Fatalf("Get(missing) = %v, %v, want false, nil", ok, err)
 	}
 }
@@ -91,7 +92,7 @@ func TestSuffixIsPartOfTheKey(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ suffix, want string }{{"", "base"}, {"@2x", "hidpi"}} {
-		got, ok, err := store.Get(10, 1, 2, tc.suffix)
+		got, ok, err := store.Get(10, 1, 2, tc.suffix, "")
 		if err != nil || !ok {
 			t.Fatalf("Get(%q) = %v, %v", tc.suffix, ok, err)
 		}
@@ -161,7 +162,7 @@ func TestBatchFlushes(t *testing.T) {
 	}
 
 	for i := 0; i < total; i++ {
-		if _, ok, err := store.Get(12, i, 5, ""); err != nil || !ok {
+		if _, ok, err := store.Get(12, i, 5, "", ""); err != nil || !ok {
 			t.Fatalf("Get(12/%d/5) = %v, %v; every stamp must be visible", i, ok, err)
 		}
 	}
@@ -182,7 +183,7 @@ func TestDelete(t *testing.T) {
 	}
 
 	for _, x := range []int{0, 1} {
-		if err := store.Delete(1, x, 0, ""); err != nil {
+		if err := store.Delete(1, x, 0, "", ""); err != nil {
 			t.Fatalf("Delete(1/%d/0): %v", x, err)
 		}
 	}
@@ -199,7 +200,7 @@ func TestDelete(t *testing.T) {
 	}
 
 	// Deleting what is not there is a no-op, not an error.
-	if err := store.Delete(9, 9, 9, ""); err != nil {
+	if err := store.Delete(9, 9, 9, "", ""); err != nil {
 		t.Errorf("Delete(missing) = %v, want nil", err)
 	}
 }
@@ -471,13 +472,13 @@ func TestOpenReadOnly(t *testing.T) {
 	}
 	defer ro.Close() // nolint:errcheck
 
-	if _, ok, err := ro.Get(3, 2, 1, ""); err != nil || !ok {
+	if _, ok, err := ro.Get(3, 2, 1, "", ""); err != nil || !ok {
 		t.Fatalf("Get on a read-only store = ok:%v err:%v, want the stamp", ok, err)
 	}
 	if err := ro.Put(Stamp{Z: 9, X: 9, Y: 9, RenderedAt: time.Now()}); err == nil {
 		t.Error("Put on a read-only store succeeded, want an error")
 	}
-	if err := ro.Delete(3, 2, 1, ""); err == nil {
+	if err := ro.Delete(3, 2, 1, "", ""); err == nil {
 		t.Error("Delete on a read-only store succeeded, want an error")
 	}
 }
@@ -500,5 +501,134 @@ func TestOpenMBTilesReadOnlyWithoutStampTable(t *testing.T) {
 
 	if _, err := OpenMBTilesReadOnly(path); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("OpenMBTilesReadOnly = %v, want ErrNotFound", err)
+	}
+}
+
+// One coordinate, two image formats, two stamps. The format is part of the key
+// because the tiles are separate files: a folder can hold z10_x1_y2.png and
+// z10_x1_y2.webp, and rendering the second must not overwrite what the first
+// was made from.
+func TestFormatIsPartOfTheKey(t *testing.T) {
+	store := mustOpen(t)
+
+	png := Stamp{Z: 10, X: 1, Y: 2, Format: "png", Source: "png-run", RenderedAt: time.Now()}
+	webp := Stamp{Z: 10, X: 1, Y: 2, Format: "webp", Source: "webp-run", RenderedAt: time.Now()}
+
+	for _, s := range []Stamp{png, webp} {
+		if err := store.Put(s); err != nil {
+			t.Fatalf("Put(%s): %v", s.Format, err)
+		}
+	}
+	if err := store.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	for _, want := range []Stamp{png, webp} {
+		got, ok, err := store.Get(want.Z, want.X, want.Y, "", want.Format)
+		if err != nil || !ok {
+			t.Fatalf("Get(%s) = ok:%v err:%v", want.Format, ok, err)
+		}
+		if got.Source != want.Source {
+			t.Errorf("stamp for %s reports Source %q, want %q — the other format overwrote it",
+				want.Format, got.Source, want.Source)
+		}
+	}
+
+	// Deleting one leaves the other alone.
+	if err := store.Delete(10, 1, 2, "", "png"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok, err := store.Get(10, 1, 2, "", "png"); err != nil || ok {
+		t.Errorf("the PNG stamp survived its delete (ok=%v, err=%v)", ok, err)
+	}
+	if _, ok, err := store.Get(10, 1, 2, "", "webp"); err != nil || !ok {
+		t.Errorf("deleting the PNG stamp took the WebP one with it (ok=%v, err=%v)", ok, err)
+	}
+}
+
+// The schema version is recorded in the file, so a later release can tell what
+// it is looking at without inspecting the columns.
+func TestSchemaVersionIsRecorded(t *testing.T) {
+	store := mustOpen(t)
+
+	var version int
+	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != SchemaVersion {
+		t.Errorf("user_version = %d, want %d", version, SchemaVersion)
+	}
+}
+
+// A store written by the version 1 schema — the one that shipped on main with
+// the tile stamp store itself — must be refused with an error naming the file,
+// not opened and then misread. Version 1 has no format column, so every write
+// through this build would fail deep inside a run, and every read would answer
+// about a key the table does not have.
+func TestOlderSchemaVersionIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stamps.db")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	const v1 = `
+		CREATE TABLE tile_stamp (
+			zoom_level INTEGER NOT NULL,
+			tile_column INTEGER NOT NULL,
+			tile_row INTEGER NOT NULL,
+			suffix TEXT NOT NULL DEFAULT '',
+			osm_base_ts TEXT,
+			rendered_at TEXT NOT NULL,
+			source TEXT,
+			renderer_rev TEXT,
+			PRIMARY KEY (zoom_level, tile_column, tile_row, suffix)
+		);`
+	if _, err := db.Exec(v1); err != nil {
+		t.Fatalf("create v1 schema: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO tile_stamp (zoom_level, tile_column, tile_row, rendered_at) VALUES (1, 0, 0, 'x')",
+	); err != nil {
+		t.Fatalf("seed v1 row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	for _, tc := range []struct {
+		open func(string) (*Store, error)
+		name string
+	}{
+		{name: "read-write", open: Open},
+		{name: "read-only", open: OpenReadOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := tc.open(path)
+			if err == nil {
+				store.Close() // nolint:errcheck
+				t.Fatal("opened a version 1 stamp store, want ErrSchemaVersion")
+			}
+			if !errors.Is(err, ErrSchemaVersion) {
+				t.Fatalf("err = %v, want ErrSchemaVersion", err)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q does not name the file the operator has to deal with", err)
+			}
+		})
+	}
+
+	// The refusal must not have rewritten the file it refused.
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close() // nolint:errcheck
+	var rows int
+	if err := db.QueryRow("SELECT COUNT(*) FROM tile_stamp").Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("the version 1 table now holds %d rows, want the 1 it started with", rows)
 	}
 }

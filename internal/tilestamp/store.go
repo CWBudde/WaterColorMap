@@ -32,6 +32,24 @@ import (
 // thing the run waits for.
 const DefaultBatchSize = 100
 
+// SchemaVersion is the layout of the tile_stamp table, recorded in the
+// database's PRAGMA user_version.
+//
+// Version 1 keyed a stamp by (zoom, column, row, suffix) and recorded no
+// version at all, so it reads back as user_version 0. That key cannot describe
+// a folder holding both PNG and WebP tiles — which purge walks and tolerates —
+// so version 2 adds the format column to the primary key.
+//
+// There is no migration. A version 1 file is refused with ErrSchemaVersion
+// rather than upgraded, because the upgrade cannot be done honestly: nothing in
+// a version 1 row says which image format the tile it describes was written in,
+// so a migration would have to guess, and a wrong guess makes a purge delete
+// the file the stamp does not describe. The store is a rebuildable sidecar —
+// deleting it costs a re-render, and every uncertain freshness question already
+// renders — so an error naming the file is both the safe answer and the
+// actionable one.
+const SchemaVersion = 2
+
 // FolderDBName is the stamp database written into a tile directory. It sits
 // beside tilejson.json so that everything describing a tile folder is in the
 // folder.
@@ -74,6 +92,15 @@ type Stamp struct {
 	// Suffix is "" for a base tile and "@2x" for its HiDPI sibling. They are
 	// separate tiles and get separate stamps.
 	Suffix string
+	// Format is the tile image encoding, as tileformat.Format spells it —
+	// "png" or "webp". It is part of the identity of a stamp, not a property
+	// of it: a folder can hold z5_x1_y2.png and z5_x1_y2.webp side by side
+	// (purge walks exactly such folders), and those are two files rendered at
+	// two different times from possibly different data. Keyed without it, the
+	// WebP render would overwrite the PNG tile's provenance and a freshness
+	// check would then answer about the wrong file. Stored as a plain string
+	// so this package stays a leaf.
+	Format string
 	Z      int
 	X      int
 	Y      int
@@ -93,6 +120,10 @@ type Filter struct {
 	// Suffix, when non-nil, matches that suffix exactly — including the empty
 	// string, which is why this is a pointer rather than a plain string.
 	Suffix *string
+	// Format, when non-nil, matches that image format exactly. A pointer for
+	// the same reason Suffix is: the empty string is a real value, written by
+	// a stamp whose format was not recorded.
+	Format *string
 	// MinZoom and MaxZoom bound the zoom range inclusively. Pointers because
 	// zoom 0 is a real zoom level.
 	MinZoom *int
@@ -101,6 +132,12 @@ type Filter struct {
 	// Empty means no renderer filter.
 	RendererRevNot string
 }
+
+// ErrSchemaVersion reports a stamp store written by a different version of this
+// package. It carries the file, both versions and what to do about it; callers
+// that treat the store as optional (the tile server) degrade to unstamped, and
+// the rest stop before they can act on a table they would misread.
+var ErrSchemaVersion = errors.New("unsupported tile stamp schema version")
 
 // ErrNotFound reports that there is no stamp store to read: no stamps.db beside
 // the tiles, or an MBTiles file without a tile_stamp table. It is what the
@@ -157,6 +194,10 @@ func Open(path string) (*Store, error) {
 		if _, err := db.Exec(pragma); err != nil {
 			return nil, errors.Join(fmt.Errorf("failed to set pragma %q: %w", pragma, err), db.Close())
 		}
+	}
+
+	if err := checkSchemaVersion(db, path); err != nil {
+		return nil, errors.Join(err, db.Close())
 	}
 
 	if err := createSchema(db); err != nil {
@@ -222,12 +263,47 @@ func OpenReadOnly(path string) (*Store, error) {
 			fmt.Errorf("failed to inspect stamp database %q: %w", path, err), db.Close())
 	}
 
+	if err := checkSchemaVersion(db, path); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+
 	return &Store{
 		db:        db,
 		path:      path,
 		batchSize: DefaultBatchSize,
 		readOnly:  true,
 	}, nil
+}
+
+// checkSchemaVersion refuses a store this build cannot read or write.
+//
+// A file with no tile_stamp table is not a stamp store yet, whatever its
+// user_version says, so it passes: createSchema is about to make it one and
+// stamp the current version on it. A file that has the table and a different
+// version is refused — see SchemaVersion for why it is not migrated.
+func checkSchemaVersion(db *sql.DB, path string) error {
+	var name string
+	err := db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='tile_stamp'").Scan(&name)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("failed to inspect stamp database %q: %w", path, err)
+	}
+
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("failed to read the stamp schema version of %q: %w", path, err)
+	}
+	if version == SchemaVersion {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %q is version %d, this build writes version %d; "+
+		"the stamp store is a sidecar and can be rebuilt — delete it and re-render, "+
+		"or point this run at a different tileset",
+		ErrSchemaVersion, path, version, SchemaVersion)
 }
 
 // createSchema creates the stamp table.
@@ -249,16 +325,20 @@ func createSchema(db *sql.DB) error {
 			tile_column INTEGER NOT NULL,
 			tile_row INTEGER NOT NULL,
 			suffix TEXT NOT NULL DEFAULT '',
+			format TEXT NOT NULL DEFAULT '',
 			osm_base_ts TEXT,
 			rendered_at TEXT NOT NULL,
 			source TEXT,
 			renderer_rev TEXT,
-			PRIMARY KEY (zoom_level, tile_column, tile_row, suffix)
+			PRIMARY KEY (zoom_level, tile_column, tile_row, suffix, format)
 		);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("failed to create stamp schema: %w", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)); err != nil {
+		return fmt.Errorf("failed to record the stamp schema version: %w", err)
 	}
 	return nil
 }
@@ -290,36 +370,37 @@ func (s *Store) Put(stamp Stamp) error {
 	return nil
 }
 
-// Get returns the stamp for a tile, and whether there is one.
-func (s *Store) Get(z, x, y int, suffix string) (Stamp, bool, error) {
+// Get returns the stamp for a tile, and whether there is one. format is the
+// tile's image encoding; see Stamp.Format for why it is part of the key.
+func (s *Store) Get(z, x, y int, suffix, format string) (Stamp, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Buffered stamps are not queryable yet, so the buffer answers first.
-	want := Stamp{Z: z, X: x, Y: y, Suffix: suffix}
+	want := Stamp{Z: z, X: x, Y: y, Suffix: suffix, Format: format}
 	for i := range s.batch {
 		if sameTile(s.batch[i], want) {
 			return s.batch[i], true, nil
 		}
 	}
 
-	const q = `SELECT zoom_level, tile_column, tile_row, suffix, osm_base_ts, rendered_at, source, renderer_rev
-		FROM tile_stamp WHERE zoom_level=? AND tile_column=? AND tile_row=? AND suffix=?`
+	const q = `SELECT zoom_level, tile_column, tile_row, suffix, format, osm_base_ts, rendered_at, source, renderer_rev
+		FROM tile_stamp WHERE zoom_level=? AND tile_column=? AND tile_row=? AND suffix=? AND format=?`
 
-	row := s.db.QueryRow(q, z, x, y, suffix)
+	row := s.db.QueryRow(q, z, x, y, suffix, format)
 	stamp, err := scanStamp(row)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Stamp{}, false, nil
 	case err != nil:
-		return Stamp{}, false, fmt.Errorf("failed to read stamp %d/%d/%d%s: %w", z, x, y, suffix, err)
+		return Stamp{}, false, fmt.Errorf("failed to read stamp %s: %w", tileID(z, x, y, suffix, format), err)
 	}
 	return stamp, true, nil
 }
 
 // Delete removes the stamp for a tile. Removing a stamp that is not there is
 // not an error: the caller's intent ("this tile has no stamp") already holds.
-func (s *Store) Delete(z, x, y int, suffix string) error {
+func (s *Store) Delete(z, x, y int, suffix, format string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -328,7 +409,7 @@ func (s *Store) Delete(z, x, y int, suffix string) error {
 	}
 
 	// Drop any buffered stamp first, or the flush would resurrect it.
-	want := Stamp{Z: z, X: x, Y: y, Suffix: suffix}
+	want := Stamp{Z: z, X: x, Y: y, Suffix: suffix, Format: format}
 	for i := range s.batch {
 		if sameTile(s.batch[i], want) {
 			s.batch = append(s.batch[:i], s.batch[i+1:]...)
@@ -336,15 +417,16 @@ func (s *Store) Delete(z, x, y int, suffix string) error {
 		}
 	}
 
-	const q = `DELETE FROM tile_stamp WHERE zoom_level=? AND tile_column=? AND tile_row=? AND suffix=?`
-	if _, err := s.db.Exec(q, z, x, y, suffix); err != nil {
-		return fmt.Errorf("failed to delete stamp %d/%d/%d%s: %w", z, x, y, suffix, err)
+	const q = `DELETE FROM tile_stamp
+		WHERE zoom_level=? AND tile_column=? AND tile_row=? AND suffix=? AND format=?`
+	if _, err := s.db.Exec(q, z, x, y, suffix, format); err != nil {
+		return fmt.Errorf("failed to delete stamp %s: %w", tileID(z, x, y, suffix, format), err)
 	}
 	return nil
 }
 
-// Query returns every stamp matching the filter, ordered by zoom, column, row
-// and suffix so callers (and their tests) see a stable order.
+// Query returns every stamp matching the filter, ordered by zoom, column, row,
+// suffix and format so callers (and their tests) see a stable order.
 //
 // A slice rather than an iterator: the callers are the purge command, which has
 // to count and sample the selection before doing anything with it, and tests.
@@ -358,8 +440,8 @@ func (s *Store) Query(f Filter) ([]Stamp, error) {
 	defer s.mu.Unlock()
 
 	where, args := f.sql()
-	q := `SELECT zoom_level, tile_column, tile_row, suffix, osm_base_ts, rendered_at, source, renderer_rev
-		FROM tile_stamp` + where + ` ORDER BY zoom_level, tile_column, tile_row, suffix`
+	q := `SELECT zoom_level, tile_column, tile_row, suffix, format, osm_base_ts, rendered_at, source, renderer_rev
+		FROM tile_stamp` + where + ` ORDER BY zoom_level, tile_column, tile_row, suffix, format`
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -426,6 +508,10 @@ func (f Filter) sql() (string, []any) {
 		conds = append(conds, "suffix = ?")
 		args = append(args, *f.Suffix)
 	}
+	if f.Format != nil {
+		conds = append(conds, "format = ?")
+		args = append(args, *f.Format)
+	}
 	if f.MinZoom != nil {
 		conds = append(conds, "zoom_level >= ?")
 		args = append(args, *f.MinZoom)
@@ -439,6 +525,29 @@ func (f Filter) sql() (string, []any) {
 		return "", nil
 	}
 	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// SetBatchSize changes how many stamps are buffered before an automatic flush,
+// flushing whatever is already buffered so the new size takes effect at once.
+//
+// It exists for the tile server. Batching is sized for a batch run, which
+// writes hundreds of tiles a minute and would otherwise make fsync rather than
+// rendering the thing it waits for; a server rendering a tile every few minutes
+// would instead hold those stamps in memory indefinitely and lose every one of
+// them to a crash. A size of 1 makes each stamp durable as it is written, which
+// next to a Mapnik render and a PNG write costs nothing measurable. Sizes below
+// 1 are treated as 1.
+func (s *Store) SetBatchSize(n int) error {
+	if n < 1 {
+		n = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.batchSize = n
+	if len(s.batch) >= s.batchSize {
+		return s.flushLocked()
+	}
+	return nil
 }
 
 // Flush writes buffered stamps to the database.
@@ -461,8 +570,8 @@ func (s *Store) flushLocked() (err error) {
 	defer tx.Rollback() // nolint:errcheck
 
 	const q = `INSERT OR REPLACE INTO tile_stamp
-		(zoom_level, tile_column, tile_row, suffix, osm_base_ts, rendered_at, source, renderer_rev)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+		(zoom_level, tile_column, tile_row, suffix, format, osm_base_ts, rendered_at, source, renderer_rev)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	stmt, err := tx.Prepare(q)
 	if err != nil {
@@ -487,10 +596,10 @@ func (s *Store) flushLocked() (err error) {
 			renderedAt = time.Now()
 		}
 
-		if _, err := stmt.Exec(stamp.Z, stamp.X, stamp.Y, stamp.Suffix,
+		if _, err := stmt.Exec(stamp.Z, stamp.X, stamp.Y, stamp.Suffix, stamp.Format,
 			osmBase, formatTime(renderedAt), stamp.Source, stamp.RendererRev); err != nil {
-			return fmt.Errorf("failed to insert stamp %d/%d/%d%s: %w",
-				stamp.Z, stamp.X, stamp.Y, stamp.Suffix, err)
+			return fmt.Errorf("failed to insert stamp %s: %w",
+				tileID(stamp.Z, stamp.X, stamp.Y, stamp.Suffix, stamp.Format), err)
 		}
 	}
 
@@ -517,7 +626,17 @@ func (s *Store) Close() error {
 func (s *Store) Path() string { return s.path }
 
 func sameTile(a, b Stamp) bool {
-	return a.Z == b.Z && a.X == b.X && a.Y == b.Y && a.Suffix == b.Suffix
+	return a.Z == b.Z && a.X == b.X && a.Y == b.Y &&
+		a.Suffix == b.Suffix && a.Format == b.Format
+}
+
+// tileID renders a stamp key for an error message, in the same shape the tile
+// files carry it.
+func tileID(z, x, y int, suffix, format string) string {
+	if format == "" {
+		return fmt.Sprintf("%d/%d/%d%s", z, x, y, suffix)
+	}
+	return fmt.Sprintf("%d/%d/%d%s.%s", z, x, y, suffix, format)
 }
 
 // formatTime renders a timestamp in the storage layout; see tsLayout.
@@ -553,7 +672,7 @@ func scanStamp(row rowScanner) (Stamp, error) {
 		rev        sql.NullString
 	)
 
-	if err := row.Scan(&stamp.Z, &stamp.X, &stamp.Y, &stamp.Suffix,
+	if err := row.Scan(&stamp.Z, &stamp.X, &stamp.Y, &stamp.Suffix, &stamp.Format,
 		&osmBase, &renderedAt, &source, &rev); err != nil {
 		return Stamp{}, err
 	}

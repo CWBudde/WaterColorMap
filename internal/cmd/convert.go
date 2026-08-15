@@ -205,7 +205,7 @@ func copyFolderStamps(inputDir, outputFile string, tiles []tileInfo) error {
 			continue
 		}
 
-		stamp, ok, err := src.Get(t.z, t.x, t.y, "")
+		stamp, ok, err := src.Get(t.z, t.x, t.y, "", t.format)
 		if err != nil {
 			return err
 		}
@@ -246,7 +246,7 @@ func parseTilePathInLayout(root, path string) (tileInfo, tileformat.Format, bool
 		if !ok {
 			return tileInfo{}, "", false
 		}
-		return tileInfo{z: z, x: x, y: y, suffix: m[4], path: path}, format, true
+		return tileInfo{z: z, x: x, y: y, suffix: m[4], format: format.String(), path: path}, format, true
 	}
 
 	m := nestedTileFilePattern.FindStringSubmatch(filename)
@@ -276,7 +276,7 @@ func parseTilePathInLayout(root, path string) (tileInfo, tileformat.Format, bool
 		return tileInfo{}, "", false
 	}
 
-	return tileInfo{z: z, x: x, y: y, suffix: m[2], path: path}, format, true
+	return tileInfo{z: z, x: x, y: y, suffix: m[2], format: format.String(), path: path}, format, true
 }
 
 // parseTileCoords converts the z/x/y capture groups of the tile filename
@@ -301,6 +301,10 @@ type tileInfo struct {
 	// ignores it — an MBTiles file has one tile per z/x/y — but purge selects
 	// on it, and the scan is the only place that can tell them apart.
 	suffix string
+	// format is the tile's image encoding, as tileformat.Format spells it. It
+	// comes from the file extension and is what makes a stamp lookup address
+	// the right file in a folder holding both PNG and WebP tiles.
+	format string
 	z      int
 	x      int
 	y      int

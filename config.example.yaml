@@ -192,7 +192,8 @@ overpass:
 #   # version it came from (Overpass osm3s.timestamp_osm_base), when it was
 #   # rendered, which endpoint answered and which build produced it. The stamps
 #   # live with the tiles: a tile_stamp table in the .mbtiles file, or stamps.db
-#   # in the tile folder. Tiles that serve renders on demand carry no stamp.
+#   # in the tile folder. serve stamps its on-demand renders into the same
+#   # store, under its own serve.stale_* keys.
 #   #
 #   # These three turn skip-existing from "does this tile exist" into "is this
 #   # tile still good". All are opt-in: with none set, an existing tile is
@@ -213,6 +214,16 @@ overpass:
 #   # On-demand generation
 #   generate_missing: true
 #   disable_cache: false # always re-render, still writes to disk
+#
+#   # Freshness, the same three questions generate.stale_* asks, applied one
+#   # tile at a time: a cached tile whose stamp says it is out of date is
+#   # re-rendered instead of served. Serve stamps what it renders into the same
+#   # stamps.db the batch commands read, so the two are comparable. Separate
+#   # keys from generate's on purpose -- a cutoff meant for an overnight run
+#   # should not silently start re-rendering under a live server.
+#   stale_data_before: "" # RFC3339; re-render tiles rendered from older OSM data
+#   stale_rendered_before: "" # RFC3339; re-render tiles written before this
+#   stale_renderer_rev: false # re-render tiles stamped by another build
 #   # Defaults to the CPU count, which cannot be written as a literal here:
 #   # uncommenting this key replaces that default outright, and any value <= 0
 #   # is clamped to 1 (internal/server/ondemand_tiles.go), serialising rendering.

@@ -126,7 +126,7 @@ func TestConvertCarriesTileStamps(t *testing.T) {
 		t.Fatalf("OpenFolder: %v", err)
 	}
 	want := tilestamp.Stamp{
-		Z: 13, X: 1, Y: 2,
+		Z: 13, X: 1, Y: 2, Format: "png",
 		OSMBase:     time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
 		RenderedAt:  time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC),
 		Source:      "https://overpass.example/api/interpreter",
@@ -157,7 +157,7 @@ func TestConvertCarriesTileStamps(t *testing.T) {
 	}
 	defer dst.Close() // nolint:errcheck
 
-	got, ok, err := dst.Get(13, 1, 2, "")
+	got, ok, err := dst.Get(13, 1, 2, "", "png")
 	if err != nil || !ok {
 		t.Fatalf("Get(13/1/2) = ok:%v err:%v, want the copied stamp", ok, err)
 	}
@@ -168,7 +168,7 @@ func TestConvertCarriesTileStamps(t *testing.T) {
 
 	// The unstamped tile stays unstamped: conversion copies provenance, it does
 	// not invent it.
-	if _, ok, err := dst.Get(13, 1, 3, ""); err != nil || ok {
+	if _, ok, err := dst.Get(13, 1, 3, "", "png"); err != nil || ok {
 		t.Errorf("Get(13/1/3) = ok:%v err:%v, want no stamp", ok, err)
 	}
 }

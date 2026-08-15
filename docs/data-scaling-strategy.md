@@ -782,11 +782,12 @@ inside the `.mbtiles` file, or `stamps.db` beside `tilejson.json` in a tile
 folder. `convert` carries the stamps of a tile folder over into the MBTiles file
 it produces, so converting a tileset does not lose its provenance.
 
-`serve` is the exception, deliberately for now: its on-demand generator
-(`internal/server/ondemand_tiles.go`) is constructed without a stamp store, so a
-tile a request caused to be rendered has no stamp. Purge's staleness selectors
-therefore never select such a tile, and `generate --stale-*` treats it as unknown
-and re-renders it. Wiring a shared store into the server is open work.
+`serve` stamps as well: its on-demand generator
+(`internal/server/ondemand_tiles.go`) is built with the store the server opened,
+one store shared across every tile size, written through per stamp and closed on
+the shutdown path. A tileset filled in by browsing is therefore selectable by the
+same staleness flags as one produced by a batch run, and `serve --stale-*`
+re-renders a cached tile whose stamp says it is out of date.
 
 The timestamp is read from the response body rather than taken from the clock,
 which matters as soon as the response cache is on: a cache hit reports the age

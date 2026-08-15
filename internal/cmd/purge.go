@@ -115,16 +115,24 @@ func (o *purgeOptions) stampFiltered() bool {
 }
 
 // purgeTarget is one selected tile. path is set for folder tiles only.
+//
+// format is the tile's image encoding, empty when the tileset cannot have two
+// files for one coordinate — an MBTiles file has exactly one tile per z/x/y, so
+// there is nothing for a format to disambiguate. See stampKey.
 type purgeTarget struct {
 	path   string
 	suffix string
+	format string
 	z      int
 	x      int
 	y      int
 }
 
 func (t purgeTarget) String() string {
-	return fmt.Sprintf("%d/%d/%d%s", t.z, t.x, t.y, t.suffix)
+	if t.format == "" {
+		return fmt.Sprintf("%d/%d/%d%s", t.z, t.x, t.y, t.suffix)
+	}
+	return fmt.Sprintf("%d/%d/%d%s.%s", t.z, t.x, t.y, t.suffix, t.format)
 }
 
 func runPurge(cmd *cobra.Command, args []string) error {
@@ -296,7 +304,7 @@ func purgeFolder(opts *purgeOptions) error {
 		if stamps == nil {
 			continue
 		}
-		if err := stamps.Delete(t.z, t.x, t.y, t.suffix); err != nil {
+		if err := stamps.Delete(t.z, t.x, t.y, t.suffix, t.format); err != nil {
 			logger.Error("Failed to delete tile stamp", "tile", t.String(), "error", err)
 		}
 	}
@@ -496,12 +504,25 @@ func selectTargets(candidates []purgeTarget, opts *purgeOptions, stamps *tilesta
 		return nil, fmt.Errorf("failed to query tile stamps: %w", err)
 	}
 
+	// Two indexes, because a target may or may not name a format. A folder
+	// tile always does, and then only the stamp for that file may select it —
+	// which is the whole point of the format being part of the stamp key. An
+	// MBTiles tile never does, and then any stamp for the coordinate selects
+	// it, because there is only one tile there to delete.
 	stale := make(map[string]struct{}, len(matches))
+	staleAnyFormat := make(map[string]struct{}, len(matches))
 	for _, s := range matches {
-		stale[purgeTarget{z: s.Z, x: s.X, y: s.Y, suffix: s.Suffix}.String()] = struct{}{}
+		t := purgeTarget{z: s.Z, x: s.X, y: s.Y, suffix: s.Suffix, format: s.Format}
+		stale[t.String()] = struct{}{}
+		t.format = ""
+		staleAnyFormat[t.String()] = struct{}{}
 	}
 
 	return filterTargets(selected, func(t purgeTarget) bool {
+		if t.format == "" {
+			_, ok := staleAnyFormat[t.String()]
+			return ok
+		}
 		_, ok := stale[t.String()]
 		return ok
 	}), nil
