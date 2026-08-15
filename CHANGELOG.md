@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Features
+
+- **datasource:** add an optional on-disk cache for Overpass responses, off by default. It is a
+  caching `http.RoundTripper` beneath the go-overpass client rather than a datasource wrapper,
+  which keeps the fetch queue's concrete-type assertion working and covers multi-server routing
+  per endpoint for free. The key hashes endpoint plus query text and contains **no tile
+  identity**, so the cache cannot make output depend on which tile asked for the data; entries
+  store the verbatim upstream bytes, so nothing downstream can observe a hit. Because `@2x`
+  padding is computed in world pixels, the 512px query is byte-identical to the 256px one and a
+  `--hidpi` run now reuses the base pass's entries instead of refetching every metatile.
+  Configure under `cache:`; see `config.example.yaml`.
+
+- **mbtiles:** batch generation to `--format mbtiles` now resumes. The skip-existing check used to
+  stat the folder path even when output went through a `TileWriter`, so an MBTiles run re-rendered
+  everything every time. `pipeline.TileProber` is an optional interface — a writer that cannot
+  answer simply omits it — and every failure mode degrades to rendering rather than skipping,
+  since a wrong skip leaves a permanent hole while a wrong render only costs time.
+
+### Documentation
+
+- **scaling:** add `docs/data-scaling-strategy.md`, closing PLAN.md § 5.1. Measured rather than
+  assumed: the Overpass fetch is ~71% of per-tile wall clock; WebP q80 is a 9.2× reduction over
+  PNG; and there are no cheap empty tiles — a Sahara tile with zero OSM features still costs
+  108 KB. Records why vector tile input is rejected (MVT's pre-clipping reintroduces the exact
+  artifact `out geom(bbox)` clipping was abandoned for) and what the three tiers of a global
+  rollout would actually cost.
+
+- **overpass:** correct the long-standing reading of the public API's `406 Not Acceptable`. It is
+  not rate limiting — `overpass-api.de` rejects Go's default `User-Agent`, which `go-overpass`
+  never overrides.
+
 ### Bug Fixes
 
 - **watercolor:** anchor hi-DPI rendering to world position. Noise scale, all blur/shade/edge

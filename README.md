@@ -101,6 +101,15 @@ Useful flags: `--force` (regenerate existing tiles), `--workers`,
 `--output-file` to write an MBTiles file directly. See
 `watercolormap generate --help` for the full list.
 
+**Batch runs resume.** An interrupted run can simply be re-issued: tiles that
+already exist are skipped, for MBTiles output as well as folder output. Pass
+`--force` to re-render them instead.
+
+Planning a run larger than a city? Read
+[docs/data-scaling-strategy.md](docs/data-scaling-strategy.md) first — it has the
+measured per-tile cost, the tile counts per zoom for a country, and the reason
+the Overpass fetch rather than the rendering is what sets your throughput.
+
 ### Convert tiles to MBTiles
 
 ```bash
