@@ -101,9 +101,15 @@ func runBandedTilePool(
 	// Tiles below the threshold are fetched per tile as before. At low zoom a
 	// single tile already covers a huge area, so banding buys little and risks
 	// a great deal.
+	//
+	// Natural-Earth-covered zooms are excluded outright, whatever --band-min-zoom
+	// says. Nothing here stops the two ranges from overlapping, and a band fetch
+	// happens *before* the generator ever sees the tile — so without this the
+	// run would still issue the continent-scale query the low tier exists to
+	// avoid, only to have the renderer throw the response away.
 	var banded, perTile []tile.Coords
 	for _, c := range coords {
-		if int(c.Z) >= band.minZoom {
+		if int(c.Z) >= band.minZoom && !opts.naturalEarth.CoversZoom(int(c.Z)) {
 			banded = append(banded, c)
 		} else {
 			perTile = append(perTile, c)

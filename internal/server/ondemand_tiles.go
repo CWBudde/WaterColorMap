@@ -646,7 +646,12 @@ func (t *OnDemandTiles) fetchTileData(
 	suffix string,
 	gen *pipeline.Generator,
 ) (*types.TileData, bool) {
-	if t.fetchQueue == nil {
+	// A Natural-Earth-covered zoom has no Overpass data to fetch, and asking
+	// for it anyway would defeat the point: a z2 request would put a quarter of
+	// the planet on the queue and fail the tile on the response size limit. The
+	// generator branches on the same predicate and renders from the
+	// shapefiles.
+	if t.fetchQueue == nil || t.cfg.NaturalEarth.CoversZoom(int(coords.Z)) {
 		return nil, true
 	}
 
@@ -1032,7 +1037,9 @@ func (t *OnDemandTiles) runRetryJob(job retryJob) bool {
 // carries none. It reports false when the fetch failed and the job should be
 // abandoned for this attempt.
 func (t *OnDemandTiles) retryFetchData(ctx context.Context, job retryJob, gen *pipeline.Generator) (*types.TileData, bool) {
-	if job.data != nil || t.fetchQueue == nil {
+	// Same bypass as fetchTileData: below the Natural Earth ceiling there is
+	// nothing to fetch, so a retry must not re-enter the queue either.
+	if job.data != nil || t.fetchQueue == nil || t.cfg.NaturalEarth.CoversZoom(int(job.coords.Z)) {
 		return job.data, true
 	}
 

@@ -107,6 +107,21 @@ func TestNaturalEarthConfigDisabledFlagKeepsDir(t *testing.T) {
 	}
 }
 
+// TestNaturalEarthConfigRejectsEnabledWithoutDir: `enabled: true` with no
+// directory is a configuration error, not a disabled config. Treating it as
+// disabled would send z0-5 to Overpass — continent-scale queries — behind a
+// setting that says the opposite.
+func TestNaturalEarthConfigRejectsEnabledWithoutDir(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	viper.Set(naturalEarthEnabledKey, true)
+
+	if _, err := naturalEarthConfig(); err == nil {
+		t.Error("an explicit enabled:true without a dir must fail at startup")
+	}
+}
+
 func TestNaturalEarthConfigRejectsMissingDir(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
