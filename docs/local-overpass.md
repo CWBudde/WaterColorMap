@@ -133,8 +133,10 @@ just smoke-local        # same, but asserts the local instance is up and points
 
 `just smoke` generates 9 tiles and serves them at
 <http://127.0.0.1:8080/demo/> so seams and neighbour alignment are visible in a
-real map viewer. Add `--hidpi` runs to check `@2x` output against its base
-tile — they must show the same road classes at the same ground width.
+real map viewer. To check `@2x` output against its base tile — they must show the
+same road classes at the same ground width — either request the `@2x` URL from
+the running server, which renders it on demand, or generate a single tile with
+`--hidpi`. Batch runs reject `--hidpi`; see the README.
 
 ## Known failures when the suite finally runs
 

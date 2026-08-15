@@ -127,7 +127,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create MBTiles writer: %w", err)
 	}
-	defer closeMBTilesWriters(writer)
+	defer closeMBTilesWriter(writer)
 
 	// Convert tiles
 	logger.Info("Converting tiles...")

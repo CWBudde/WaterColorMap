@@ -472,15 +472,20 @@ section says, not the biggest lever available.
 
 ### Two policy levers larger than the choice of N
 
-Both are **recommendations. Neither is implemented.** They are listed here so
-they are decided deliberately rather than discovered late.
+They are listed here so they are decided deliberately rather than discovered
+late. **Lever 1 is now implemented; lever 2 is still a recommendation.**
 
-**1. Make `@2x` on-demand only.** Today a batch run with `--hidpi` renders every
-tile twice: `runHiDPIBatch` (`internal/cmd/generate.go:634`) is a full second pass
-over the same tile list. `@2x` is 3× the bytes _and_ a second complete render.
-Dropping it from the bulk tier is **4× the storage and 2× the compute from a
-single policy line** — Germany z0-14 goes from 151.5 GB and 24.6 days to 37.9 GB
-and 12.3 days. Retina clients would get `@2x` from T3 on demand instead.
+**1. Make `@2x` on-demand only.** ✅ **Done.** A batch run used to render every
+tile twice — `runHiDPIBatch` was a full second pass over the same tile list — and
+`@2x` is 3× the bytes _and_ a second complete render. Dropping it from the bulk
+tier was **4× the storage and 2× the compute from a single policy line**:
+Germany z0-14 goes from 151.5 GB and 24.6 days to 37.9 GB and 12.3 days. Retina
+clients get `@2x` from T3 on demand, which `serve` has always been able to do.
+
+`generate --bbox --hidpi` is now an error rather than a silently smaller run, and
+`--hidpi` survives for single tiles, where it costs one extra render and is the
+easiest way to check that a `@2x` tile and its base show the same road classes at
+the same ground width.
 
 **2. Adopt WebP.** 🟡 **Shipped, but lossless — so the number is 1.21×, not 9.24×.**
 
@@ -669,15 +674,19 @@ cached run can render week-old OSM data. That is exactly right for a reproducibl
 batch and exactly wrong for a `serve` instance somebody expects to reflect recent
 edits, and the project cannot pick for you.
 
-**Measured consequence worth knowing:** with `--hidpi`, the `@2x` Overpass query is
+**Measured consequence worth knowing:** the `@2x` Overpass query is
 **byte-identical** to the 1× query. `RequiredPaddingPx`
 (`internal/watercolor/padding.go`) does the whole padding calculation in world
 pixels and scales to device pixels only at the end, so `pad(2x) == 2 * pad(1x)`
 exactly and the two metatiles cover the same ground. That property is pinned
 structurally by `internal/watercolor/scale_test.go:TestRequiredPaddingProportional`
 (zooms 10-18). Since the cache key is endpoint + query text and nothing about tile
-identity enters it, **enabling the cache halves Overpass load on every hi-DPI run**
-for free.
+identity enters it, **an on-demand `@2x` render is served entirely from the base
+pass's cache entries** and costs no Overpass traffic at all.
+
+(This was originally recorded as "the cache halves Overpass load on a `--hidpi`
+run". With lever 1 above implemented there is no second batch pass to halve; the
+same property now pays off on the on-demand path instead.)
 
 **Measured end to end** (4 tiles, z12 Hanover, local Overpass, folder output):
 cold cache 5.60 s (0.8 tiles/s), warm cache 1.71 s (2.8 tiles/s) — a **3.3×

@@ -10,8 +10,8 @@
   per endpoint for free. The key hashes endpoint plus query text and contains **no tile
   identity**, so the cache cannot make output depend on which tile asked for the data; entries
   store the verbatim upstream bytes, so nothing downstream can observe a hit. Because `@2x`
-  padding is computed in world pixels, the 512px query is byte-identical to the 256px one and a
-  `--hidpi` run now reuses the base pass's entries instead of refetching every metatile.
+  padding is computed in world pixels, the 512px query is byte-identical to the 256px one, so an
+  on-demand `@2x` render reuses the base pass's entries instead of refetching every metatile.
   Configure under `cache:`; see `config.example.yaml`.
 
 - **mbtiles:** batch generation to `--format mbtiles` now resumes. The skip-existing check used to
@@ -84,6 +84,20 @@
 
   `convert` detects the format from the folder instead of taking a flag, and refuses a folder
   holding both, since one MBTiles file records exactly one format.
+
+- **generate:** `@2x` tiles are no longer pre-rendered in bulk. A batch run used to make a full
+  second pass over the entire tile list, which is 2× the compute and 4× the storage for the whole
+  run — on Germany z0–14, the difference between 151.5 GB / 24.6 days and 37.9 GB / 12.3 days.
+  `serve` has always rendered `@2x` on demand, and because `@2x` padding is computed in world
+  pixels its Overpass query is byte-identical to the base tile's, so with the response cache
+  enabled an on-demand `@2x` costs no upstream traffic at all.
+
+  **Breaking:** `generate --bbox --hidpi` is now an error rather than a silently smaller run.
+  Ignoring the flag would have been worse — a script that asked for `@2x` would appear to succeed
+  and produce half the expected tiles, surfacing only as a 404 later. `--hidpi` still works for a
+  single tile, where it costs one extra render and is the easiest way to check that a `@2x` tile
+  and its base show the same road classes at the same ground width. The `prebuild-hannover` and
+  `prebuild` Justfile recipes dropped the flag accordingly.
 
 ### Documentation
 
