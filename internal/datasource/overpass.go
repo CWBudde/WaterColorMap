@@ -144,8 +144,13 @@ func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 	}
 	// The cache wraps the limiter, not the other way round: the size cap has to
 	// stay in force on the miss path, where the bytes actually arrive from the
-	// network.
-	httpClient := withResponseCache(withResponseLimit(cfg.HTTPClient, cfg.MaxResponseBytes), cfg.Cache)
+	// network. That ordering means the limiter never runs on a hit, so the cap
+	// is handed to the cache transport as well and applied on both paths.
+	httpClient := withResponseCache(
+		withResponseLimit(cfg.HTTPClient, cfg.MaxResponseBytes),
+		cfg.Cache,
+		cfg.MaxResponseBytes,
+	)
 
 	var client overpass.Client
 	if cfg.RetryConfig != nil {
@@ -663,20 +668,46 @@ func (mds *MultiOverpassDataSource) Close() error {
 	return nil
 }
 
-// ClearCache clears cache for all underlying datasources.
+// ClearCache clears the cache of every underlying datasource.
+//
+// Servers normally share one *ResponseCache (createOverpassDataSource builds a
+// single instance and hands it to each), so the caches are deduplicated by
+// pointer before being visited. Clearing the same cache once per server would
+// merely be wasteful, but counting it once per server in CacheSize below
+// reported an N-server setup as holding N times the entries it actually has.
 func (mds *MultiOverpassDataSource) ClearCache() {
-	for _, srv := range mds.servers {
-		srv.datasource.ClearCache()
+	for _, c := range mds.distinctCaches() {
+		if err := c.Clear(); err != nil {
+			slog.Warn("could not clear the Overpass response cache", "err", err)
+		}
 	}
 }
 
-// CacheSize returns total cache size across all underlying datasources.
+// CacheSize returns the number of distinct entries cached across all servers.
 func (mds *MultiOverpassDataSource) CacheSize() int {
 	total := 0
-	for _, srv := range mds.servers {
-		total += srv.datasource.CacheSize()
+	for _, c := range mds.distinctCaches() {
+		total += c.Entries()
 	}
 	return total
+}
+
+// distinctCaches returns each underlying cache once, in server order.
+func (mds *MultiOverpassDataSource) distinctCaches() []*ResponseCache {
+	seen := make(map[*ResponseCache]struct{}, len(mds.servers))
+	caches := make([]*ResponseCache, 0, len(mds.servers))
+	for _, srv := range mds.servers {
+		c := srv.datasource.cache
+		if c == nil {
+			continue
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		caches = append(caches, c)
+	}
+	return caches
 }
 
 // ErrEmptyOverpassResponse indicates Overpass returned no data when features were expected.

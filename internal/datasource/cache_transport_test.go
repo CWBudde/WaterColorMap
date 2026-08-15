@@ -304,6 +304,48 @@ func TestCacheTransportRespectsResponseLimit(t *testing.T) {
 	}
 }
 
+// TestCacheHitRespectsResponseLimit: a hit bypasses the limiter underneath the
+// cache transport, so the configured cap has to be applied on the hit path too.
+// Otherwise an entry stored under a larger (or shared) configuration would be
+// replayed to a caller that had explicitly capped smaller.
+//
+// The oversized entry is planted directly, which is the situation being
+// guarded: a cache directory populated by some other run.
+func TestCacheHitRespectsResponseLimit(t *testing.T) {
+	big := bigElementsJSON(256 << 10)
+	up := newUpstream(t, okJSON(sampleResponse))
+
+	cache := testCache(t, nil)
+	cfg := DefaultOverpassConfig()
+	cfg.Endpoint = up.server.URL
+	cfg.Workers = 1
+	cfg.Cache = cache
+	cfg.RetryConfig = &overpass.RetryConfig{MaxRetries: 0}
+	cfg.MaxResponseBytes = 4 << 10
+
+	// Plant an entry that is valid but larger than this datasource's cap.
+	query := queryFor(goldenQueryBounds, 13)
+	cache.Put(up.server.URL, query, big)
+	if cache.Entries() != 1 {
+		t.Fatalf("planted entry missing: %d entries", cache.Entries())
+	}
+
+	ds := NewOverpassDataSourceWithConfig(cfg)
+
+	// The hit must be rejected and the request refetched, which then runs
+	// through the limiter and produces the normal (small) upstream body.
+	data, err := fetch(t, ds)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if data == nil {
+		t.Fatal("fetch returned no data")
+	}
+	if got := int(up.calls.Load()); got != 1 {
+		t.Errorf("upstream requests = %d, want 1 (the oversized hit must not be served)", got)
+	}
+}
+
 // TestCacheDisabledTouchesNothing: with caching off, no directory appears and
 // every fetch goes upstream.
 func TestCacheDisabledTouchesNothing(t *testing.T) {

@@ -42,8 +42,9 @@ regression is pinned by `TestNewTileDataSourceHonoursConfiguredServer`
 entry, and asserts the configured test server actually receives the request while
 `WATERCOLORMAP_OVERPASS_ENDPOINT` points at an unreachable address.
 
-PLAN.md § 7.9 still carries the older claim that `generate` ignores the block.
-That bullet is stale and is being corrected separately; do not propagate it.
+PLAN.md § 7.9 carried the older claim that `generate` ignores the block for some
+time after it had stopped being true. That bullet is corrected in the same change
+as this document; if you meet the claim again anywhere, it is stale.
 
 So a Germany rollout is a config change:
 
@@ -147,9 +148,13 @@ resume. That is now a working resume mechanism:
   interface — `HasTile(z, x, y int) (bool, error)` — deliberately kept out of
   `TileWriter` so every test fake and every future writer is not forced to
   implement it.
-- `Generator.tileExists` (`internal/pipeline/generator.go:246-274`) asks the
-  configured `TileWriter` when it implements the prober, and otherwise falls back
-  to the file on disk.
+- `Generator.tileExists` (`internal/pipeline/generator.go:253-272`) dispatches on
+  the output backend: with no `TileWriter` it stats the file on disk, and with one
+  it asks the prober. Note what it does **not** do — a writer that is not a prober
+  yields "does not exist", so the tile is rendered; it never falls back to the
+  filesystem, because the file is not where that writer's output lives. A probe
+  error behaves the same way. Both failure modes render rather than skip: a wrong
+  skip leaves a permanent hole in the tileset, a wrong render only costs time.
 - `mbtiles.Writer.HasTile` (`internal/mbtiles/writer.go:201-240`) scans the
   unflushed write batch first (those rows are not queryable yet), then does a
   single seek against the `UNIQUE tile_index`, flipping y to TMS. The key set is
@@ -545,10 +550,19 @@ What it does:
   Only JSON-shaped 200s are stored; 429s, 504s and HTML error pages pass through
   unstored so the retry logic keeps seeing them.
 - Defaults: `cache/overpass`, 7-day TTL by file mtime, 5 GB budget with
-  LRU-by-mtime eviction (one synchronous sweep at open, background thereafter).
-  `store-empty` is off, because a 200 with zero elements is also what a silent
-  Overpass failure looks like, and freezing that for a week would bake the failure
-  into every later run.
+  **oldest-written-first** eviction (one synchronous sweep at open, background
+  thereafter). Deliberately not LRU: `Get` does not touch the entry, so a
+  frequently read old entry is still evicted before a newly written one. Making it
+  a true LRU would mean stamping mtime on every hit, and mtime is also what the
+  TTL reads — refreshing it on access would make an entry immortal. Tracking
+  access separately is possible but has not been needed; the working set is a
+  bbox-and-zoom range, which ages out together.
+- Nothing that looks like a failure is stored: only JSON-shaped 200s carrying an
+  `elements` array, and never a body carrying a `remark`, which is how Overpass
+  reports a timeout while still returning what it collected. `store-empty` is off
+  by default, because a 200 with zero elements is also what a silently failing
+  instance looks like, and freezing either for a week would turn one bad minute
+  into a week of subtly wrong tiles.
 - Every read-path failure is a miss, never a failed render.
 - Read in exactly one place, `createOverpassDataSource` (`internal/cmd/serve.go:381`),
   which is what structurally prevents the one-command-honours-the-block bug that
@@ -733,17 +747,18 @@ Follow-ups this work surfaced, roughly in priority order:
    same change.
 2. **`User-Agent` in go-overpass** (§ 5) — one line; makes the public fallback real,
    and makes 1 worth having.
-3. **Correct `docs/local-overpass.md`'s 406 framing** (§ 5).
-4. **Correct PLAN.md § 7.9's stale claim** that `generate` ignores
-   `overpass.servers` (§ 1) — being handled separately.
-5. **Measure the Germany import** and replace § 1's estimated disk/RAM/init table
+3. **Measure the Germany import** and replace § 1's estimated disk/RAM/init table
    with `du -sh` and a wall time.
-6. **Decide the `@2x` policy** (§ 3) — on-demand-only is 4× storage and 2× compute
+4. **Decide the `@2x` policy** (§ 3) — on-demand-only is 4× storage and 2× compute
    from one line.
-7. **WebP encoding + serving** (§ 3) — 9.2× measured; the only thing that makes an
+5. **WebP encoding + serving** (§ 3) — 9.2× measured; the only thing that makes an
    empty tile cheap.
-8. **Natural Earth for z0-5** (§ 2, § 3's T1) — copy the ocean pattern.
-9. **Tile data-version stamp and a purge command** (§ 4) — prerequisites for any
+6. **Natural Earth for z0-5** (§ 2, § 3's T1) — copy the ocean pattern.
+7. **Tile data-version stamp and a purge command** (§ 4) — prerequisites for any
    real update policy.
-10. **Streaming task enumeration in `worker.Pool`** (§ 1, defect 3) — not needed for
-    Germany, needed beyond it; preserve the `len(results) == len(tasks)` invariant.
+8. **Streaming task enumeration in `worker.Pool`** (§ 1, defect 3) — not needed for
+   Germany, needed beyond it; preserve the `len(results) == len(tasks)` invariant.
+
+The 406 framing in `docs/local-overpass.md` and PLAN.md § 7.9's stale
+`generate` claim were both corrected in the change that introduced this document,
+so neither is listed above.
