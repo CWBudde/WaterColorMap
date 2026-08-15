@@ -30,9 +30,19 @@ type TileEntry struct {
 	Y    int
 }
 
+// tmsRow converts an XYZ tile row into the TMS row MBTiles stores, flipping the
+// y axis. Both the insert path (flushLocked) and the lookup path (HasTile) must
+// use it: a lookup that skipped the flip would answer about the vertically
+// mirrored tile, which for a symmetric bounding box still produces a plausible —
+// but wrong — tileset.
+func tmsRow(z, y int) int {
+	return (1 << z) - 1 - y
+}
+
 // Writer writes tiles to an MBTiles database.
 type Writer struct {
 	db        *sql.DB
+	hasStmt   *sql.Stmt
 	path      string
 	batch     []TileEntry
 	metadata  Metadata
@@ -188,6 +198,47 @@ func (w *Writer) WriteTile(z, x, y int, tileData []byte) error {
 	return nil
 }
 
+// HasTile reports whether the tile is already stored, so a resumed run can skip
+// re-rendering it. Coordinates are XYZ, as for WriteTile.
+//
+// Two things make this more than a plain SELECT. First, up to batchSize entries
+// may still be sitting in w.batch, invisible to SQL, so the buffer is scanned
+// before the database. Second, the stored row is flipped to TMS — see tmsRow.
+//
+// The query is a single seek against the UNIQUE tile_index. The key set is
+// deliberately not preloaded: a resumed z14 planet tileset holds hundreds of
+// millions of keys.
+func (w *Writer) HasTile(z, x, y int) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Unflushed writes are not queryable yet, so check the buffer first.
+	for i := range w.batch {
+		if w.batch[i].Z == z && w.batch[i].X == x && w.batch[i].Y == y {
+			return true, nil
+		}
+	}
+
+	if w.hasStmt == nil {
+		stmt, err := w.db.Prepare("SELECT 1 FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=? LIMIT 1")
+		if err != nil {
+			return false, fmt.Errorf("failed to prepare tile lookup: %w", err)
+		}
+		w.hasStmt = stmt
+	}
+
+	var exists int
+	err := w.hasStmt.QueryRow(z, x, tmsRow(z, y)).Scan(&exists)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("failed to look up tile %d/%d/%d: %w", z, x, y, err)
+	}
+
+	return true, nil
+}
+
 // Flush writes any buffered tiles to the database.
 func (w *Writer) Flush() error {
 	w.mu.Lock()
@@ -219,7 +270,7 @@ func (w *Writer) flushLocked() (err error) {
 
 	for _, tile := range w.batch {
 		// Convert XYZ to TMS coordinates
-		tmsY := (1 << tile.Z) - 1 - tile.Y
+		tmsY := tmsRow(tile.Z, tile.Y)
 
 		// Raster bytes go in verbatim: MBTiles readers (QGIS, tileserver-gl,
 		// mbutil) expect raster tile_data to be the image itself. Vector (pbf)
@@ -261,9 +312,31 @@ func gzipBytes(data []byte) (compressed []byte, err error) {
 	return buf.Bytes(), nil
 }
 
+// closeHasStmt releases the lazily prepared HasTile statement, if any.
+func (w *Writer) closeHasStmt() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.hasStmt == nil {
+		return nil
+	}
+
+	err := w.hasStmt.Close()
+	w.hasStmt = nil
+	if err != nil {
+		return fmt.Errorf("failed to close tile lookup statement: %w", err)
+	}
+
+	return nil
+}
+
 // Close flushes any remaining tiles and closes the database.
 func (w *Writer) Close() error {
 	if err := w.Flush(); err != nil {
+		return errors.Join(err, w.closeHasStmt(), w.db.Close())
+	}
+
+	if err := w.closeHasStmt(); err != nil {
 		return errors.Join(err, w.db.Close())
 	}
 

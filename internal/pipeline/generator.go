@@ -103,6 +103,16 @@ type TileWriter interface {
 	WriteTile(z, x, y int, pngData []byte) error
 }
 
+// TileProber is the optional half of TileWriter: a backend that can say whether
+// a tile is already stored. A writer that cannot answer simply omits it, and the
+// generator then never skips — the same behaviour as today.
+//
+// It is deliberately not folded into TileWriter, which would force the method
+// onto every test fake and onto any future writer that has no way to answer.
+type TileProber interface {
+	HasTile(z, x, y int) (bool, error)
+}
+
 // DataSource fetches OSM features for a tile coordinate.
 type DataSource interface {
 	FetchTileData(context.Context, types.TileCoordinate) (*types.TileData, error)
@@ -195,15 +205,17 @@ func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, fo
 		tileDir = g.outputDir
 	}
 
-	if !force {
-		if _, err := os.Stat(finalPath); err == nil {
-			g.log().Info("Tile already exists; skipping", "coords", coords.String(), "path", finalPath)
-			return finalPath, "", nil
-		}
+	if !force && g.tileExists(coords, finalPath) {
+		g.log().Info("Tile already exists; skipping", "coords", coords.String(), "path", finalPath)
+		return finalPath, "", nil
 	}
 
-	if err := os.MkdirAll(tileDir, 0o755); err != nil {
-		return "", "", fmt.Errorf("failed to create output dir: %w", err)
+	// Only the folder backend needs a directory. Creating one in MBTiles mode
+	// would leave a stray, permanently empty ./tiles behind.
+	if g.options.TileWriter == nil {
+		if err := os.MkdirAll(tileDir, 0o755); err != nil {
+			return "", "", fmt.Errorf("failed to create output dir: %w", err)
+		}
 	}
 
 	// Phase 1: Setup and render all layers (optionally with pre-fetched data)
@@ -227,6 +239,36 @@ func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, fo
 
 	// Phase 4: Composite and write final tile
 	return g.compositeAndWrite(painted, coords, finalPath, renderResult.params, renderResult.padPx, renderResult.layerDirReturn, dc)
+}
+
+// tileExists reports whether the tile is already present in whichever backend
+// this generator writes to: the configured TileWriter when there is one (if it
+// can answer, i.e. implements TileProber), otherwise the file at finalPath.
+//
+// Every uncertain case answers false, i.e. "render it". That asymmetry is
+// deliberate: a wrong "skip" leaves a permanent hole in the tileset that nothing
+// later in the run will fill, while a wrong "render" costs a few seconds of CPU
+// and overwrites the tile with an identical one. So a writer that is not a
+// TileProber, and a probe that fails, both fall through to rendering.
+func (g *Generator) tileExists(coords tile.Coords, finalPath string) bool {
+	if g.options.TileWriter != nil {
+		prober, ok := g.options.TileWriter.(TileProber)
+		if !ok {
+			return false
+		}
+
+		exists, err := prober.HasTile(int(coords.Z), int(coords.X), int(coords.Y))
+		if err != nil {
+			g.log().Warn("Tile existence check failed; rendering anyway",
+				"coords", coords.String(), "error", err)
+			return false
+		}
+
+		return exists
+	}
+
+	_, err := os.Stat(finalPath)
+	return err == nil
 }
 
 func cropNRGBA(src image.Image, rect image.Rectangle) *image.NRGBA {
