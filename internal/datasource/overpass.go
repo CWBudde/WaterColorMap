@@ -51,8 +51,9 @@ const DefaultQueryTimeoutSec = 60
 //
 // The CLI resolves its endpoint from config.yaml, but the integration tests
 // construct datasources directly and would otherwise always hit the public API —
-// which is slow, rate-limited, and currently answers 406. Point this at a local
-// instance to run them against it. See docs/local-overpass.md.
+// which works now that the client sends a real User-Agent (see useragent.go) but
+// is slow and rate-limited. Point this at a local instance to run them against
+// it. See docs/local-overpass.md.
 const EndpointEnvVar = "WATERCOLORMAP_OVERPASS_ENDPOINT"
 
 // DefaultEndpoint returns the endpoint used when a caller configures none:

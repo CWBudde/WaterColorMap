@@ -741,10 +741,10 @@ worse than no schedule.
 The measurement run for § 4 turned up the root cause of something this project has
 believed for a long time and built policy around.
 
-[docs/local-overpass.md](local-overpass.md) opens by saying that against the public
-`overpass-api.de`, tile fetching is "slow, rate-limited, and at the moment answers
-`406 Not Acceptable` outright, which makes the whole integration suite unrunnable."
-The 406 has been read as an aggressive form of rate limiting.
+[docs/local-overpass.md](local-overpass.md) used to open by saying that against the
+public `overpass-api.de`, tile fetching is "slow, rate-limited, and at the moment
+answers `406 Not Acceptable` outright, which makes the whole integration suite
+unrunnable." The 406 had been read as an aggressive form of rate limiting.
 
 **It is not rate limiting.** `overpass-api.de` rejects requests carrying Go's
 stdlib default `User-Agent: Go-http-client/1.1` — and requests with an empty UA —
@@ -768,21 +768,26 @@ approximately 5 s and 2 s. No retries, no backoff, no 406.
 
 Three consequences:
 
-1. **It is a one-line fix in the dependency** — set a `User-Agent` identifying the
-   project and a contact URL, which is what the Overpass usage policy asks for
-   anyway. PLAN.md § 7.4 already wants go-overpass pinned or brought in-org; this
-   is a concrete reason to do it, and the fix belongs in the same change.
+1. **It is a small fix, and it did not need the dependency** — set a `User-Agent`
+   identifying the project and a contact URL, which is what the Overpass usage
+   policy asks for anyway. Patching go-overpass looked like the obvious route, but
+   the header can be set below the client instead: `internal/datasource/useragent.go`
+   adds a `RoundTripper` beside the existing limit and cache transports, which also
+   covers the per-server clients `MultiOverpassDataSource` builds and needs no
+   dependency release. Overridable via `overpass.user_agent`.
 2. **It makes the public API a viable fallback again.** Every routing
    recommendation in § 1 assumes a nil-coverage public entry that actually works —
    for tiles outside the regional box, and (once § 1's defect 1 is fixed) as
-   failover when the local container is down. Today that fallback is dead on
-   arrival, which quietly makes the "no failover" defect worse than it looks.
-3. **`docs/local-overpass.md` needs correcting.** Its framing is not just
-   incomplete, it is misleading: it attributes to server-side rate limiting
-   something that is a client-side bug in this stack, which means nobody looked for
-   the fix. The local instance is still worth having — 2 s versus 5 s per fetch,
-   no shared quota, no politeness budget — but "the public API does not work" and
-   "the public API is slower" are very different operational facts.
+   failover when the local container is down. That fallback was dead on arrival,
+   which quietly made the "no failover" defect worse than it looked; with the
+   `User-Agent` in place it works, so only defect 1 still stands between it and
+   real failover.
+3. **`docs/local-overpass.md` needed correcting**, and has been. Its framing was
+   not just incomplete, it was misleading: it attributed to server-side rate
+   limiting something that was a client-side bug in this stack, which means nobody
+   looked for the fix. The local instance is still worth having — 2 s versus 5 s
+   per fetch, no shared quota, no politeness budget — but "the public API does not
+   work" and "the public API is slower" are very different operational facts.
 
 ## What 5.1 does not close
 
