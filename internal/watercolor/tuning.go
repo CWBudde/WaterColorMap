@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"maps"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -117,7 +118,7 @@ func (o *Overrides) Validate() error {
 
 	errs = append(errs, o.Defaults.validate()...)
 
-	known := tunableLayers()
+	defaults := DefaultParams(ReferenceTileSize, 0, nil).Styles
 	names := make([]string, 0, len(o.Layers))
 	for name := range o.Layers {
 		names = append(names, name)
@@ -125,14 +126,15 @@ func (o *Overrides) Validate() error {
 	sort.Strings(names) // deterministic error order
 
 	for _, name := range names {
-		if _, ok := known[geojson.LayerType(name)]; !ok {
+		def, ok := defaults[geojson.LayerType(name)]
+		if !ok {
 			errs = append(errs, fmt.Errorf(
 				"watercolor.layers.%s: unknown layer (known layers: %s)",
 				name, strings.Join(knownLayerNames(), ", ")))
 			continue
 		}
 		lo := o.Layers[name]
-		errs = append(errs, lo.validate("watercolor.layers."+name)...)
+		errs = append(errs, lo.validate("watercolor.layers."+name, def)...)
 	}
 
 	return errors.Join(errs...)
@@ -150,7 +152,10 @@ func (g *GlobalOverrides) validate() []error {
 	return errs
 }
 
-func (l *LayerOverrides) validate(prefix string) []error {
+// validate checks one layer's overrides. def is that layer's default style: the
+// adaptive-noise check below needs it, because an override of one distance is
+// only meaningful against the value the other one inherits.
+func (l *LayerOverrides) validate(prefix string, def LayerStyle) []error {
 	var errs []error
 
 	errs = appendErr(errs, checkByte(prefix+".mask-threshold", l.MaskThreshold))
@@ -164,9 +169,26 @@ func (l *LayerOverrides) validate(prefix string) []error {
 	errs = appendErr(errs, checkNonNegative(prefix+".noise-min-dist", l.NoiseMinDist))
 	errs = appendErr(errs, checkNonNegative(prefix+".noise-max-dist", l.NoiseMaxDist))
 
-	if l.NoiseMinDist != nil && l.NoiseMaxDist != nil && *l.NoiseMinDist > *l.NoiseMaxDist {
-		errs = append(errs, fmt.Errorf("%s.noise-min-dist (%g) must not exceed noise-max-dist (%g)",
-			prefix, *l.NoiseMinDist, *l.NoiseMaxDist))
+	// Compare the *effective* pair, not just the overridden one. Overriding a
+	// single distance is the common case, and it can still invert the order
+	// against the inherited value: noise-min-dist: 12 with the default max of 10
+	// turns smoothstep(12, 10, d) into a discontinuous step instead of the
+	// gradual attenuation the key promises. Scaling multiplies both by the same
+	// factor, so checking at the reference tile size is enough.
+	if l.NoiseMinDist != nil || l.NoiseMaxDist != nil {
+		minDist, minSrc := def.NoiseMinDist, "default"
+		maxDist, maxSrc := def.NoiseMaxDist, "default"
+		if l.NoiseMinDist != nil {
+			minDist, minSrc = *l.NoiseMinDist, "configured"
+		}
+		if l.NoiseMaxDist != nil {
+			maxDist, maxSrc = *l.NoiseMaxDist, "configured"
+		}
+		if minDist > maxDist {
+			errs = append(errs, fmt.Errorf(
+				"%s.noise-min-dist (%g, %s) must not exceed noise-max-dist (%g, %s)",
+				prefix, minDist, minSrc, maxDist, maxSrc))
+		}
 	}
 
 	// mask-blur-sigma and mask-noise-strength use a `> 0` sentinel in
@@ -211,9 +233,28 @@ func appendErr(errs []error, err error) []error {
 	return errs
 }
 
+// checkFinite rejects NaN and ±Inf before any range comparison. Every ordered
+// comparison against NaN is false, so a range check like `*v < 0 || *v > 1`
+// accepts it — and YAML spells it `.nan`, so it is reachable from a config
+// file. A non-finite sigma or strength then propagates into the padding
+// calculation and the blur kernel and corrupts pixels, instead of producing the
+// startup error the other invalid values get.
+func checkFinite(key string, v *float64) error {
+	if v == nil {
+		return nil
+	}
+	if math.IsNaN(*v) || math.IsInf(*v, 0) {
+		return fmt.Errorf("%s: %g is not a finite number", key, *v)
+	}
+	return nil
+}
+
 func checkSigma(key string, v *float64) error {
 	if v == nil {
 		return nil
+	}
+	if err := checkFinite(key, v); err != nil {
+		return err
 	}
 	if *v < 0 || *v > MaxTunableSigma {
 		return fmt.Errorf("%s: %g out of range [0, %g] — larger blurs would grow the metatile and the data fetch with it",
@@ -226,6 +267,9 @@ func checkUnit(key string, v *float64) error {
 	if v == nil {
 		return nil
 	}
+	if err := checkFinite(key, v); err != nil {
+		return err
+	}
 	if *v < 0 || *v > 1 {
 		return fmt.Errorf("%s: %g out of range [0, 1]", key, *v)
 	}
@@ -236,6 +280,9 @@ func checkPositive(key string, v *float64) error {
 	if v == nil {
 		return nil
 	}
+	if err := checkFinite(key, v); err != nil {
+		return err
+	}
 	if *v <= 0 {
 		return fmt.Errorf("%s: %g must be greater than 0", key, *v)
 	}
@@ -245,6 +292,9 @@ func checkPositive(key string, v *float64) error {
 func checkNonNegative(key string, v *float64) error {
 	if v == nil {
 		return nil
+	}
+	if err := checkFinite(key, v); err != nil {
+		return err
 	}
 	if *v < 0 {
 		return fmt.Errorf("%s: %g must not be negative", key, *v)
