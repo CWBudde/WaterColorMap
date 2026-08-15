@@ -189,21 +189,10 @@ func (g *Generator) GenerateWithDebug(ctx context.Context, coords tile.Coords, f
 func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, force bool, filenameSuffix string, dc *DebugContext, prefetchedData *types.TileData) (string, string, error) {
 	suffix := strings.TrimSpace(filenameSuffix)
 
-	// Compute final path based on folder structure setting
-	var finalPath string
-	var tileDir string
-	if g.options.FolderStructure == "nested" {
-		// Nested structure: {z}/{x}/{y}.png
-		z := fmt.Sprintf("%d", coords.Z)
-		x := fmt.Sprintf("%d", coords.X)
-		y := fmt.Sprintf("%d", coords.Y)
-		tileDir = filepath.Join(g.outputDir, z, x)
-		finalPath = filepath.Join(tileDir, y+suffix+".png")
-	} else {
-		// Flat structure (default): z{z}_x{x}_y{y}.png
-		finalPath = filepath.Join(g.outputDir, fmt.Sprintf("%s%s.png", coords.String(), suffix))
-		tileDir = g.outputDir
-	}
+	// Both derived from one place, so TileExists cannot come to disagree with
+	// the check below about which file this tile is.
+	finalPath := g.tilePath(coords, suffix)
+	tileDir := filepath.Dir(finalPath)
 
 	if !force && g.tileExists(coords, finalPath) {
 		g.log().Info("Tile already exists; skipping", "coords", coords.String(), "path", finalPath)
@@ -371,6 +360,33 @@ func (g *Generator) CalculateFetchBounds(coords tile.Coords) types.BoundingBox {
 // TileSize returns the configured tile size for this generator.
 func (g *Generator) TileSize() int {
 	return g.tileSize
+}
+
+// TileExists reports whether this generator's output backend already holds the
+// tile, i.e. whether Generate would skip it.
+//
+// Exported so a caller can avoid work it would otherwise do *before* reaching
+// Generate — band fetching in particular, which would otherwise query Overpass
+// for a block whose tiles are all already rendered. It answers on exactly the
+// same terms as the internal check, including erring towards "does not exist"
+// whenever it cannot tell, so acting on it can never skip a tile that Generate
+// would have rendered.
+func (g *Generator) TileExists(coords tile.Coords, filenameSuffix string) bool {
+	return g.tileExists(coords, g.tilePath(coords, strings.TrimSpace(filenameSuffix)))
+}
+
+// tilePath returns where this generator writes the given tile. suffix is "" or
+// "@2x".
+func (g *Generator) tilePath(coords tile.Coords, suffix string) string {
+	if g.options.FolderStructure == "nested" {
+		// Nested structure: {z}/{x}/{y}.png
+		return filepath.Join(g.outputDir,
+			fmt.Sprintf("%d", coords.Z),
+			fmt.Sprintf("%d", coords.X),
+			fmt.Sprintf("%d%s.png", coords.Y, suffix))
+	}
+	// Flat structure (default): z{z}_x{x}_y{y}.png
+	return filepath.Join(g.outputDir, fmt.Sprintf("%s%s.png", coords.String(), suffix))
 }
 
 // BandFetchBounds returns the bounding box that covers every given tile's own
