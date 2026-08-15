@@ -47,7 +47,7 @@ func init() {
 	generateCmd.Flags().Bool("allow-failures", false, "Continue generation even if some tiles fail (useful for CI/CD with API rate limits)")
 
 	// Common flags
-	generateCmd.Flags().Bool("force", false, "Force regeneration even if tile exists")
+	generateCmd.Flags().Bool("force", false, "Re-render tiles that already exist, for folder and MBTiles output alike (without it, existing tiles are skipped so a run can resume)")
 	generateCmd.Flags().Int("tile-size", 256, "Tile size in pixels (typically 256 or 512 for Hi-DPI)")
 	generateCmd.Flags().Bool("hidpi", false, "Also generate a 2x (@2x) tile alongside the base tile")
 	generateCmd.Flags().String("png-compression", "default", "PNG compression (default, speed, best, none)")
@@ -413,7 +413,7 @@ func newTileDataSource(name string, allowEmpty bool) (pipeline.DataSource, error
 		if logger == nil {
 			initLogging()
 		}
-		return createOverpassDataSource(viper.GetInt("generate.overpass_workers"), allowEmpty, logger), nil
+		return createOverpassDataSource(viper.GetInt("generate.overpass_workers"), allowEmpty, logger)
 	default:
 		return nil, fmt.Errorf("unsupported data source: %s", name)
 	}

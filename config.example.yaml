@@ -25,12 +25,35 @@ log-level: "info" # debug, info, warn, error
 
 # Overpass API endpoint.
 #
-# NOTE: this is honoured by `serve` only. `generate` always builds a default
-# single-server Overpass source and ignores everything under `overpass:`.
-# For geographic routing across several Overpass servers (also serve-only),
+# Honoured by both `serve` and `generate`: both build their data source through
+# the same code path. For geographic routing across several Overpass servers,
 # see config.multi-overpass.example.yaml.
 overpass:
   endpoint: "https://overpass-api.de/api/interpreter"
+
+# On-disk cache for Overpass responses.
+#
+# Entries are the raw upstream JSON, gzipped, keyed by endpoint + query text —
+# so nothing about tile identity enters the key, and a re-render, a resumed
+# batch run or a `--hidpi` pass reuses the data it already fetched instead of
+# asking Overpass again. Shared by `serve` and `generate`.
+#
+# Off by default, deliberately: it changes freshness semantics (a re-run can
+# render week-old OSM data) and spends gigabytes of disk. A corrupt or
+# unreadable entry is always treated as a miss, never as a failed render.
+#
+# cache:
+#   enabled: false
+#   # Matches the ./cache directory the Docker container already mounts.
+#   dir: "cache/overpass"
+#   # Entry lifetime, measured from the file mtime. Default: 168h (7 days).
+#   ttl: "168h"
+#   # On-disk budget. Oldest entries are evicted first. Default: 5GB.
+#   max-size: "5GB"
+#   # Cache responses that contain zero elements too. Off by default: a 200 with
+#   # no data is also what a silent Overpass failure looks like, and storing it
+#   # would freeze that failure into every later run of the same tile.
+#   store-empty: false
 
 # Ocean / coastline rendering.
 #
