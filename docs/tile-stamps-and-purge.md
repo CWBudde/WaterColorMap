@@ -52,6 +52,18 @@ that drains connections. A store that cannot be opened is a warning and nothing
 more: the server serves unstamped rather than refusing to start, because a
 sidecar is not worth a tile service.
 
+`serve` carries its own `--stale-data-before`, `--stale-rendered-before` and
+`--stale-renderer-rev`, bound to `serve.stale_*` rather than read from
+`generate.stale_*`, so a batch cutoff cannot silently start re-rendering under a
+live server. They are consulted **on the cache hit**, before the tile on disk is
+handed back: a request whose file exists but whose stamp fails the policy falls
+through to the generation path and re-renders. Checking only after a cache miss
+would make the flags inert, since a miss means there is no tile to judge. One
+uncertain case is answered differently from a batch run: with no stamp store
+open, the cached tile is served. In a batch run "unknown" costs one re-render
+and is then settled by the stamp that render writes; here no render can write a
+stamp, so re-rendering would repeat on every request forever.
+
 ## The stamp key includes the image format
 
 A stamp is addressed by zoom, column, row, suffix **and** image format, and the
