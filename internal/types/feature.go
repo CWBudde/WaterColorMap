@@ -46,12 +46,22 @@ type FeatureCollection struct {
 
 // TileData represents all data for a single tile
 type TileData struct {
-	FetchedAt      time.Time
+	// FetchedAt is when this process obtained the data.
+	FetchedAt time.Time
+	// DataTimestamp is how current the underlying OSM data is: Overpass's
+	// osm3s.timestamp_osm_base, read from the response body. It is not
+	// FetchedAt and must not be confused with it — a response served from the
+	// on-disk cache was fetched now and carries data from whenever the upstream
+	// planet import was, which is the number a freshness decision needs.
+	// Zero when the source reports none.
+	DataTimestamp  time.Time
 	OverpassResult *overpass.Result
-	Source         string
-	Features       FeatureCollection
-	Bounds         BoundingBox
-	Coordinate     TileCoordinate
+	// Source names where the data came from — the Overpass endpoint that
+	// answered. Under multi-server routing that differs per tile.
+	Source     string
+	Features   FeatureCollection
+	Bounds     BoundingBox
+	Coordinate TileCoordinate
 }
 
 // Count returns the total number of features.

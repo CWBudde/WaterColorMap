@@ -107,11 +107,16 @@ func PrivateInstanceConfig(endpoint string) OverpassConfig {
 
 // OverpassDataSource fetches OSM data from Overpass API
 type OverpassDataSource struct {
-	client              overpass.Client
-	cache               *ResponseCache // nil when response caching is disabled
-	storeRawResponse    bool           // If true, stores raw Overpass response in TileData (for debugging)
-	clipGeomToBbox      bool           // If true, uses "out geom(bbox)" - DO NOT USE (known Overpass API bug)
-	allowEmptyResponses bool           // If true, an empty mid-zoom response is a warning, not an error
+	client overpass.Client
+	cache  *ResponseCache // nil when response caching is disabled
+	// endpoint is the URL this source queries, kept so every fetch can record
+	// which server answered it. Under multi-server routing that is a per-tile
+	// fact, and it is the one thing a stale tile's provenance cannot be
+	// reconstructed from afterwards.
+	endpoint            string
+	storeRawResponse    bool // If true, stores raw Overpass response in TileData (for debugging)
+	clipGeomToBbox      bool // If true, uses "out geom(bbox)" - DO NOT USE (known Overpass API bug)
+	allowEmptyResponses bool // If true, an empty mid-zoom response is a warning, not an error
 }
 
 // NewOverpassDataSource creates a new Overpass data source with default settings.
@@ -193,6 +198,7 @@ func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 	return &OverpassDataSource{
 		client:           client,
 		cache:            cfg.Cache,
+		endpoint:         cfg.Endpoint,
 		storeRawResponse: false, // Don't store raw response by default (saves memory)
 		clipGeomToBbox:   false, // Don't clip geometry (prevents artifacts from Overpass bug)
 	}
@@ -313,11 +319,20 @@ func (ds *OverpassDataSource) FetchAreaData(
 		}
 	}
 
+	// The provenance stamp is taken here, from the parsed response, and not
+	// from anything about the request. result.Timestamp is Overpass's
+	// osm3s.timestamp_osm_base — the version of the data behind the answer — so
+	// a response served out of the on-disk cache still reports the age of the
+	// data rather than the age of the fetch. FetchedAt records the fetch;
+	// keeping them apart is the whole point. Neither needs storeRawResponse,
+	// which stays off by default: these are three small values, not the parsed
+	// element graph.
 	tileData := &types.TileData{
-		Bounds:    bounds,
-		Features:  features,
-		FetchedAt: time.Now(),
-		Source:    "overpass-api",
+		Bounds:        bounds,
+		Features:      features,
+		FetchedAt:     time.Now(),
+		DataTimestamp: result.Timestamp,
+		Source:        ds.endpoint,
 	}
 
 	// Only store raw response if explicitly requested (for debugging/tests)
