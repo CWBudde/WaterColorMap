@@ -89,8 +89,15 @@
   second pass over the entire tile list, which is 2× the compute and 4× the storage for the whole
   run — on Germany z0–14, the difference between 151.5 GB / 24.6 days and 37.9 GB / 12.3 days.
   `serve` has always rendered `@2x` on demand, and because `@2x` padding is computed in world
-  pixels its Overpass query is byte-identical to the base tile's, so with the response cache
-  enabled an on-demand `@2x` costs no upstream traffic at all.
+  pixels its Overpass query is byte-identical to the base tile's — so with the response cache
+  enabled, an `@2x` request that follows a base render while that entry is still live is served
+  with no upstream traffic. Enabling the cache is not on its own enough: a cold, missing or
+  expired entry is an ordinary miss and still fetches Overpass.
+
+  **Note for MBTiles deployments:** on-demand `@2x` is a property of folder-backed serving.
+  `serve --mbtiles` answers from the file and ignores the `@2x` suffix, so a retina request there
+  gets base-resolution data. A deployment that needs true `@2x` from an MBTiles tileset has to
+  serve the tile directory instead (`serve --tiles-dir`), which keeps the on-demand generator.
 
   **Breaking:** `generate --bbox --hidpi` is now an error rather than a silently smaller run.
   Ignoring the flag would have been worse — a script that asked for `@2x` would appear to succeed

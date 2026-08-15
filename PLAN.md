@@ -186,7 +186,9 @@ Landed alongside the document, because both are load-bearing for the workflow it
   which is what keeps it a pure performance change under the world-position rule. It caches the
   verbatim upstream bytes, so nothing downstream can observe it. One measured consequence:
   `@2x` padding is computed in world pixels, so the 512px query is byte-identical to the 256px
-  one and a `--hidpi` run now reuses the base pass's entries instead of refetching every metatile.
+  one and an on-demand `@2x` render in `serve` reuses the base tile's cached response — while
+  that entry is still live — instead of refetching the metatile. (The `--hidpi` batch pass this
+  originally described is gone; see the on-demand item in 5.1a.)
   Its `httptest` tests also discharge 7.6's "mocked-HTTP Overpass tests" item.
 
 **A finding worth acting on, since acted on**: the public `overpass-api.de` `406 Not Acceptable`
@@ -784,10 +786,10 @@ watercolormap generate --format=mbtiles \
   --zoom-min=10 --zoom-max=15
 ```
 
-For HiDPI tiles, two separate files are created:
-
-- `hanover.mbtiles` (base 256px tiles)
-- `hanover@2x.mbtiles` (512px tiles)
+A batch run writes one file, holding base tiles only. There is no `@2x` sidecar: `--hidpi` is
+rejected for batch generation, and `serve --tiles-dir` renders `@2x` on demand instead. Note that
+`serve --mbtiles` has no such generator — it ignores the `@2x` suffix and answers with the base
+tile — so a deployment that needs true HiDPI has to serve the tile directory.
 
 ### Convert existing folder tiles to MBTiles
 

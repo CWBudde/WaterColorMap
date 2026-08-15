@@ -185,7 +185,9 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		if hidpi {
 			return fmt.Errorf("--hidpi is not supported for batch generation: " +
 				"pre-rendering @2x doubles compute and quadruples storage for the whole run. " +
-				"`watercolormap serve` generates @2x tiles on demand instead; " +
+				"`watercolormap serve --tiles-dir` generates @2x tiles on demand instead " +
+				"(note that `serve --mbtiles` does not: it answers from the file and ignores " +
+				"the @2x suffix, so retina requests get base-resolution tiles); " +
 				"--hidpi still works for a single tile")
 		}
 
