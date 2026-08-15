@@ -102,6 +102,21 @@ func EuclideanDistanceTransform(mask *image.Gray, maxDistance float64) *image.Gr
 // EuclideanDistanceTransformWithContext is like EuclideanDistanceTransform but uses
 // preallocated buffers from the provided context to avoid allocations.
 func EuclideanDistanceTransformWithContext(mask *image.Gray, maxDistance float64, ctx *DistanceContext) *image.Gray {
+	dst := image.NewGray(mask.Bounds())
+	EuclideanDistanceTransformIntoWithContext(mask, maxDistance, ctx, dst)
+
+	return dst
+}
+
+// EuclideanDistanceTransformIntoWithContext is EuclideanDistanceTransformWithContext
+// writing into a caller-owned destination, which must have the same bounds as mask.
+//
+// Safe in place (dst == mask): the image is only read while the scratch buffers are
+// filled, and the final normalisation reads and writes the same coordinate in the same
+// iteration.
+func EuclideanDistanceTransformIntoWithContext(
+	mask *image.Gray, maxDistance float64, ctx *DistanceContext, dst *image.Gray,
+) {
 	bounds := mask.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
@@ -131,7 +146,7 @@ func EuclideanDistanceTransformWithContext(mask *image.Gray, maxDistance float64
 	distanceTransformColumns(temp, ctx, width, height)
 
 	// Convert squared distances to distances and normalize to 0-255
-	return normalizeDistanceField(mask, temp, width, height, maxDistance, infinity)
+	normalizeDistanceFieldInto(mask, temp, width, height, maxDistance, infinity, dst)
 }
 
 // detectEdgePixels marks every foreground pixel that has a 4-connected background neighbour.
@@ -226,12 +241,13 @@ func distanceTransformColumns(temp []float64, ctx *DistanceContext, width, heigh
 	}
 }
 
-// normalizeDistanceField converts squared distances into a 0-255 gray image.
-func normalizeDistanceField(
-	mask *image.Gray, temp []float64, width, height int, maxDistance, infinity float64,
-) *image.Gray {
+// normalizeDistanceFieldInto converts squared distances into a 0-255 gray image.
+// Each pixel of mask is read and written at the same coordinate in the same iteration,
+// so output may be mask itself.
+func normalizeDistanceFieldInto(
+	mask *image.Gray, temp []float64, width, height int, maxDistance, infinity float64, output *image.Gray,
+) {
 	bounds := mask.Bounds()
-	output := image.NewGray(bounds)
 	maxDistSq := maxDistance * maxDistance
 
 	for y := 0; y < height; y++ {
@@ -245,8 +261,6 @@ func normalizeDistanceField(
 			)
 		}
 	}
-
-	return output
 }
 
 // normalizedDistanceValue maps a single pixel's squared distance to its gray output value.
@@ -337,8 +351,17 @@ func distanceTransform1DWithBuffers(input []float64, output []float64, v []int, 
 //
 // The output is suitable for use with ApplySoftEdgeMask or similar edge darkening functions.
 func DistanceToIntensity(distMask *image.Gray, gamma float64) *image.Gray {
+	output := image.NewGray(distMask.Bounds())
+	DistanceToIntensityInto(distMask, gamma, output)
+
+	return output
+}
+
+// DistanceToIntensityInto is DistanceToIntensity writing into a caller-owned destination,
+// which must have the same bounds as distMask. Safe in place: each pixel is read before
+// it is written.
+func DistanceToIntensityInto(distMask *image.Gray, gamma float64, output *image.Gray) {
 	bounds := distMask.Bounds()
-	output := image.NewGray(bounds)
 
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
@@ -356,8 +379,6 @@ func DistanceToIntensity(distMask *image.Gray, gamma float64) *image.Gray {
 			output.SetGray(x, y, color.Gray{Y: outputVal})
 		}
 	}
-
-	return output
 }
 
 // CreateDistanceEdgeMask is a high-level convenience function that combines
@@ -380,6 +401,21 @@ func CreateDistanceEdgeMask(mask *image.Gray, radius float64, gamma float64) *im
 // CreateDistanceEdgeMaskWithContext is like CreateDistanceEdgeMask but uses
 // preallocated buffers from the provided context to avoid allocations.
 func CreateDistanceEdgeMaskWithContext(mask *image.Gray, radius float64, gamma float64, ctx *DistanceContext) *image.Gray {
-	distMask := EuclideanDistanceTransformWithContext(mask, radius, ctx)
-	return DistanceToIntensity(distMask, gamma)
+	dst := image.NewGray(mask.Bounds())
+	CreateDistanceEdgeMaskIntoWithContext(mask, radius, gamma, ctx, dst)
+
+	return dst
+}
+
+// CreateDistanceEdgeMaskIntoWithContext is CreateDistanceEdgeMaskWithContext writing into a
+// caller-owned destination, which must have the same bounds as mask.
+//
+// It needs no intermediate image of its own: the distance field lands in dst and the
+// intensity curve is then applied to it in place. Both passes are safe in place, but
+// callers here always want their input mask preserved, so pass a distinct destination.
+func CreateDistanceEdgeMaskIntoWithContext(
+	mask *image.Gray, radius float64, gamma float64, ctx *DistanceContext, dst *image.Gray,
+) {
+	EuclideanDistanceTransformIntoWithContext(mask, radius, ctx, dst)
+	DistanceToIntensityInto(dst, gamma, dst)
 }

@@ -35,16 +35,27 @@ func ExtractAlphaMask(img image.Image) *image.Gray {
 		return nil
 	}
 
+	out := image.NewGray(img.Bounds())
+	ExtractAlphaMaskInto(img, out)
+
+	return out
+}
+
+// ExtractAlphaMaskInto is ExtractAlphaMask writing into a caller-owned destination,
+// which must have the same bounds as img. Every pixel in bounds is written, so a
+// recycled destination needs no clearing.
+func ExtractAlphaMaskInto(img image.Image, dst *image.Gray) {
+	if img == nil || dst == nil {
+		return
+	}
+
 	bounds := img.Bounds()
-	out := image.NewGray(bounds)
 
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			out.SetGray(x, y, color.Gray{Y: getAlpha(img, x, y)})
+			dst.SetGray(x, y, color.Gray{Y: getAlpha(img, x, y)})
 		}
 	}
-
-	return out
 }
 
 // NewEmptyMask returns an all-zero grayscale mask of the given bounds.
@@ -303,7 +314,19 @@ func smoothstep(edge0, edge1, x float64) float64 {
 // minDist: distance below which noise is minimal
 // maxDist: distance above which noise is at full strength
 func ApplyNoiseToMaskAdaptive(maskImg, noise, distanceMap *image.Gray, strength float64, minDist, maxDist float64) *image.Gray {
-	return applyNoise(maskImg, noise, distanceMap, strength, minDist, maxDist)
+	dst := image.NewGray(maskImg.Bounds())
+	applyNoiseInto(maskImg, noise, distanceMap, strength, minDist, maxDist, dst)
+
+	return dst
+}
+
+// ApplyNoiseToMaskAdaptiveInto is ApplyNoiseToMaskAdaptive writing into a caller-owned
+// destination, which must have the same bounds as maskImg. Safe in place: each pixel is
+// read before it is written, so dst may be the same image as distanceMap.
+func ApplyNoiseToMaskAdaptiveInto(
+	maskImg, noise, distanceMap *image.Gray, strength float64, minDist, maxDist float64, dst *image.Gray,
+) {
+	applyNoiseInto(maskImg, noise, distanceMap, strength, minDist, maxDist, dst)
 }
 
 // ApplyNoiseToMask overlays Perlin noise onto a blurred mask to create organic edges.
@@ -311,15 +334,28 @@ func ApplyNoiseToMaskAdaptive(maskImg, noise, distanceMap *image.Gray, strength 
 // noise: the Perlin noise texture (should match or be larger than mask dimensions)
 // strength: how much noise to apply (0.0 = no noise, 1.0 = full noise)
 func ApplyNoiseToMask(maskImg, noise *image.Gray, strength float64) *image.Gray {
-	return applyNoise(maskImg, noise, nil, strength, 0, 0)
+	dst := image.NewGray(maskImg.Bounds())
+	applyNoiseInto(maskImg, noise, nil, strength, 0, 0, dst)
+
+	return dst
 }
 
-// applyNoise is the shared kernel behind ApplyNoiseToMask and ApplyNoiseToMaskAdaptive.
+// ApplyNoiseToMaskInto is ApplyNoiseToMask writing into a caller-owned destination,
+// which must have the same bounds as maskImg. Safe in place.
+func ApplyNoiseToMaskInto(maskImg, noise *image.Gray, strength float64, dst *image.Gray) {
+	applyNoiseInto(maskImg, noise, nil, strength, 0, 0, dst)
+}
+
+// applyNoiseInto is the shared kernel behind ApplyNoiseToMask and ApplyNoiseToMaskAdaptive.
 // A nil distanceMap applies the noise at full strength everywhere; otherwise the
 // per-pixel strength is scaled by smoothstep(minDist, maxDist, distance).
-func applyNoise(maskImg, noise, distanceMap *image.Gray, strength, minDist, maxDist float64) *image.Gray {
+//
+// Every pixel of maskImg's bounds is written, and each one is read before it is written,
+// so dst may alias maskImg or distanceMap. It must not alias noise, which is sampled at
+// wrapped coordinates rather than at (x, y).
+func applyNoiseInto(maskImg, noise, distanceMap *image.Gray, strength, minDist, maxDist float64, dst *image.Gray) {
 	bounds := maskImg.Bounds()
-	result := image.NewGray(bounds)
+	result := dst
 
 	noiseBounds := noise.Bounds()
 
@@ -358,49 +394,73 @@ func applyNoise(maskImg, noise, distanceMap *image.Gray, strength, minDist, maxD
 			result.SetGray(x, y, color.Gray{Y: uint8(combined)})
 		}
 	}
-
-	return result
 }
 
 // ApplyThreshold applies a binary threshold to sharpen mask edges.
 // Values below threshold become 0 (black), values at or above become 255 (white).
 func ApplyThreshold(mask *image.Gray, threshold uint8) *image.Gray {
+	dst := image.NewGray(mask.Bounds())
+	ApplyThresholdInto(mask, threshold, dst)
+
+	return dst
+}
+
+// ApplyThresholdInto is ApplyThreshold writing into a caller-owned destination, which
+// must have the same bounds as mask. Safe in place.
+func ApplyThresholdInto(mask *image.Gray, threshold uint8, dst *image.Gray) {
 	bounds := mask.Bounds()
-	result := image.NewGray(bounds)
 
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			val := mask.GrayAt(x, y).Y
 
 			if val >= threshold {
-				result.SetGray(x, y, color.Gray{Y: 255})
+				dst.SetGray(x, y, color.Gray{Y: 255})
 			} else {
-				result.SetGray(x, y, color.Gray{Y: 0})
+				dst.SetGray(x, y, color.Gray{Y: 0})
 			}
 		}
 	}
-
-	return result
 }
 
 // ApplyThresholdWithAntialias applies a threshold with smooth antialiased edges.
 // Uses a smoothstep (t²(3-2t)) transition zone of 20 gray levels on each side of
 // the threshold value for natural-looking edges.
 func ApplyThresholdWithAntialias(maskImg *image.Gray, threshold uint8) *image.Gray {
-	return applyThresholdWithAntialias(maskImg, threshold, false)
+	dst := image.NewGray(maskImg.Bounds())
+	applyThresholdWithAntialiasInto(maskImg, threshold, false, dst)
+
+	return dst
+}
+
+// ApplyThresholdWithAntialiasInto is ApplyThresholdWithAntialias writing into a
+// caller-owned destination, which must have the same bounds as maskImg. Safe in place.
+func ApplyThresholdWithAntialiasInto(maskImg *image.Gray, threshold uint8, dst *image.Gray) {
+	applyThresholdWithAntialiasInto(maskImg, threshold, false, dst)
 }
 
 // ApplyThresholdWithAntialiasAndInvert is ApplyThresholdWithAntialias with inverted
 // polarity: values above the threshold become black instead of white. Used for the
 // land layer, which is the inverse of everything else.
 func ApplyThresholdWithAntialiasAndInvert(maskImg *image.Gray, threshold uint8) *image.Gray {
-	return applyThresholdWithAntialias(maskImg, threshold, true)
+	dst := image.NewGray(maskImg.Bounds())
+	applyThresholdWithAntialiasInto(maskImg, threshold, true, dst)
+
+	return dst
 }
 
-// applyThresholdWithAntialias is the shared kernel behind the two exported variants.
-func applyThresholdWithAntialias(maskImg *image.Gray, threshold uint8, invert bool) *image.Gray {
+// ApplyThresholdWithAntialiasAndInvertInto is ApplyThresholdWithAntialiasAndInvert writing
+// into a caller-owned destination, which must have the same bounds as maskImg. Safe in place.
+func ApplyThresholdWithAntialiasAndInvertInto(maskImg *image.Gray, threshold uint8, dst *image.Gray) {
+	applyThresholdWithAntialiasInto(maskImg, threshold, true, dst)
+}
+
+// applyThresholdWithAntialiasInto is the shared kernel behind the exported variants.
+// Every pixel of maskImg's bounds is written, and each is read before it is written,
+// so dst may alias maskImg.
+func applyThresholdWithAntialiasInto(maskImg *image.Gray, threshold uint8, invert bool, dst *image.Gray) {
 	bounds := maskImg.Bounds()
-	result := image.NewGray(bounds)
+	result := dst
 
 	// Transition zone: 20 gray levels on each side of threshold
 	const transitionWidth = 20
@@ -417,6 +477,4 @@ func applyThresholdWithAntialias(maskImg *image.Gray, threshold uint8, invert bo
 			result.SetGray(x, y, color.Gray{Y: uint8(t * 255.0)})
 		}
 	}
-
-	return result
 }
