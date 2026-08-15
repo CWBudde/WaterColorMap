@@ -55,7 +55,7 @@ layer of a tile at once). After this change, `image.NewNRGBA` is what dominates 
 remaining profile, and most of it is exactly those results.
 
 `buildMasks` still allocates one mask per layer rather than pooling, deliberately:
-`DebugContext.Capture` stores the image *reference*, so anything handed to it can
+`DebugContext.Capture` stores the image _reference_, so anything handed to it can
 never be recycled. Only the empty masks that were immediately overwritten went away.
 
 ## Invariants
@@ -71,6 +71,16 @@ bug, not a performance regression:
 2. **Total write.** Every `*Into` writes every pixel of its bounds — none clears
    first, none skips. That is what makes a dirty destination unobservable. A future
    kernel with an early `continue` breaks this and must clear.
+
+   `CreateDistanceEdgeMaskIntoWithContext` is the one deliberate exception: its
+   destination may be _larger_ than its source, because the watercolor processor keeps a
+   single tile-sized edge-mask buffer and paints masks of any size through it. Only the
+   mask's bounds are written, by **both** of its passes, and the caller clears the rest.
+   Bounding both passes the same way is the point — `SetGray` clips the distance
+   transform's writes to the mask anyway, so an intensity pass running over the whole
+   destination would read the previous layer's fringe back out and fold it into the
+   result. `TestCreateDistanceEdgeMaskIntoLeavesTheFringeAlone` pins it.
+
 3. **In-place safety is documented, not accidental.** The stages the pipeline aliases
    read each pixel before they write it. `TestIntoVariantsInPlace` pins the specific
    aliases the pipeline uses.
@@ -90,8 +100,8 @@ flipping it would be a silent-compile change between two arguments of the same t
 
 `benchstat`, 6 interleaved runs of each binary, i7-1255U, 256 tile with 5 layers:
 
-| benchmark        | bytes/op          | allocs/op    | sec/op          |
-| ---------------- | ----------------- | ------------ | --------------- |
+| benchmark        | bytes/op                   | allocs/op       | sec/op           |
+| ---------------- | -------------------------- | --------------- | ---------------- |
 | `FullPipeline`   | 5.85 MiB → 2.19 MiB (−62%) | 143 → 38 (−73%) | ~ (within noise) |
 | `MaskProcessing` | 469 KiB → 108 KiB (−77%)   | 16.5 → 3 (−82%) | ~ (within noise) |
 | `PaintFromMask`  | 456 KiB → 331 KiB (−27%)   | 7 → 3 (−57%)    | ~ (within noise) |

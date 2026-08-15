@@ -260,6 +260,48 @@ func TestIntoVariantsDoNotAllocate(t *testing.T) {
 	}
 }
 
+// TestCreateDistanceEdgeMaskIntoLeavesTheFringeAlone pins the one *Into helper whose
+// destination is allowed to be larger than its source: the watercolor processor keeps a
+// single tile-sized edge-mask buffer and paints masks of any size through it.
+//
+// Both passes must be bounded by the mask. The distance transform's writes are clipped to
+// it regardless, so an intensity pass running over the whole destination would read back
+// whatever the previous layer left outside the mask and fold it into the result.
+func TestCreateDistanceEdgeMaskIntoLeavesTheFringeAlone(t *testing.T) {
+	const fill = 0xAA
+
+	small := image.Rect(0, 0, 32, 32)
+	large := image.Rect(0, 0, 64, 64)
+
+	src := randomMask(small, 21)
+	ctx := NewDistanceContext(large.Dx())
+
+	exact := image.NewGray(small)
+	CreateDistanceEdgeMaskIntoWithContext(src, testRadius, testGamma, ctx, exact)
+
+	oversized := image.NewGray(large)
+	for i := range oversized.Pix {
+		oversized.Pix[i] = fill
+	}
+	CreateDistanceEdgeMaskIntoWithContext(src, testRadius, testGamma, ctx, oversized)
+
+	for y := large.Min.Y; y < large.Max.Y; y++ {
+		for x := large.Min.X; x < large.Max.X; x++ {
+			got := oversized.GrayAt(x, y).Y
+			if image.Pt(x, y).In(small) {
+				if want := exact.GrayAt(x, y).Y; got != want {
+					t.Fatalf("inside the mask at (%d,%d): got %d, want %d", x, y, got, want)
+				}
+
+				continue
+			}
+			if got != fill {
+				t.Fatalf("fringe at (%d,%d) was rewritten: got %d, want %d", x, y, got, fill)
+			}
+		}
+	}
+}
+
 // TestExtractAlphaMaskInto covers the one *Into variant whose source is not a Gray.
 func TestExtractAlphaMaskInto(t *testing.T) {
 	bounds := image.Rect(0, 0, 32, 32)

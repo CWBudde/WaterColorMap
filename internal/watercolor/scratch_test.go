@@ -146,26 +146,74 @@ func TestProcessMaskDoesNotWriteItsInput(t *testing.T) {
 	}
 }
 
-// TestProcessMaskSurvivesRecycledScratch runs a large layer first so the pooled scratch
-// comes back oversized, then a small one. A stale pixel from the first would show up as
-// a difference against the freshly computed reference.
+// TestProcessMaskSurvivesRecycledScratch covers the reuse that actually happens: every
+// layer of a tile has the same bounds, so the scratch comes back from the pool at the
+// right size and full of the previous layer's pixels. ensure() keeps those buffers, so
+// only the total-write property stops them from showing through.
+//
+// A size change is deliberately not the case under test - ensure() is exact-size, so it
+// reallocates and the second layer would run on virgin buffers either way.
 func TestProcessMaskSurvivesRecycledScratch(t *testing.T) {
-	large := scratchTestParams(96)
-	if _, err := processMask(scratchTestMask(96, 3), geojson.LayerWater, large); err != nil {
-		t.Fatalf("first processMask: %v", err)
+	const tileSize = 64
+
+	params := scratchTestParams(tileSize)
+
+	// Fill the pooled scratch with a different layer's data first. Land inverts and
+	// blurs differently, so nothing it leaves behind matches what water expects.
+	if _, err := processMask(scratchTestMask(tileSize, 3), geojson.LayerLand, params); err != nil {
+		t.Fatalf("priming processMask: %v", err)
 	}
 
-	small := scratchTestParams(48)
-	baseMask := scratchTestMask(48, 4)
-	want := referenceProcessMask(baseMask, geojson.LayerWater, small)
+	baseMask := scratchTestMask(tileSize, 4)
+	want := referenceProcessMask(baseMask, geojson.LayerWater, params)
 
-	got, err := processMask(baseMask, geojson.LayerWater, small)
+	got, err := processMask(baseMask, geojson.LayerWater, params)
 	if err != nil {
 		t.Fatalf("second processMask: %v", err)
 	}
 
 	if !bytes.Equal(got.Pix, want.Pix) {
 		t.Error("a recycled scratch changed the result")
+	}
+}
+
+// TestPaintFromFinalMaskReusesEdgeMaskBuffer is the paint-side twin of the test above.
+// The edge mask lives in the pooled ProcessorContext and is only written over the final
+// mask's bounds, so a smaller mask after a larger one must not inherit the previous
+// layer's fringe.
+func TestPaintFromFinalMaskReusesEdgeMaskBuffer(t *testing.T) {
+	const tileSize = 32
+
+	params := scratchTestParams(tileSize)
+
+	fullMask := image.NewGray(image.Rect(0, 0, tileSize, tileSize))
+	for i := range fullMask.Pix {
+		fullMask.Pix[i] = 255
+	}
+	if _, err := paintFromFinalMask(fullMask, geojson.LayerWater, params); err != nil {
+		t.Fatalf("priming paint: %v", err)
+	}
+
+	// Same paint twice from a fresh context and from the primed pool must agree.
+	smallMask := image.NewGray(image.Rect(0, 0, tileSize/2, tileSize/2))
+	for i := range smallMask.Pix {
+		smallMask.Pix[i] = 255
+	}
+
+	fromPool, err := paintFromFinalMask(smallMask, geojson.LayerWater, params)
+	if err != nil {
+		t.Fatalf("pooled paint: %v", err)
+	}
+
+	fromFresh, err := paintFromFinalMaskWithContext(
+		smallMask, geojson.LayerWater, params, NewProcessorContext(params.TileSize),
+	)
+	if err != nil {
+		t.Fatalf("fresh paint: %v", err)
+	}
+
+	if !bytes.Equal(fromPool.Pix, fromFresh.Pix) {
+		t.Error("a recycled ProcessorContext changed the paint")
 	}
 }
 

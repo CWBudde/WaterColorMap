@@ -105,6 +105,13 @@ func (p Plan) Radius() int {
 // call used to rebuild the tap table from scratch. Plans are pure functions of sigma and
 // callers only ever read Taps, so they can be shared.
 func PlanFor(sigma float64) Plan {
+	// NaN before the cache, not after: NaN never equals itself, so a NaN sigma would miss
+	// every lookup and store a new entry on every call, growing the map for the process
+	// lifetime. It also keeps int(math.Ceil(NaN)) out of the radius test below.
+	if math.IsNaN(sigma) {
+		return Plan{Mode: ModeNone}
+	}
+
 	if plan, ok := planCache.Load(sigma); ok {
 		p, ok := plan.(Plan)
 		if ok {
