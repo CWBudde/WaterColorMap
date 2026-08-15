@@ -32,8 +32,12 @@ extent** (`buildAreaQuery`, `overpass.go:356`).
 
 Sources: `waterRules` (`overpass.go:462`), `parksRules` (`:479`), `roadsRules`
 (`:514`), `railroadsRules` (`:546`), `buildingsRules` (`:561`). The 38 golden
-files under `testdata/golden/overpass-query/` pin one query per zoom, so the
-table above is checkable: read `z08.txt` rather than trusting this page.
+files under `testdata/golden/overpass-query/` are two per zoom for z0–18: the
+plain query (`z08.txt`) and its `-clipped` twin (`z08-clipped.txt`). Both pin
+the identical rule selection; they differ in the last line only — `out geom qt;`
+against `out geom(<bbox>) qt;`, the `clipGeomToBbox` mode
+(`overpass_query_test.go:33-38`). So the table above is checkable: read
+`z08.txt` rather than trusting this page.
 
 Two things in that table are easy to get wrong:
 
@@ -71,8 +75,10 @@ slow.
 | 0–9  | ocean: **simplified** water polygons |
 | 10+  | ocean: **full** water polygons       |
 
-The ocean pass is independent of the OSM query — OSM maps no ocean, so the open
-sea comes from the processed water polygons at
+The ocean pass is independent of the OSM query. OSM does map the boundary, as
+`natural=coastline` ways — that is what the water rules above fetch — but it
+carries no filled ocean polygon, so the open sea comes from the processed water
+polygons at
 <https://osmdata.openstreetmap.de/data/water-polygons.html>. The switch is
 `DefaultSimplifiedMaxZoom = 9` (`internal/renderer/ocean.go:12`): above it the
 simplified coastline is visibly coarse, below it the full set costs I/O for
@@ -99,21 +105,34 @@ back empty (`WithEmptyResponsesAllowed`, `overpass.go:219`).
 overview wants softer edges; detail wants sharper ones. Read
 `docs/performance/blur-optimization.md` before touching any sigma.
 
-**Metatile padding is not zoom-dependent, and that is deliberate.**
-`RequiredPaddingPx` (`internal/watercolor/padding.go:29`) derives padding from
-the largest blur sigma in play (`3σ + 2`), floored at `MinGeometryPaddingPx = 64`,
-and does the whole calculation in world pixels before scaling to device pixels.
-The consequence worth knowing: `pad(2x) == 2 * pad(1x)` exactly, so the `@2x`
-Overpass query is byte-identical to the 1× one and an on-demand `@2x` render
-costs no upstream traffic when the response cache is on.
+**Metatile padding is scale-proportional; it is zoom-dependent only at large
+sigmas.** `RequiredPaddingPx` (`internal/watercolor/padding.go:29`) derives
+padding from the largest blur sigma in play (`3σ + 2`), floored at
+`MinGeometryPaddingPx = 64`, and does the whole calculation in world pixels
+before scaling to device pixels.
+
+Because `Generator.watercolorParams` (`internal/pipeline/generator.go:349`)
+applies `ZoomAdjustedBlurSigma` _before_ calling `RequiredPaddingPx`, the zoom
+does reach the padding whenever the sigma term beats the 64 px floor. With the
+defaults it never does, so padding is a flat 64 px at every zoom — but a config
+`blur-sigma` at the `MaxTunableSigma = 20` ceiling gives `3·(20·1.4) + 2 = 86` px
+at z≤11 against 64 px at z12+, and the fetch bbox widens with it. Do not read the
+flat default as a guarantee.
+
+What _is_ guaranteed is equal world extent across device scales:
+`pad(2x) == 2 * pad(1x)` exactly, so at a given zoom the `@2x` Overpass query is
+byte-identical to the 1× one and an on-demand `@2x` render costs no upstream
+traffic when the response cache is on.
 
 **Band fetching stops below z10 by default.** `--band-min-zoom` defaults to 10
 (`internal/cmd/generate.go`): a single low-zoom tile already covers a huge area,
 so grouping tiles into a 4×4 block buys little and risks an oversized response.
 
-**On-demand retry backoff widens at low zoom.** 30 s at z≤7, 15 s at z≤10, 5 s
-above (`retryDelay`, `internal/server/ondemand_tiles.go:944`) — a low-zoom tile's
-fetch is bigger and slower, so retrying it quickly only makes things worse.
+**On-demand retry backoff widens at low zoom.** The _base_ delay is 30 s at z≤7,
+15 s at z≤10, 5 s above; `retryDelay` then multiplies it by `1 << attempt`
+(`internal/server/ondemand_tiles.go:944`), so a z6 tile waits 30 s, 60 s, 120 s
+and a z14 one 5 s, 10 s, 20 s. A low-zoom tile's fetch is bigger and slower, so
+retrying it quickly only makes things worse.
 
 **Style-level generalisation is Mapnik scale tiers, not geometry simplification.**
 There is no `simplify` or `generalize` anywhere in the Go code. Stroke widths and
@@ -132,8 +151,10 @@ Web Mercator denominator `559,082,264 / 2^z` at 256 px:
 
 The coarsest tier in `highways.xml:11-12` is 20,000,000–4,000,000, i.e. z5–z7.
 At z4 and below the denominator is past 20 M and **nothing in the road or highway
-styles draws at all**, whatever the query returned. `railroads.xml:12` starts
-coarsest at 2,000,000, i.e. z8.
+styles draws at all**, whatever the query returned. `railroads.xml:12-13` starts
+coarsest at 2,000,000–1,000,000, i.e. z9: z8 is still ≈2.18 M, just past that
+maximum. That agrees with the query rules, which fetch no railway before z9
+either.
 
 ## 4. Cost per zoom
 
@@ -151,8 +172,18 @@ the look the project exists to produce, so it is planned around rather than
 optimised away. Full numbers and the tileset-size tables are in
 `docs/data-scaling-strategy.md` § 3.
 
-Compute, not storage, is what binds: at the measured ~0.3 renders/s a global
-z0–8 tier is about 7 days, and global z0–12 is 4.7 years.
+Compute, not storage, is what binds. The unit is the _render_, not the
+coordinate, and a coordinate rendered at both scales is two renders. At the
+measured ~0.3 renders/s:
+
+| tier  | coordinates | base only  | base + `@2x` |
+| ----- | ----------- | ---------- | ------------ |
+| z0–8  | 87,381      | ≈3.4 days  | ≈7 days      |
+| z0–12 | 22,369,621  | ≈2.4 years | ≈4.7 years   |
+
+Batch runs no longer pre-render `@2x`, so the base-only column is what a bulk
+job costs today; the right-hand column is what it used to cost, and still does
+if every coordinate is wanted at both scales.
 
 ## 5. Zoom limits in the code
 
