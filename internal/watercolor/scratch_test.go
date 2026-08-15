@@ -204,3 +204,9 @@ func TestPaintLayerAllocationBudget(t *testing.T) {
 		t.Errorf("PaintLayer made %v allocations per run, budget is %d", allocs, budget)
 	}
 }
+
+func TestPaintLayerNilImage(t *testing.T) {
+	if _, err := PaintLayer(nil, geojson.LayerWater, scratchTestParams(16)); err == nil {
+		t.Fatal("expected an error for a nil layer image")
+	}
+}
