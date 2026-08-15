@@ -41,6 +41,29 @@ func ExtractAlphaMask(img image.Image) *image.Gray {
 	return out
 }
 
+// grayRow returns the w bytes of m starting at (x, y), or nil when that run is not
+// wholly inside m. A nil row tells the caller to fall back to GrayAt, which reads zero
+// outside the image - the behaviour these kernels had before they indexed Pix directly.
+func grayRow(m *image.Gray, x, y, w int) []uint8 {
+	if m == nil || !image.Rect(x, y, x+w, y+1).In(m.Bounds()) {
+		return nil
+	}
+
+	off := m.PixOffset(x, y)
+
+	return m.Pix[off : off+w : off+w]
+}
+
+// writeRect is the rectangle a kernel iterating over src may write into dst.
+//
+// The accessor-based loops these kernels grew out of relied on SetGray silently
+// dropping out-of-bounds writes, which is how a destination smaller than its source
+// stayed safe. Direct Pix indexing would panic instead, so the clipping is done once
+// here rather than per pixel.
+func writeRect(src, dst image.Rectangle) image.Rectangle {
+	return src.Intersect(dst)
+}
+
 // ExtractAlphaMaskInto is ExtractAlphaMask writing into a caller-owned destination,
 // which must have the same bounds as img. Every pixel in bounds is written, so a
 // recycled destination needs no clearing.
@@ -49,11 +72,41 @@ func ExtractAlphaMaskInto(img image.Image, dst *image.Gray) {
 		return
 	}
 
-	bounds := img.Bounds()
+	r := writeRect(img.Bounds(), dst.Bounds())
+	w := r.Dx()
+	if w == 0 {
+		return
+	}
 
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			dst.SetGray(x, y, color.Gray{Y: getAlpha(img, x, y)})
+	// The type switch sits outside the inner loop, not inside getAlpha: layer images
+	// come from image.Decode, so the concrete type varies, but it never varies between
+	// two pixels of the same image.
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		dstRow := grayRow(dst, r.Min.X, y, w)
+
+		switch src := img.(type) {
+		case *image.NRGBA:
+			off := src.PixOffset(r.Min.X, y)
+			row := src.Pix[off : off+4*w]
+			for i := range dstRow {
+				dstRow[i] = row[4*i+3]
+			}
+		case *image.RGBA:
+			off := src.PixOffset(r.Min.X, y)
+			row := src.Pix[off : off+4*w]
+			for i := range dstRow {
+				dstRow[i] = row[4*i+3]
+			}
+		case *image.Gray:
+			off := src.PixOffset(r.Min.X, y)
+			copy(dstRow, src.Pix[off:off+w])
+		case *image.Alpha:
+			off := src.PixOffset(r.Min.X, y)
+			copy(dstRow, src.Pix[off:off+w])
+		default:
+			for i := range dstRow {
+				dstRow[i] = getAlpha(img, r.Min.X+i, y)
+			}
 		}
 	}
 }
@@ -97,17 +150,20 @@ func MaxMasks(masks ...*image.Gray) *image.Gray {
 		return out
 	}
 
+	// out starts zeroed, so folding each mask in turn gives the same maximum as
+	// scanning every mask at each pixel - one pass per mask instead of one indexed
+	// read per mask per pixel.
 	out := image.NewGray(bounds)
+	w := bounds.Dx()
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			var maxVal uint8
-			for _, m := range validMasks {
-				v := m.GrayAt(x, y).Y
-				if v > maxVal {
-					maxVal = v
+		outRow := grayRow(out, bounds.Min.X, y, w)
+		for _, m := range validMasks {
+			srcRow := grayRow(m, bounds.Min.X, y, w)
+			for i, v := range srcRow {
+				if v > outRow[i] {
+					outRow[i] = v
 				}
 			}
-			out.SetGray(x, y, color.Gray{Y: maxVal})
 		}
 	}
 	return out
@@ -131,17 +187,19 @@ func SubtractMask(a, b *image.Gray) *image.Gray {
 
 	bounds := a.Bounds()
 	out := image.NewGray(bounds)
+	w := bounds.Dx()
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			av := int(a.GrayAt(x, y).Y)
-			bv := int(b.GrayAt(x, y).Y)
+		aRow := grayRow(a, bounds.Min.X, y, w)
+		bRow := grayRow(b, bounds.Min.X, y, w)
+		outRow := grayRow(out, bounds.Min.X, y, w)
+		for i, av := range aRow {
 			// AND NOT: where b is opaque, result is transparent; partial
 			// coverage in b caps a instead of eroding it by the full amount.
 			result := av
-			if inv := 255 - bv; inv < result {
+			if inv := 255 - bRow[i]; inv < result {
 				result = inv
 			}
-			out.SetGray(x, y, color.Gray{Y: uint8(result)})
+			outRow[i] = result
 		}
 	}
 	return out
@@ -159,14 +217,16 @@ func MinMask(a, b *image.Gray) *image.Gray {
 
 	bounds := a.Bounds()
 	out := image.NewGray(bounds)
+	w := bounds.Dx()
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			av := a.GrayAt(x, y).Y
-			bv := b.GrayAt(x, y).Y
-			if bv < av {
+		aRow := grayRow(a, bounds.Min.X, y, w)
+		bRow := grayRow(b, bounds.Min.X, y, w)
+		outRow := grayRow(out, bounds.Min.X, y, w)
+		for i, av := range aRow {
+			if bv := bRow[i]; bv < av {
 				av = bv
 			}
-			out.SetGray(x, y, color.Gray{Y: av})
+			outRow[i] = av
 		}
 	}
 	return out
@@ -221,11 +281,13 @@ func InvertMaskInto(m *image.Gray, dst *image.Gray) {
 	if m == nil || dst == nil {
 		return
 	}
-	bounds := m.Bounds()
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			v := m.GrayAt(x, y).Y
-			dst.SetGray(x, y, color.Gray{Y: 255 - v})
+	r := writeRect(m.Bounds(), dst.Bounds())
+	w := r.Dx()
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		srcRow := grayRow(m, r.Min.X, y, w)
+		dstRow := grayRow(dst, r.Min.X, y, w)
+		for i, v := range srcRow {
+			dstRow[i] = 255 - v
 		}
 	}
 }
@@ -274,6 +336,7 @@ func GeneratePerlinNoiseWithOffset(
 	noise := image.NewGray(image.Rect(0, 0, width, height))
 
 	for y := 0; y < height; y++ {
+		row := noise.Pix[y*noise.Stride:][:width]
 		for x := 0; x < width; x++ {
 			// Sample Perlin noise at normalized coordinates
 			nx := float64(offsetX+x) / scale
@@ -287,7 +350,7 @@ func GeneratePerlinNoiseWithOffset(
 			normalized := (val + 1.0) / 2.0
 			gray := uint8(math.Max(0, math.Min(255, normalized*255)))
 
-			noise.SetGray(x, y, color.Gray{Y: gray})
+			row[x] = gray
 		}
 	}
 
@@ -355,26 +418,45 @@ func ApplyNoiseToMaskInto(maskImg, noise *image.Gray, strength float64, dst *ima
 // wrapped coordinates rather than at (x, y).
 func applyNoiseInto(maskImg, noise, distanceMap *image.Gray, strength, minDist, maxDist float64, dst *image.Gray) {
 	bounds := maskImg.Bounds()
-	result := dst
-
 	noiseBounds := noise.Bounds()
+	noiseW := noiseBounds.Dx()
 
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			// Get mask value
-			maskVal := float64(maskImg.GrayAt(x, y).Y)
+	r := writeRect(bounds, dst.Bounds())
+	w := r.Dx()
+
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		maskRow := grayRow(maskImg, r.Min.X, y, w)
+		dstRow := grayRow(dst, r.Min.X, y, w)
+		// A distance map narrower than the mask still reads zero outside itself, which
+		// is what GrayAt did; grayRow returns nil there and the loop falls back to it.
+		distRow := grayRow(distanceMap, r.Min.X, y, w)
+
+		// The noise is tiled, so its row is fixed for this y and the column index just
+		// wraps - no modulus per pixel, and no bounds check per sample.
+		ny := (y - bounds.Min.Y) % noiseBounds.Dy()
+		noiseRow := grayRow(noise, noiseBounds.Min.X, noiseBounds.Min.Y+ny, noiseW)
+		nx := (r.Min.X - bounds.Min.X) % noiseW
+
+		for i, maskByte := range maskRow {
+			maskVal := float64(maskByte)
 
 			// Scale the noise by feature thickness so thin structures survive.
 			// Pixel intensity in the distance map represents distance in pixels.
 			noiseScale := 1.0
 			if distanceMap != nil {
-				noiseScale = smoothstep(minDist, maxDist, float64(distanceMap.GrayAt(x, y).Y))
+				dist := uint8(0)
+				if distRow != nil {
+					dist = distRow[i]
+				} else {
+					dist = distanceMap.GrayAt(r.Min.X+i, y).Y
+				}
+				noiseScale = smoothstep(minDist, maxDist, float64(dist))
 			}
 
-			// Get noise value (tile if noise is smaller, or sample if larger)
-			nx := (x - bounds.Min.X) % noiseBounds.Dx()
-			ny := (y - bounds.Min.Y) % noiseBounds.Dy()
-			noiseVal := float64(noise.GrayAt(noiseBounds.Min.X+nx, noiseBounds.Min.Y+ny).Y)
+			noiseVal := float64(noiseRow[nx])
+			if nx++; nx == noiseW {
+				nx = 0
+			}
 
 			// Apply noise as a perturbation.
 			// Noise is centered around 128, so subtract 128 to get -128 to +127 range.
@@ -391,7 +473,7 @@ func applyNoiseInto(maskImg, noise, distanceMap *image.Gray, strength, minDist, 
 				combined = 255
 			}
 
-			result.SetGray(x, y, color.Gray{Y: uint8(combined)})
+			dstRow[i] = uint8(combined)
 		}
 	}
 }
@@ -408,16 +490,17 @@ func ApplyThreshold(mask *image.Gray, threshold uint8) *image.Gray {
 // ApplyThresholdInto is ApplyThreshold writing into a caller-owned destination, which
 // must have the same bounds as mask. Safe in place.
 func ApplyThresholdInto(mask *image.Gray, threshold uint8, dst *image.Gray) {
-	bounds := mask.Bounds()
+	r := writeRect(mask.Bounds(), dst.Bounds())
+	w := r.Dx()
 
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			val := mask.GrayAt(x, y).Y
-
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		srcRow := grayRow(mask, r.Min.X, y, w)
+		dstRow := grayRow(dst, r.Min.X, y, w)
+		for i, val := range srcRow {
 			if val >= threshold {
-				dst.SetGray(x, y, color.Gray{Y: 255})
+				dstRow[i] = 255
 			} else {
-				dst.SetGray(x, y, color.Gray{Y: 0})
+				dstRow[i] = 0
 			}
 		}
 	}
@@ -459,8 +542,8 @@ func ApplyThresholdWithAntialiasAndInvertInto(maskImg *image.Gray, threshold uin
 // Every pixel of maskImg's bounds is written, and each is read before it is written,
 // so dst may alias maskImg.
 func applyThresholdWithAntialiasInto(maskImg *image.Gray, threshold uint8, invert bool, dst *image.Gray) {
-	bounds := maskImg.Bounds()
-	result := dst
+	r := writeRect(maskImg.Bounds(), dst.Bounds())
+	w := r.Dx()
 
 	// Transition zone: 20 gray levels on each side of threshold
 	const transitionWidth = 20
@@ -468,13 +551,15 @@ func applyThresholdWithAntialiasInto(maskImg *image.Gray, threshold uint8, inver
 	lower := float64(int(threshold) - transitionWidth)
 	upper := float64(int(threshold) + transitionWidth)
 
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			t := smoothstep(lower, upper, float64(maskImg.GrayAt(x, y).Y))
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		srcRow := grayRow(maskImg, r.Min.X, y, w)
+		dstRow := grayRow(dst, r.Min.X, y, w)
+		for i, val := range srcRow {
+			t := smoothstep(lower, upper, float64(val))
 			if invert {
 				t = 1.0 - t
 			}
-			result.SetGray(x, y, color.Gray{Y: uint8(t * 255.0)})
+			dstRow[i] = uint8(t * 255.0)
 		}
 	}
 }
