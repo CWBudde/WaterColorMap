@@ -676,6 +676,9 @@ func withCORS(origin string, next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// Without this the tile handlers' X-Cache header is invisible to a
+		// cross-origin page: the browser receives it and hides it from JS.
+		w.Header().Set("Access-Control-Expose-Headers", "X-Cache")
 		if origin != "*" {
 			// Any origin-specific policy must not be cached across origins.
 			w.Header().Add("Vary", "Origin")

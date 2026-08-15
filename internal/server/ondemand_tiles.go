@@ -99,6 +99,10 @@ type OnDemandTiles struct {
 	// locks holds the per-tile locks, refcounted so entries can be dropped
 	// once nobody holds or waits for them. See tileLock.
 	locks map[string]*tileLock
+	// newGenerator builds the generator for a tile size. Nil means the real
+	// pipeline generator; tests replace it to drive the request path without
+	// Mapnik. See tileGenerator.
+	newGenerator func(tileSize int) (tileGenerator, error)
 
 	gens sync.Map
 	// currentRenders tracks in-progress renders.
@@ -119,6 +123,15 @@ type OnDemandTiles struct {
 	totalFailed   atomic.Int64
 	// rejectedBusy counts requests shed because the backlog was full.
 	rejectedBusy atomic.Int64
+
+	// Cache accounting. Every request that reaches a cache decision lands in
+	// exactly one of hit / hitCoalesced / miss / bypass; stale is a reason
+	// counter that runs alongside miss rather than instead of it.
+	cacheHits          atomic.Int64
+	cacheHitsCoalesced atomic.Int64
+	cacheMisses        atomic.Int64
+	cacheStale         atomic.Int64
+	cacheBypasses      atomic.Int64
 
 	// The 32-bit counters are kept adjacent so the struct carries no padding
 	// between them.
@@ -148,6 +161,25 @@ type TileStatus struct {
 
 	// Retry queue status
 	Retry RetryStatus `json:"retry"`
+
+	// Cache hit/miss accounting
+	Cache CacheStatus `json:"cache"`
+}
+
+// CacheStatus counts how the tile cache answered requests since startup.
+//
+// Hits and HitsCoalesced are disjoint: the first is a tile already on disk when
+// the request arrived, the second one that appeared while the request waited on
+// the per-tile lock behind another request's render. Stale is a reason, not an
+// outcome — it counts misses caused by a tile that existed but failed the
+// freshness policy, which is the number that says a --stale-* cutoff is too
+// aggressive.
+type CacheStatus struct {
+	Hits          int64 `json:"hits"`
+	HitsCoalesced int64 `json:"hits_coalesced"`
+	Misses        int64 `json:"misses"`
+	Stale         int64 `json:"stale"`
+	Bypasses      int64 `json:"bypasses"`
 }
 
 // RenderStatus contains current render operation status.
@@ -271,6 +303,25 @@ const tileWriteGrace = 30 * time.Second
 // backlog is full.
 const busyRetryAfterSeconds = 5
 
+// cacheStatusHeader reports how a tile response was answered. It is the only
+// per-request way to tell the paths apart from outside the process -- the
+// status endpoint only has totals -- so it is worth the one header write. It is
+// listed in Access-Control-Expose-Headers by the serve command's CORS
+// middleware, without which a cross-origin page cannot read it.
+const (
+	cacheStatusHeader = "X-Cache"
+	// cacheStatusHit: the tile was already on disk when the request arrived.
+	cacheStatusHit = "HIT"
+	// cacheStatusHitCoalesced: another request rendered the tile while this one
+	// waited on the per-tile lock.
+	cacheStatusHitCoalesced = "HIT-COALESCED"
+	// cacheStatusMiss: this request rendered the tile.
+	cacheStatusMiss = "MISS"
+	// cacheStatusBypass: the cache was disabled, so the tile was rendered
+	// whether or not one was on disk.
+	cacheStatusBypass = "BYPASS"
+)
+
 // BeginShutdown releases long-lived handlers so they stop holding connections
 // open. It does not stop background work; call Stop for that.
 //
@@ -357,6 +408,13 @@ func (t *OnDemandTiles) Status() TileStatus {
 		Retry: RetryStatus{
 			PendingRetries: int(t.pendingRetries.Load()),
 			QueueCapacity:  cap(t.retryQueue),
+		},
+		Cache: CacheStatus{
+			Hits:          t.cacheHits.Load(),
+			HitsCoalesced: t.cacheHitsCoalesced.Load(),
+			Misses:        t.cacheMisses.Load(),
+			Stale:         t.cacheStale.Load(),
+			Bypasses:      t.cacheBypasses.Load(),
 		},
 	}
 
@@ -499,7 +557,7 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 	filename := coords.FileName(suffix, format.Ext())
 	fullPath := filepath.Join(t.cfg.TilesDir, filename)
 
-	if t.serveCachedTile(w, r, fullPath, coords, suffix) {
+	if t.serveCachedTile(w, r, fullPath, coords, suffix, cachePhaseInitial) {
 		return
 	}
 
@@ -533,8 +591,17 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 
 	t.extendWriteDeadline(w)
 
-	if t.serveCachedTile(w, r, fullPath, coords, suffix) {
+	if t.serveCachedTile(w, r, fullPath, coords, suffix, cachePhaseCoalesced) {
 		return
+	}
+
+	// Past this point the request renders the tile itself, so its outcome is
+	// settled: a miss, or a bypass when the cache was never consulted. Requests
+	// shed by admit() above never get here and are counted as neither.
+	if t.cfg.DisableCache {
+		t.cacheBypasses.Add(1)
+	} else {
+		t.cacheMisses.Add(1)
 	}
 
 	releaseSlot, ok := t.acquireRenderSlot(w, r, coords.String()+suffix)
@@ -601,6 +668,11 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if t.cfg.DisableCache {
+		w.Header().Set(cacheStatusHeader, cacheStatusBypass)
+	} else {
+		w.Header().Set(cacheStatusHeader, cacheStatusMiss)
+	}
 	t.serveTileFile(w, r, fullPath)
 }
 
@@ -616,6 +688,20 @@ func (t *OnDemandTiles) serveTileFile(w http.ResponseWriter, r *http.Request, fu
 	http.ServeFile(w, r, fullPath)
 }
 
+// cachePhase says which of serveTile's two cache checks is running. The two are
+// counted apart -- and the second one deliberately does not re-count staleness --
+// so a single request produces exactly one cache outcome.
+type cachePhase int
+
+const (
+	// cachePhaseInitial is the check made before admission control, on the tile
+	// as it was when the request arrived.
+	cachePhaseInitial cachePhase = iota
+	// cachePhaseCoalesced is the re-check made after the per-tile lock, where a
+	// hit means another request rendered the tile while this one waited.
+	cachePhaseCoalesced
+)
+
 // serveCachedTile serves an already-rendered tile from disk when caching is
 // enabled, the file is there and it still satisfies the freshness policy,
 // reporting whether it answered the request. Returning false hands the request
@@ -626,13 +712,26 @@ func (t *OnDemandTiles) serveCachedTile(
 	fullPath string,
 	coords tile.Coords,
 	suffix string,
+	phase cachePhase,
 ) bool {
 	if t.cfg.DisableCache || !fileExists(fullPath) {
 		return false
 	}
-	if !t.cachedTileIsFresh(coords, suffix) {
+	// Staleness is counted in the initial phase only. The post-lock re-check
+	// looks at the same file whenever no other request rendered it, so counting
+	// there too would report one stale tile as two.
+	if !t.cachedTileIsFresh(coords, suffix, phase == cachePhaseInitial) {
 		return false
 	}
+
+	if phase == cachePhaseCoalesced {
+		t.cacheHitsCoalesced.Add(1)
+		w.Header().Set(cacheStatusHeader, cacheStatusHitCoalesced)
+	} else {
+		t.cacheHits.Add(1)
+		w.Header().Set(cacheStatusHeader, cacheStatusHit)
+	}
+
 	t.serveTileFile(w, r, fullPath)
 	return true
 }
@@ -649,7 +748,11 @@ func (t *OnDemandTiles) serveCachedTile(
 // writes; here no render can write a stamp, so the same answer would re-render
 // every tile on every request, forever. The missing store is already reported
 // once at startup.
-func (t *OnDemandTiles) cachedTileIsFresh(coords tile.Coords, suffix string) bool {
+//
+// countStale asks for the "existed but was re-rendered anyway" counter to be
+// bumped; serveTile's post-lock re-check passes false so one stale tile is not
+// reported twice.
+func (t *OnDemandTiles) cachedTileIsFresh(coords tile.Coords, suffix string, countStale bool) bool {
 	policy := t.cfg.Freshness
 	if !policy.Enabled() {
 		return true
@@ -660,18 +763,28 @@ func (t *OnDemandTiles) cachedTileIsFresh(coords tile.Coords, suffix string) boo
 		return true
 	}
 
+	stale := func() bool {
+		if countStale {
+			t.cacheStale.Add(1)
+		}
+		return false
+	}
+
 	stamp, ok, err := store.Get(int(coords.Z), int(coords.X), int(coords.Y), suffix, t.imageFormat().String())
 	if err != nil {
 		t.log().Warn("stamp lookup failed; re-rendering the cached tile",
 			"coords", coords.String(), "error", err)
-		return false
+		return stale()
 	}
 	if !ok {
 		t.log().Debug("cached tile has no stamp; re-rendering", "coords", coords.String())
-		return false
+		return stale()
 	}
 
-	return policy.SatisfiedBy(stamp, t.cfg.RendererRev)
+	if !policy.SatisfiedBy(stamp, t.cfg.RendererRev) {
+		return stale()
+	}
+	return true
 }
 
 // acquireRenderSlot waits for a render semaphore slot, tracking the tile as
@@ -707,7 +820,7 @@ func (t *OnDemandTiles) fetchTileData(
 	w http.ResponseWriter,
 	coords tile.Coords,
 	suffix string,
-	gen *pipeline.Generator,
+	gen tileGenerator,
 ) (*types.TileData, bool) {
 	// A Natural-Earth-covered zoom has no Overpass data to fetch, and asking
 	// for it anyway would defeat the point: a z2 request would put a quarter of
@@ -803,15 +916,54 @@ func (t *OnDemandTiles) imageFormat() tileformat.Format {
 	return t.cfg.ImageFormat
 }
 
-func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) {
+// tileGenerator is the part of pipeline.Generator the server uses.
+//
+// It exists so the request path can be exercised without Mapnik: everything
+// above it -- the cache check, admission, the per-tile lock, the render
+// semaphore -- is server logic worth testing and benchmarking on its own, and
+// *pipeline.Generator drags in cgo rendering and an Overpass fetch. The
+// concrete generator satisfies it unchanged; tests substitute a stub through
+// newGenerator.
+type tileGenerator interface {
+	CalculateFetchBounds(coords tile.Coords) types.BoundingBox
+	GenerateWithData(
+		ctx context.Context,
+		coords tile.Coords,
+		force bool,
+		filenameSuffix string,
+		debugCtx *pipeline.DebugContext,
+		prefetched *types.TileData,
+	) (string, string, error)
+	StampStore() pipeline.StampStore
+}
+
+func (t *OnDemandTiles) getGenerator(tileSize int) (tileGenerator, error) {
 	if v, ok := t.gens.Load(tileSize); ok {
 		// The map only ever holds generators; the check keeps a corrupt entry
 		// from panicking a request handler.
-		if g, ok := v.(*pipeline.Generator); ok {
+		if g, ok := v.(tileGenerator); ok {
 			return g, nil
 		}
 	}
 
+	newGen := t.newGenerator
+	if newGen == nil {
+		newGen = t.newPipelineGenerator
+	}
+
+	g, err := newGen(tileSize)
+	if err != nil {
+		return nil, err
+	}
+
+	actual, _ := t.gens.LoadOrStore(tileSize, g)
+	if existing, ok := actual.(tileGenerator); ok {
+		return existing, nil
+	}
+	return g, nil
+}
+
+func (t *OnDemandTiles) newPipelineGenerator(tileSize int) (tileGenerator, error) {
 	g, err := pipeline.NewGenerator(
 		t.ds,
 		t.cfg.StylesDir,
@@ -836,11 +988,6 @@ func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) 
 	)
 	if err != nil {
 		return nil, err
-	}
-
-	actual, _ := t.gens.LoadOrStore(tileSize, g)
-	if existing, ok := actual.(*pipeline.Generator); ok {
-		return existing, nil
 	}
 	return g, nil
 }
@@ -1103,7 +1250,7 @@ func (t *OnDemandTiles) runRetryJob(job retryJob) bool {
 // retryFetchData resolves the tile data for a retry, fetching it when the job
 // carries none. It reports false when the fetch failed and the job should be
 // abandoned for this attempt.
-func (t *OnDemandTiles) retryFetchData(ctx context.Context, job retryJob, gen *pipeline.Generator) (*types.TileData, bool) {
+func (t *OnDemandTiles) retryFetchData(ctx context.Context, job retryJob, gen tileGenerator) (*types.TileData, bool) {
 	// Same bypass as fetchTileData: below the Natural Earth ceiling there is
 	// nothing to fetch, so a retry must not re-enter the queue either.
 	if job.data != nil || t.fetchQueue == nil || t.cfg.NaturalEarth.CoversZoom(int(job.coords.Z)) {

@@ -979,10 +979,13 @@ Three consequences:
 § 5.1's five bullets are answerable and answered above. Two neighbours are not.
 
 **§ 5.7 Data Update Pipeline stays open.** The update _design_ is closable — § 4
-gives the two-layer design, its measured cadences, and names its real gap. The
-_capability_ is not: there is no purge command, and no data-version stamp on a
-tile, so the design above cannot actually be implemented today without writing
-both.
+gives the two-layer design, its measured cadences, and names its real gap. Both
+capabilities it needed now exist: `watercolormap purge` and the per-tile data
+stamp shipped together (see
+[tile-stamps-and-purge.md](tile-stamps-and-purge.md)), and `serve` stamps its
+on-demand renders through the same store. What remains open is layer 1 — the
+diff-to-bbox step, which needs `osm2pgsql --expire-tiles` to handle tag-only
+edits.
 
 **§ 5.3 Multi-Zoom Generation is closed.** § 2 handed it a concrete plan
 (Natural Earth via `shape.input`, following the ocean pattern) and that plan has
@@ -990,19 +993,20 @@ since been carried out; see [zoom-levels.md](zoom-levels.md).
 
 Follow-ups this work surfaced, roughly in priority order:
 
-1. **Failover in `MultiOverpassDataSource`** (§ 1, defect 1) — try the next
-   matching server, and the nil-coverage fallback, before failing a tile. Blocks
-   any multi-day run. Warning on unreachable nested coverage boxes belongs in the
-   same change.
-2. **`User-Agent` in go-overpass** (§ 5) — one line; makes the public fallback real,
-   and makes 1 worth having.
+1. ~~**Failover in `MultiOverpassDataSource`** (§ 1, defect 1)~~ — **done.** Every
+   matching server is tried in order, the nil-coverage fallback included, and
+   shadowed coverage boxes warn at startup. See
+   [MULTI-SERVER-OVERPASS.md § Failover](MULTI-SERVER-OVERPASS.md#failover).
+2. ~~**`User-Agent` in go-overpass** (§ 5)~~ — **done**, as a `RoundTripper` in
+   `internal/datasource/useragent.go` rather than a patch to the dependency;
+   overridable via `overpass.user_agent`. The public fallback is real now.
 3. **Measure the Germany import** and replace § 1's estimated disk/RAM/init table
    with `du -sh` and a wall time.
-4. **Decide the `@2x` policy** (§ 3) — on-demand-only is 4× storage and 2× compute
-   from one line.
-5. **WebP encoding + serving** (§ 3) — done, but lossless: 1.21× measured, not the
-   9.2× a lossy encoder would give. The only thing that makes an
-   empty tile cheap.
+4. ~~**Decide the `@2x` policy** (§ 3)~~ — **decided and done:** on-demand only.
+   `runHiDPIBatch` is gone and `generate --bbox --hidpi` is now an error rather
+   than a silently smaller run. 4× storage and 2× compute recovered.
+5. ~~**WebP encoding + serving** (§ 3)~~ — **done**, but lossless: 1.21× measured,
+   not the 9.2× a lossy encoder would give. The lossy half is item 9 below.
 6. **Natural Earth for z0-5** (§ 2, § 3's T1) — **done.** The ocean pattern was
    copied as recommended: `NaturalEarthConfig` (`internal/renderer/naturalearth.go`)
    selects 110m below z3 and 50m up to z5, three styles under
@@ -1015,8 +1019,15 @@ Follow-ups this work surfaced, roughly in priority order:
    written by `generate` into `internal/tilestamp`; `watercolormap purge` selects
    on them. What remains of the update policy is the diff-to-bbox step, which is
    layer 1 above and needs `osm2pgsql --expire-tiles` to handle tag-only edits.
-8. **Streaming task enumeration in `worker.Pool`** (§ 1, defect 3) — not needed for
-   Germany, needed beyond it; preserve the `len(results) == len(tasks)` invariant.
+8. ~~**Streaming task enumeration in `worker.Pool`** (§ 1, defect 3)~~ — **done.**
+   `tile.TilesInBBoxSeq` plus `worker.Config.OnResult`/`RunStream`; `Pool.Run`
+   keeps the `len(results) == len(tasks)` invariant by ignoring `OnResult`
+   outright. `--checkpoint` builds on it (§ 1).
+
+9. **Lossy WebP** (§ 3) — the one item on this list still genuinely open, and the
+   largest storage lever left: 9.2× against the shipped encoder's 1.21×. Needs an
+   `Encoder` implementation and a decision about round-trip damage; every lossy Go
+   encoder reintroduces cgo.
 
 The 406 framing in `docs/local-overpass.md` and PLAN.md § 7.9's stale
 `generate` claim were both corrected in the change that introduced this document,

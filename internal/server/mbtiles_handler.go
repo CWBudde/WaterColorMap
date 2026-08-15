@@ -112,6 +112,9 @@ func (h *MBTilesHandler) serveTile(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", h.cacheControl)
 	w.Header().Set("Content-Type", h.contentType)
+	// Always a hit: this backend reads a finished tileset and has no generator,
+	// so there is no other outcome for it to report.
+	w.Header().Set(cacheStatusHeader, cacheStatusHit)
 
 	// Write the tile bytes verbatim
 	if _, err := w.Write(data); err != nil {

@@ -149,86 +149,38 @@ would need the shapefile, which is why it is not gated in yet.
 - [x] Plan storage requirements
 - [x] Design data update pipeline
 
-The five items above were inherited verbatim from `docs/goal.md`, a research brief written before
-the implementation existed and assuming PostGIS. They could not be closed as written: the code went
-Overpass-only, and `internal/cmd/datasource_config_test.go:83` actively asserts that `"postgis"` is
-rejected. They are answered instead against what the code is, staged honestly — concrete for
-Niedersachsen → Germany, with global coverage costed rather than planned.
-→ [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md)
-
-Three things the work measured that change decisions elsewhere in this plan:
-
-- **The Overpass fetch is ~71% of per-tile wall clock** (2.24 s of 3.16 s, z13, local instance,
-  6 runs, cross-checked against a pass-through proxy). 5.11's optimisation roadmap targets the
-  ~18% render slice. That does not make 5.11 wrong, but the source side is where a bulk run's
-  time actually goes — hence the response cache below.
-- **WebP q80 is a 9.2× reduction** — but see 5.1a: the encoder that shipped is _lossless_
-  (pure Go, no cgo) and measures **1.21×** on the same tiles. The lossy lever remains open.
-  Original measurement: (124 KB → 13.4 KB mean over 20 tiles, z5–z17; damage ~4/255
-  mean per channel, and the tiles are label-free by policy so there is no text to smear).
-  This is a larger storage lever than any choice of zoom ceiling.
-- **There are no cheap empty tiles in PNG, confirmed outside the city**: a Sahara tile with
-  _zero_ OSM features still costs 108 KB, and a mid-Pacific ocean tile 127 KB — above the Hanover
-  mean. The texture and noise fill every pixel. In WebP the empty tile drops to 6 KB.
-
-Landed alongside the document, because both are load-bearing for the workflow it recommends:
-
-- **MBTiles resume.** `--format=mbtiles` re-rendered everything on every run: the skip-existing
-  check stat'd the _folder_ path even when output went through a `TileWriter`. Now
-  `pipeline.TileProber` (an optional interface, so a writer that cannot answer simply omits it)
-  plus `mbtiles.Writer.HasTile`. Every failure mode degrades to _render_, never to _skip_ — a
-  false skip leaves a permanent hole, a false render costs seconds.
-- **On-disk Overpass response cache**, `internal/datasource/cache.go` — a caching
-  `http.RoundTripper` under the go-overpass client, **default off**. It sits there rather than
-  wrapping the datasource because `NewFetchQueue` takes `*OverpassDataSource` concretely and
-  `ondemand_tiles.go` type-asserts on it, so a decorator would silently strip `serve` of its
-  fetch queue. The key is a hash of endpoint + query text and contains **no tile identity**,
-  which is what keeps it a pure performance change under the world-position rule. It caches the
-  verbatim upstream bytes, so nothing downstream can observe it. One measured consequence:
-  `@2x` padding is computed in world pixels, so the 512px query is byte-identical to the 256px
-  one and an on-demand `@2x` render in `serve` reuses the base tile's cached response — while
-  that entry is still live — instead of refetching the metatile. (The `--hidpi` batch pass this
-  originally described is gone; see the on-demand item in 5.1a.)
-  Its `httptest` tests also discharge 7.6's "mocked-HTTP Overpass tests" item.
-
-**A finding worth acting on, since acted on**: the public `overpass-api.de` `406 Not Acceptable`
-long attributed to rate limiting was not rate limiting. The server rejects Go's default
-`User-Agent: Go-http-client/1.1`; the identical query from `curl` returns 200 in ~0.5 s.
-`go-overpass`'s `httpPost` never sets a UA. The fix did not need the dependency: a
-`RoundTripper` in `internal/datasource/useragent.go` sets the header below the client, so the
-public API is now a usable fallback for coverage gaps. See 5.1a's first item.
+The five items were inherited verbatim from `docs/goal.md`, a brief written before the
+implementation existed and assuming PostGIS. They could not be closed as written — the code went
+Overpass-only, and `internal/cmd/datasource_config_test.go:83` asserts that `"postgis"` is rejected
+— so they are answered against what the code is, staged concretely for Niedersachsen → Germany with
+global coverage costed rather than planned. The measurements that change decisions elsewhere in this
+plan (the Overpass fetch is ~71% of per-tile wall clock; there are no cheap empty tiles in PNG; WebP
+is 9.2× lossy but 1.21× with the lossless encoder that shipped), the two capabilities that landed
+with the document because the recommended workflow needs them (MBTiles resume via
+`pipeline.TileProber`, and the off-by-default on-disk Overpass response cache), and the finding that
+the public API's `406` was a rejected `User-Agent` rather than rate limiting, are all archived in
+→ [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md).
 
 ### 5.1a Follow-ups surfaced by the scaling analysis
 
 Filed rather than smuggled into the 5.1 work, in rough value order.
 
-- [x] **[P1]** Set a `User-Agent` on the Overpass client (see above). Done in
+- [x] **[P1]** Set a `User-Agent` on the Overpass client — the public API's `406` was the server
+      rejecting Go's default UA, not rate limiting
+      ([docs/data-scaling-strategy.md § 5](docs/data-scaling-strategy.md)). Done in
       `internal/datasource/useragent.go`, as a `RoundTripper` beside the existing limit and cache
       transports rather than as a patch to `go-overpass`: the request is built inside the client
       where the call site cannot reach it, and this layer also covers the per-server clients
       `MultiOverpassDataSource` builds, with no dependency release needed. Overridable via
       `overpass.user_agent`, globally or per server. The public API is now a usable fallback,
       which is what the routing recommendations assumed.
-- [x] **[P1]** WebP output end to end — `--image-format webp` on `generate` and `serve`, with
-      `internal/tileformat` owning format identity and encoding, and PNG kept as the default
-      everywhere.
-
-      **The 9.2× did not survive contact with the encoder.** That figure is _lossy_ q80; the
-      encoder chosen here is pure-Go `nativewebp`, which is VP8L, i.e. lossless. Re-measured over
-      the same 689 tiles: **1.21×** (122,326 B → 101,181 B), consistent z5–z17, never larger on
-      any tile, and ~4× slower to encode. The gap is the same fact as "no cheap empty tiles" —
-      the texture and noise fill every pixel, so there is nothing for a lossless codec to
-      collapse. `docs/data-scaling-strategy.md` § 3 is corrected in place rather than left to
-      mislead.
-
-      Lossless bought the absence of cgo: `GOOS=js` and the release matrix build with no build
-      tags. **The lossy lever is still open and still worth ~9×** — `Encoder` is an interface, so
-      it is one more implementation plus a decision about round-trip damage.
-
-      Two guards came with it, both of the "false skip leaves a permanent hole" family: `mbtiles`
-      refuses to reopen a non-empty tileset under a different format (it rewrites metadata on
-      open, and `HasTile` is format-blind), and `serve` 404s the extension it is not configured
-      for rather than serving one format's bytes under the other's name.
+- [x] **[P1]** WebP output end to end — `--image-format webp` on `generate` and `serve`,
+      `internal/tileformat` owning format identity and encoding, PNG still the default. The
+      shipped encoder is pure-Go `nativewebp` (VP8L, lossless), which measures **1.21×**, not the
+      9.2× of lossy q80 — lossless bought the absence of cgo, and the texture fills every pixel so
+      there is nothing to collapse. Measurements, the two "false skip" guards that came with it,
+      and the corrected § 3:
+      [docs/data-scaling-strategy.md § 3](docs/data-scaling-strategy.md).
 
 - [x] **[P2]** Overpass failover. Every matching server is now tried in order rather than the
       first coverage match being terminal, and the joined error names each one that failed.
@@ -242,32 +194,14 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       on demand, and since the `@2x` query is byte-identical to the base one, a warm response
       cache serves it with no upstream traffic. 4× storage and 2× compute recovered.
 - [x] **[P2]** Fetch per metatile band instead of per tile — `--band-fetch`, **off by default**.
-      `out geom` returns unclipped geometry, so a motorway crossing a block is transferred once
-      per tile; one query per block transfers it once. At the default 4×4, Germany's 237,424 z14
-      queries become ~15k.
-
-      **Two corrections to what this item said.** First, "must stop at z15" does not apply:
-      `buildTileQuery` picks its rules from the zoom alone, so every tile in a *same-zoom* band
-      emits identical query text apart from the bbox. The `landuse` → `building` switch at z16
-      invalidates reusing a **parent's** data for its children across zooms, which is a different
-      technique and not this one. (The line reference was also stale — those rules are at
-      `overpass.go:486-505`.) Second, 8×8 is not a safe band size: one padded z13 tile measured
-      ~3 MB, so a 64-tile block lands past the 64 MiB response cap. 4×4 is the default, and the
-      real guard is adaptive rather than a zoom ceiling — any band failure splits into quadrants
-      and retries, bottoming out at ordinary per-tile fetches, so a failing tile still fails as
-      itself with the error it always had.
-
-      A band's data is **sliced to each tile's own fetch bounds** before rendering. That is not an
-      optimisation: the renderer skips a zero-feature layer entirely, and handing a tile its
-      neighbours' features would flip absent layers into present-but-blank ones. The emptiness
-      check stays per tile too — an empty slice at z8–13 falls back to a real per-tile fetch
-      rather than approximating the policy. `TestBandFetchRendersIdenticalTiles` pins the result:
-      byte-identical output, on data that genuinely differs (9 features in the band, 6 in the
-      slice).
-
-      One hazard found and closed: multi-server routing matches on *intersection*, which at band
-      scale could answer sixteen tiles from a server holding data for one corner. Band routing
-      requires **containment** and splits otherwise.
+      `out geom` returns unclipped geometry, so one query per block transfers a crossing motorway
+      once instead of once per tile; at the default 4×4, Germany's 237,424 z14 queries become
+      ~15k. A band's data is sliced to each tile's own fetch bounds before rendering, so absent
+      layers stay absent rather than becoming present-but-blank. Why 8×8 is unsafe, why the guard
+      is adaptive quadrant-splitting rather than a zoom ceiling, why band routing requires
+      coverage **containment** where per-tile routing needs only intersection, and the two
+      corrections this item originally got wrong:
+      [docs/data-scaling-strategy.md § 4](docs/data-scaling-strategy.md).
 
 - [x] **[P3]** Sort features by OSM ID in `ExtractFeaturesFromOverpassResult`. Both element loops
       now walk `slices.Sorted(maps.Keys(…))` rather than the raw `map[int64]*…`, so the same tile
@@ -275,50 +209,34 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       where draw order flipped — which had put a tolerance floor under every PNG-level regression
       test. Rationale, measurements and the golden-update note:
       [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md).
-- [x] **[P3]** A tile purge command, and a source-data version stamp on rendered tiles. Both
-      landed together, because neither is useful alone: a stamp nothing reads answers no
-      question, and a purge with nothing to select on can only delete by geometry. `generate`
-      records per tile which OSM data it rendered from (Overpass's `osm3s.timestamp_osm_base`,
-      not the clock), where it came from and which binary produced it; `--stale-*` turns
+- [x] **[P3]** A tile purge command, and a source-data version stamp on rendered tiles. Neither is
+      useful alone — a stamp nothing reads answers no question, and a purge with nothing to select
+      on can only delete by geometry. `generate` and `serve` record per tile which OSM data it
+      rendered from (Overpass's `osm3s.timestamp_osm_base`, not the clock), `--stale-*` turns
       skip-existing into a freshness question, and `watercolormap purge` deletes by area, zoom,
-      suffix or staleness, dry run by default. The rationale — why the timestamp comes from the
-      response body, why the stamp rows are XYZ, and why the two commands' uncertainty
-      asymmetries point in opposite directions — is archived in
-      [docs/tile-stamps-and-purge.md](docs/tile-stamps-and-purge.md). `serve` stamps its
-      on-demand renders through the same store — one per server, shared by every tile size,
-      written through and flushed on shutdown — so a tileset filled in by browsing is
-      selectable by the same flags as a batch-generated one.
+      suffix or staleness, dry run by default. Why the timestamp comes from the response body, why
+      the stamp key carries the image format, why an older schema is refused rather than migrated,
+      and why the server treats an absent store differently from `generate`:
+      [docs/tile-stamps-and-purge.md](docs/tile-stamps-and-purge.md).
 
 - [x] **[P3]** Streaming tile enumeration and a checkpoint file. `generate`'s non-banded path no
-      longer materialises anything per tile: `tile.TilesInBBoxSeq` is the enumeration as an
-      `iter.Seq` (`TilesInBBox` is now that sequence collected, so every existing caller and test
-      is untouched), a producer goroutine feeds a `workers*2` channel selecting on `ctx.Done()`,
-      and `worker.Config.OnResult` takes the results one at a time so `RunStream` retains none of
-      them. Both halves mattered: the 317,618 buffered `Task` structs had a matching 317,618
-      `Result` structs one layer down.
-
-      **`Pool.Run`'s contract was the constraint, not an afterthought.** `len(results) ==
-      len(tasks)` is what `runTilePool` counts failures against, so `Run` ignores `OnResult`
-      outright rather than sharing the streaming path's bookkeeping. The banded path also keeps
-      the materialised tile list — it schedules by band, not by enumeration order, and that list
-      is the price of band grouping rather than of the pool. Cancellation accounting is the
-      property `reconcileBandResults` exists for, restated: the producer counts what it emitted
-      and everything unemitted is reported as failed, so an interrupted run still cannot exit 0
-      having rendered part of a tileset.
-
-      The checkpoint (`internal/checkpoint`, `--checkpoint`, off by default) stores a **watermark
-      over the enumeration**, not a tile set: the highest index such that every tile below it
-      succeeded, with a small frontier for out-of-order completions. A **failed tile blocks the
-      watermark** so a resume re-attempts it — the same rule as `tileExists`, never skip
-      something that might not be there. Resuming is then pure arithmetic: skip N entries, no
-      re-stat of hundreds of thousands of tiles, with skip-existing still guarding everything
-      actually emitted. Writes go through temp file + fsync + rename like `encodeTileAtomic`,
-      because a checkpoint truncated by the interrupt it exists to survive would be read by the
-      next run. A run-key mismatch (bbox, zoom range, format, image format, suffix) or a schema
-      mismatch is ignored loudly rather than reinterpreted, `--force` ignores it too, and
-      `--checkpoint` is refused together with `--band-fetch`, whose out-of-order scheduling gives
-      the index watermark no meaning. Rationale archived in
+      longer materialises anything per tile — `tile.TilesInBBoxSeq` is the enumeration as an
+      `iter.Seq`, a producer goroutine feeds a `workers*2` channel, and `worker.Config.OnResult`
+      takes results one at a time. The checkpoint (`internal/checkpoint`, `--checkpoint`, off by
+      default) stores a **watermark over the enumeration**, not a tile set, so resuming is
+      arithmetic rather than a re-stat of hundreds of thousands of tiles; a failed tile blocks the
+      watermark so a resume re-attempts it. Why `Pool.Run` keeps its `len(results) == len(tasks)`
+      contract, why the banded path still materialises its list, and why `--checkpoint` is refused
+      together with `--band-fetch`:
       [docs/data-scaling-strategy.md § 1](docs/data-scaling-strategy.md).
+
+- [ ] **[P2]** Lossy WebP encoding — still open, and still the largest storage lever here. The
+      shipped lossless encoder gives 1.21×; lossy q80 measured 9.2× on the same tiles, and it is
+      the only thing that makes an empty tile cheap (108 KB → 6 KB). `tileformat.Encoder` is an
+      interface, so this is one more implementation plus a decision about acceptable round-trip
+      damage (~4/255 mean per channel; the tiles are label-free by policy, so there is no text to
+      smear). The cost is that every lossy Go encoder needs cgo, which is what the current choice
+      bought its way out of — `GOOS=js` and the release matrix build with no build tags.
 
 ### 5.2 Parallel Tile Rendering
 
