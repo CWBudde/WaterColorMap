@@ -15,7 +15,7 @@ import (
 // would reproduce wastes the fetch budget, and doing it during shutdown holds
 // the process open past the point the caller gave up.
 //
-//   - Context cancellation and deadline expiry mean the *caller* is gone. Another
+//   - A cancelled or expired *caller* context means the caller is gone. Another
 //     server cannot help, and the request would fail on the same context anyway.
 //   - ErrResponseTooLarge is a property of the data and the configured cap, not
 //     of the server: the same bbox at the same zoom returns a similarly oversized
@@ -25,11 +25,20 @@ import (
 // ErrEmptyOverpassResponse, which validateFeatureResponse documents as the shape
 // of a silent upstream failure — is exactly what a healthy second server exists
 // to answer.
-func shouldTryNextServer(err error) bool {
+//
+// The caller-gone test reads ctx, deliberately, rather than the shape of err.
+// A per-request timeout — http.Client.Timeout, or any deadline the datasource
+// sets below the caller — surfaces as an error satisfying
+// errors.Is(err, context.DeadlineExceeded) while ctx itself is still perfectly
+// alive. Classifying on the error alone therefore abandoned failover precisely
+// when a server hung, which is the outage this whole mechanism exists for. ctx
+// answers the only question that matters here: does the caller still want an
+// answer?
+func shouldTryNextServer(ctx context.Context, err error) bool {
 	switch {
 	case err == nil:
 		return false
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+	case ctx.Err() != nil:
 		return false
 	case errors.Is(err, ErrResponseTooLarge):
 		return false

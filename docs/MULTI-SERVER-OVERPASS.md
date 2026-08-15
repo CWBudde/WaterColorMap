@@ -29,17 +29,45 @@ which is fatal to a long bulk run.
 Two failures are deliberately **not** retried elsewhere, because another server
 cannot help:
 
-| Failure                                       | Retried elsewhere? | Why                                                      |
-| --------------------------------------------- | ------------------ | -------------------------------------------------------- |
-| Connection refused, 5xx, 429, HTML error page | ✅                 | A healthy second server answers it                       |
-| Empty response at z8–13                       | ✅                 | This is what a silent upstream failure looks like        |
-| Context cancelled / deadline exceeded         | ❌                 | The caller is gone; another attempt only delays shutdown |
-| Response over the size cap                    | ❌                 | A property of the data and the cap, not of the server    |
+| Failure                                        | Retried elsewhere? | Why                                                      |
+| ---------------------------------------------- | ------------------ | -------------------------------------------------------- |
+| Connection refused, 5xx, 429, HTML error page  | ✅                 | A healthy second server answers it                       |
+| Server hangs until the HTTP client times out   | ✅                 | The server is the problem; that is what a fallback is for |
+| Empty response at z8–13                        | ✅                 | This is what a silent upstream failure looks like        |
+| The **caller's** context is cancelled or expired | ❌               | The caller is gone; another attempt only delays shutdown |
+| Response over the size cap                     | ❌                 | A property of the data and the cap, not of the server    |
+
+The caller-gone test reads the context, not the shape of the error, and the
+distinction is not academic: an `http.Client.Timeout` produces an error that
+satisfies `errors.Is(err, context.DeadlineExceeded)` while the caller is still
+waiting. Classifying on the error alone would abandon failover in precisely the
+outage — a hung server — that failover exists for.
 
 Every failover is logged at `warn` with the failing server, the tile and the
 error, so a run that degrades to the public API looks like a broken server
 rather than an unexplained slowdown. If every candidate fails, the returned error
 names them all.
+
+#### Empty responses under ocean rendering
+
+With ocean polygons configured, every server runs with `AllowEmptyResponses`,
+which turns the empty mid-zoom response into a *success* carrying no features —
+because over open sea it is the truth, and the ocean polygons still have to
+render. That would quietly undo the empty-response row above: a regional server
+failing the 200-with-no-data way over land would have its featureless tile
+accepted and baked in.
+
+So a featureless response is still worth a second opinion, but it is not treated
+as an error. The routing loop tries the next candidate, and returns the first
+empty result only if no candidate does better. The cost is at most one extra
+fetch per genuinely empty tile, and only where more than one server matches.
+
+#### Band fetches
+
+`FetchAreaData` routes on **containment** rather than intersection (a band box is
+up to sixteen tiles wide, so an overlap match could answer the whole band from a
+server holding one corner of it), but applies the same failure classification
+once a server is chosen.
 
 ## Configuration
 

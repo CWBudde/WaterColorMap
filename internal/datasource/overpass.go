@@ -730,9 +730,36 @@ func (mds *MultiOverpassDataSource) FetchTileDataWithBounds(ctx context.Context,
 	// server produced which failure.
 	errs := make([]error, 0, len(candidates))
 
+	// The first featureless-but-successful response, kept in case every
+	// candidate answers the same way. See the emptiness handling below.
+	var firstEmpty *types.TileData
+
 	for i, srv := range candidates {
 		data, err := srv.datasource.FetchTileDataWithBounds(ctx, tile, bounds)
 		if err == nil {
+			// With ocean rendering configured, every server runs with
+			// AllowEmptyResponses, which turns the empty mid-zoom response into
+			// a *success* carrying no features. Accepting the first one would
+			// have silently undone this method's empty-response failover: a
+			// regional server failing the 200-with-no-data way over land would
+			// bake a featureless tile rather than falling through to a healthy
+			// server.
+			//
+			// So an empty response is still worth a second opinion — but it is
+			// not an error, because over open sea it is the truth and the ocean
+			// polygons must render. It is remembered and returned if no
+			// candidate does better, which costs at most one extra fetch per
+			// genuinely empty tile and only where more than one server matches.
+			if validateFeatureResponse(data.Features, tile.Zoom) != nil && i < len(candidates)-1 {
+				if firstEmpty == nil {
+					firstEmpty = data
+				}
+				slog.Warn("Overpass server returned no features; trying the next one",
+					"server", srv.name, "tile", tile.String(),
+					"remaining", len(candidates)-i-1)
+				continue
+			}
+
 			if i > 0 {
 				slog.Info("Overpass request succeeded on a fallback server",
 					"server", srv.name, "tile", tile.String(), "after_failures", i)
@@ -742,7 +769,7 @@ func (mds *MultiOverpassDataSource) FetchTileDataWithBounds(ctx context.Context,
 
 		errs = append(errs, fmt.Errorf("[%s] %w", srv.name, err))
 
-		if !shouldTryNextServer(err) {
+		if !shouldTryNextServer(ctx, err) {
 			break
 		}
 		if i < len(candidates)-1 {
@@ -752,6 +779,13 @@ func (mds *MultiOverpassDataSource) FetchTileDataWithBounds(ctx context.Context,
 				"server", srv.name, "tile", tile.String(), "err", err,
 				"remaining", len(candidates)-i-1)
 		}
+	}
+
+	// Every candidate was empty (or the ones after it failed). An empty tile is
+	// a legitimate answer under ocean rendering, so return it rather than an
+	// error — this is the same result the pre-failover code produced.
+	if firstEmpty != nil {
+		return firstEmpty, nil
 	}
 
 	return nil, errors.Join(errs...)
@@ -798,7 +832,7 @@ func (mds *MultiOverpassDataSource) FetchAreaData(
 		// over-cap response is not a server's fault, and the next one answers
 		// it identically. An over-cap band is also exactly what the scheduler
 		// splits on, so retrying it elsewhere only delays the split.
-		if !shouldTryNextServer(err) {
+		if !shouldTryNextServer(ctx, err) {
 			break
 		}
 	}
