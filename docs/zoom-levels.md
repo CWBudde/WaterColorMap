@@ -30,6 +30,10 @@ extent** (`buildAreaQuery`, `overpass.go:356`).
 
 ¹ z5–7 gets forest and wood only; parks proper start at z8.
 
+The z0–5 half of that table is conditional: with the `natural-earth` block
+configured those zooms issue no Overpass query at all and render from
+shapefiles instead. See § 1's last subsection.
+
 Sources: `waterRules` (`overpass.go:462`), `parksRules` (`:479`), `roadsRules`
 (`:514`), `railroadsRules` (`:546`), `buildingsRules` (`:561`). The 38 golden
 files under `testdata/golden/overpass-query/` are two per zoom for z0–18: the
@@ -51,34 +55,106 @@ Two things in that table are easy to get wrong:
   — a band groups tiles of one zoom, which all emit identical query text apart
   from the bbox literal (`docs/data-scaling-strategy.md` § 4).
 
-### z0–5 is the gap
+### z0–5 comes from Natural Earth, not from Overpass
 
-At z0–4 the whole query is seven lines — coastline, `natural=water` (way and
-relation), `landuse=forest`, `natural=wood` (way and relation) — and z5 adds one
-more for motorways. Verify against `testdata/golden/overpass-query/z04.txt`.
+The z0–5 rows above describe rules that, with `natural-earth` configured, are
+never reached: no query is issued at those zooms at all.
 
-That is simultaneously **too much** — it asks a regional Overpass instance for
-every forest across a quarter of the planet — and **too little**: a world view
-needs generalised coastlines and country polygons that OSM does not carry.
+The rules are still worth reading for _why_. At z0–4 the whole query is seven
+lines — coastline, `natural=water` (way and relation), `landuse=forest`,
+`natural=wood` (way and relation) — and z5 adds one more for motorways; verify
+against `testdata/golden/overpass-query/z04.txt`. That is simultaneously **too
+much**, since it asks a regional Overpass instance for every forest across a
+quarter of the planet, and **too little**, since a world view needs generalised
+coastlines that OSM does not carry.
 
-The answer is Natural Earth via Mapnik's `shape` plugin, following the ocean
-pattern from 4.10. See PLAN.md § 5.3 and `docs/data-scaling-strategy.md` § 2 for
-the rationale. Until that lands, treat z0–5 as unsupported rather than merely
-slow.
+`NaturalEarthConfig.CoversZoom` (`internal/renderer/naturalearth.go:88`) is the
+single predicate every caller branches on, so none of them can disagree about
+where a tile's data comes from. It short-circuits the fetch in four places,
+because there are four ways to reach one:
+
+- the generator, before the datasource is touched (`renderLayersWithData`,
+  `internal/pipeline/generator.go:543`) — this is what covers `generate`,
+  `generate --bbox` and every batch run at once;
+- the band scheduler, which excludes covered zooms whatever `--band-min-zoom`
+  says (`internal/cmd/generate_bands.go:112`); a band fetch happens _before_ the
+  generator sees the tile, so it needs its own check;
+- `serve`'s on-demand fetch queue (`internal/server/ondemand_tiles.go:654`) and
+  its retry path (`:1042`).
+
+The tile still renders. Every layer except land is routed to the Natural Earth
+shapefiles instead (`renderLayer`, `internal/renderer/multipass.go:206`); land
+is excluded because it is the background fill rather than a feature layer, so it
+keeps painting at every zoom. The shapefiles go straight to Mapnik's `shape`
+plugin, which does its own bbox lookup against the `.index` sidecar
+(`renderShapefileLayer`, `multipass.go:337`) — the same mechanism as the ocean
+pass, and no geometry work on the Go side.
+
+Three datasets exist down there and no others (`naturalEarthDatasets`,
+`naturalearth.go:46`):
+
+| layer  | dataset                        | style                                   |
+| ------ | ------------------------------ | --------------------------------------- |
+| ocean  | `ne_*_ocean`                   | `assets/styles/naturalearth/ocean.xml`  |
+| water  | `ne_*_lakes`                   | `assets/styles/naturalearth/water.xml`  |
+| rivers | `ne_*_rivers_lake_centerlines` | `assets/styles/naturalearth/rivers.xml` |
+
+Roads, highways, railroads, buildings, civic and parks resolve to no shapefile
+and therefore render absent. No rule switches them off — they simply have no
+source down here, and **that absence _is_ the world-scale look**. Ocean is folded
+into water before masking exactly as it is at high zoom (`foldOceanIntoWater`,
+`internal/pipeline/generator.go:650`), so masks, textures and composite order
+downstream are unchanged.
+
+The scale switches once, at z3: 110m serves z0–2, 50m serves z3 upward
+(`DefaultNaturalEarthMidScaleMinZoom = 3`, `naturalearth.go:26`; `scaleForZoom`,
+`:93`). That is the same trade the ocean pass makes at `DefaultSimplifiedMaxZoom`,
+one scale step down — 110m is visibly coarse by z3, and 50m is detail nobody can
+resolve at z0–2. If the preferred scale is not on disk the other one stands in
+(`ShapefileForLayer`, `:127`), for the ocean pass's reason: a wrong-detail
+coastline beats an inverted one. A missing dataset costs its layer, not the tile.
+
+The ceiling is `natural-earth.max-zoom`, default 5
+(`DefaultNaturalEarthMaxZoom`, `naturalearth.go:18`;
+`internal/cmd/naturalearth_config.go:17`). Raising it is a real option and has
+been measured: a z6 Overpass query over a regional extract exceeds the 64 MiB
+response cap and fails the tile outright, so z6–z8 are not merely slow from OSM
+but unrenderable, and `max-zoom: 8` renders that band from Natural Earth
+instead. Whether that should be the default is unsettled, since 50m coastline is
+visibly generalised by z8 (`docs/data-scaling-strategy.md` § 2.1).
+
+**None of this is on unless you turn it on.** `Enabled` means only "a directory
+is configured" (`naturalearth.go:71`), the zero value is disabled, and with the
+`natural-earth` block absent every zoom goes through Overpass exactly as before
+— which is the behaviour the z0–5 query rules above describe. Run
+`just fetch-natural-earth` (~10 MB, both scales, `Justfile:267`) and point
+`natural-earth.dir` at the result. The path is checked at startup rather than at
+first use, so a mistyped directory — or one holding no `ne_*.shp` at all — fails
+the run before the first tile instead of quietly producing an empty world
+(`Validate`, `naturalearth.go:158`). An explicit `enabled: true` with no `dir` is
+likewise an error, not a silent fall back to Overpass
+(`naturalearth_config.go:45`).
 
 ## 2. Which dataset answers
 
-| zoom | source                               |
-| ---- | ------------------------------------ |
-| 0–5  | Overpass (wrong source — see above)  |
-| 6+   | Overpass                             |
-| 0–9  | ocean: **simplified** water polygons |
-| 10+  | ocean: **full** water polygons       |
+| zoom | source                                                                          |
+| ---- | ------------------------------------------------------------------------------- |
+| 0–5  | Natural Earth shapefiles — Overpass only if the `natural-earth` block is absent |
+| 6+   | Overpass                                                                        |
+| 0–5  | ocean: `ne_*_ocean`, when Natural Earth is enabled                              |
+| 6–9  | ocean: **simplified** water polygons                                            |
+| 10+  | ocean: **full** water polygons                                                  |
 
-The ocean pass is independent of the OSM query. OSM does map the boundary, as
-`natural=coastline` ways — that is what the water rules above fetch — but it
-carries no filled ocean polygon, so the open sea comes from the processed water
-polygons at
+The z0–5 ocean row is not a second pass laid over the first: below the ceiling
+the ocean layer is intercepted with every other feature layer
+(`multipass.go:206`) and never reaches `renderOceanLayer`, so the OSM water
+polygons are not consulted there at all. Configuring ocean rendering and leaving
+`natural-earth` out puts the water polygons back at z0–5.
+
+The ocean pass is otherwise independent of the OSM query. OSM does map the
+boundary, as `natural=coastline` ways — that is what the water rules above fetch
+— but it carries no filled ocean polygon, so the open sea comes from the
+processed water polygons at
 <https://osmdata.openstreetmap.de/data/water-polygons.html>. The switch is
 `DefaultSimplifiedMaxZoom = 9` (`internal/renderer/ocean.go:12`): above it the
 simplified coastline is visibly coarse, below it the full set costs I/O for
@@ -127,12 +203,18 @@ traffic when the response cache is on.
 **Band fetching stops below z10 by default.** `--band-min-zoom` defaults to 10
 (`internal/cmd/generate.go`): a single low-zoom tile already covers a huge area,
 so grouping tiles into a 4×4 block buys little and risks an oversized response.
+Natural-Earth-covered zooms are excluded on top of that, whatever
+`--band-min-zoom` is lowered to (`generate_bands.go:112`) — nothing stops the two
+ranges from overlapping, and a band fetch runs before the generator's own skip
+would apply.
 
 **On-demand retry backoff widens at low zoom.** The _base_ delay is 30 s at z≤7,
 15 s at z≤10, 5 s above; `retryDelay` then multiplies it by `1 << attempt`
 (`internal/server/ondemand_tiles.go:944`), so a z6 tile waits 30 s, 60 s, 120 s
 and a z14 one 5 s, 10 s, 20 s. A low-zoom tile's fetch is bigger and slower, so
-retrying it quickly only makes things worse.
+retrying it quickly only makes things worse. With Natural Earth enabled the
+z0–5 end of that scale goes unused: those tiles never enter the fetch queue, so
+there is no fetch to retry (`ondemand_tiles.go:1042`).
 
 **Style-level generalisation is Mapnik scale tiers, not geometry simplification.**
 There is no `simplify` or `generalize` anywhere in the Go code. Stroke widths and
@@ -187,12 +269,14 @@ if every coordinate is wanted at both scales.
 
 ## 5. Zoom limits in the code
 
-| limit                                 | value | where                                        |
-| ------------------------------------- | ----- | -------------------------------------------- |
-| highest zoom a coordinate may address | 22    | `tile.MaxZoom`, `internal/tile/coords.go:97` |
-| TileJSON advertised minimum           | 0     | `tilejson.DefaultMinZoom`                    |
-| TileJSON advertised maximum           | 18    | `tilejson.DefaultMaxZoom`                    |
-| single-tile `--zoom` default          | 13    | `internal/cmd/generate.go`                   |
+| limit                                       | value | where                                                                         |
+| ------------------------------------------- | ----- | ----------------------------------------------------------------------------- |
+| highest zoom a coordinate may address       | 22    | `tile.MaxZoom`, `internal/tile/coords.go:97`                                  |
+| TileJSON advertised minimum                 | 0     | `tilejson.DefaultMinZoom`                                                     |
+| TileJSON advertised maximum                 | 18    | `tilejson.DefaultMaxZoom`                                                     |
+| single-tile `--zoom` default                | 13    | `internal/cmd/generate.go`                                                    |
+| last zoom served from Natural Earth         | 5     | `renderer.DefaultNaturalEarthMaxZoom`, `internal/renderer/naturalearth.go:18` |
+| first zoom served from 50m rather than 110m | 3     | `DefaultNaturalEarthMidScaleMinZoom`, `naturalearth.go:26`                    |
 
 `tile.MaxZoom` is a resource policy, not a limit of the tile scheme: z23 is a
 perfectly well-defined grid, but this renderer has no data at that detail.
