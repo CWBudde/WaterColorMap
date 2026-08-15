@@ -1,0 +1,469 @@
+// Package tilestamp records, per rendered tile, which source data went into it.
+//
+// A tile file says nothing about the OpenStreetMap extract it was rendered
+// from: its mtime is when the bytes were written, which after a resumed or
+// re-run job has no relation to how old the data is. Without that, "re-render
+// everything whose data predates the last import" is not a question anything
+// can answer, so the only available refresh is "render it all again". The stamp
+// store is the sidecar that makes the question answerable, and it is what both
+// `generate`'s freshness checks and `purge`'s selectors read.
+//
+// The store lives next to the tiles it describes: an extra table inside the
+// same `.mbtiles` file, or a `stamps.db` beside `tilejson.json` in a tile
+// folder. Same schema, same code, one type — see Open.
+package tilestamp
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	_ "modernc.org/sqlite" // SQLite driver
+)
+
+// DefaultBatchSize is the number of stamps buffered before a flush. It matches
+// mbtiles.DefaultBatchSize for the same reason: a tile run puts one stamp per
+// tile, and committing each one on its own makes fsync, not rendering, the
+// thing the run waits for.
+const DefaultBatchSize = 100
+
+// FolderDBName is the stamp database written into a tile directory. It sits
+// beside tilejson.json so that everything describing a tile folder is in the
+// folder.
+const FolderDBName = "stamps.db"
+
+// tsLayout is how timestamps are stored: UTC, fixed width, nanosecond
+// precision.
+//
+// Fixed width is the point. The store compares timestamps in SQL (`WHERE
+// osm_base_ts < ?`), which is a string comparison, so the textual order has to
+// be the chronological one. Plain RFC3339 does not guarantee that — a value
+// with a fractional part sorts before the same second without one ('.' < 'Z'),
+// and a non-UTC offset compares against a different instant than it names.
+// Formatting every value the same width in UTC makes lexicographic and
+// chronological order the same thing. The result is still valid RFC3339, so
+// anything reading these rows outside this package can parse them normally.
+const tsLayout = "2006-01-02T15:04:05.000000000Z"
+
+// Stamp records the provenance of one rendered tile.
+//
+// Coordinates are XYZ — see the schema comment in createSchema.
+type Stamp struct {
+	// OSMBase is the source-data version: Overpass's
+	// osm3s.timestamp_osm_base, i.e. how current the OSM data behind this tile
+	// is. Zero when the fetch did not report one (a synthetic or offline
+	// source), which every consumer must treat as "unknown", never as "old".
+	OSMBase time.Time
+	// RenderedAt is when this tile was written.
+	RenderedAt time.Time
+	// Source identifies where the data came from — the Overpass endpoint that
+	// answered. Under multi-server routing that varies per tile, which is
+	// exactly why it is stored per tile.
+	Source string
+	// RendererRev identifies the binary that rendered the tile, so a renderer
+	// change can be turned into a re-render selector.
+	RendererRev string
+	// Suffix is "" for a base tile and "@2x" for its HiDPI sibling. They are
+	// separate tiles and get separate stamps.
+	Suffix string
+	Z      int
+	X      int
+	Y      int
+}
+
+// Filter selects stamps. The zero value matches every stamp; each field that is
+// set narrows the result further, and all set fields must hold.
+type Filter struct {
+	// DataBefore matches stamps whose OSMBase is strictly older. A stamp with
+	// no recorded OSMBase never matches: "unknown" is not "old", and this
+	// filter drives deletion.
+	DataBefore time.Time
+	// RenderedBefore matches stamps rendered strictly before this instant.
+	RenderedBefore time.Time
+	// Suffix, when non-nil, matches that suffix exactly — including the empty
+	// string, which is why this is a pointer rather than a plain string.
+	Suffix *string
+	// MinZoom and MaxZoom bound the zoom range inclusively. Pointers because
+	// zoom 0 is a real zoom level.
+	MinZoom *int
+	MaxZoom *int
+	// RendererRevNot matches stamps whose RendererRev differs from this value.
+	// Empty means no renderer filter.
+	RendererRevNot string
+}
+
+// Store is the stamp table, whichever file it lives in.
+type Store struct {
+	db        *sql.DB
+	path      string
+	batch     []Stamp
+	batchSize int
+	mu        sync.Mutex
+}
+
+// OpenMBTiles opens the stamp table inside an existing (or new) MBTiles file.
+//
+// Adding a table to an MBTiles database is safe. The spec requires certain
+// tables to be present, not that no others are, and every reader addresses
+// `tiles` and `metadata` by name. Nothing in internal/mbtiles touches this
+// table either: insertMetadata clears `metadata` only.
+func OpenMBTiles(path string) (*Store, error) {
+	return Open(path)
+}
+
+// OpenFolder opens the stamp database for a tile directory, creating it if
+// necessary. The directory itself must already exist.
+func OpenFolder(dir string) (*Store, error) {
+	return Open(filepath.Join(dir, FolderDBName))
+}
+
+// Open opens (or creates) a stamp store at an explicit path.
+func Open(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stamp database %q: %w", path, err)
+	}
+
+	// The same pragmas internal/mbtiles sets, for the same reason: the write
+	// pattern is a long run of small batched inserts.
+	pragmas := []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA temp_store = MEMORY",
+	}
+	for _, pragma := range pragmas {
+		if _, err := db.Exec(pragma); err != nil {
+			return nil, errors.Join(fmt.Errorf("failed to set pragma %q: %w", pragma, err), db.Close())
+		}
+	}
+
+	if err := createSchema(db); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+
+	return &Store{
+		db:        db,
+		path:      path,
+		batch:     make([]Stamp, 0, DefaultBatchSize),
+		batchSize: DefaultBatchSize,
+	}, nil
+}
+
+// createSchema creates the stamp table.
+//
+// The rows are XYZ, deliberately unlike the MBTiles `tiles` table next to them,
+// which stores TMS rows. Two conventions in one file is a trap, so this states
+// which one applies once, here, rather than leaving every call site to remember
+// it: mbtiles.tmsRow exists precisely because a missed y-flip does not fail —
+// it answers about the mirrored tile, which for a symmetric bounding box looks
+// entirely plausible. A stamp store is queried by humans running `purge` with a
+// bounding box in hand, and XYZ is what that bounding box, tile.Coords, the
+// pipeline and the tile server all speak. Converting at the one place that
+// needs TMS (the MBTiles delete path) is a conversion someone can see; a second
+// silent convention is not.
+func createSchema(db *sql.DB) error {
+	const schema = `
+		CREATE TABLE IF NOT EXISTS tile_stamp (
+			zoom_level INTEGER NOT NULL,
+			tile_column INTEGER NOT NULL,
+			tile_row INTEGER NOT NULL,
+			suffix TEXT NOT NULL DEFAULT '',
+			osm_base_ts TEXT,
+			rendered_at TEXT NOT NULL,
+			source TEXT,
+			renderer_rev TEXT,
+			PRIMARY KEY (zoom_level, tile_column, tile_row, suffix)
+		);
+	`
+
+	if _, err := db.Exec(schema); err != nil {
+		return fmt.Errorf("failed to create stamp schema: %w", err)
+	}
+	return nil
+}
+
+// Put records a stamp, replacing any previous one for the same tile. Writes are
+// buffered; see Flush.
+func (s *Store) Put(stamp Stamp) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Replace an unflushed stamp for the same tile rather than queueing a
+	// second one, so the buffer cannot grow with re-renders of one tile and
+	// Get cannot see a stale entry ahead of a fresh one.
+	for i := range s.batch {
+		if sameTile(s.batch[i], stamp) {
+			s.batch[i] = stamp
+			return nil
+		}
+	}
+
+	s.batch = append(s.batch, stamp)
+	if len(s.batch) >= s.batchSize {
+		return s.flushLocked()
+	}
+	return nil
+}
+
+// Get returns the stamp for a tile, and whether there is one.
+func (s *Store) Get(z, x, y int, suffix string) (Stamp, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Buffered stamps are not queryable yet, so the buffer answers first.
+	want := Stamp{Z: z, X: x, Y: y, Suffix: suffix}
+	for i := range s.batch {
+		if sameTile(s.batch[i], want) {
+			return s.batch[i], true, nil
+		}
+	}
+
+	const q = `SELECT zoom_level, tile_column, tile_row, suffix, osm_base_ts, rendered_at, source, renderer_rev
+		FROM tile_stamp WHERE zoom_level=? AND tile_column=? AND tile_row=? AND suffix=?`
+
+	row := s.db.QueryRow(q, z, x, y, suffix)
+	stamp, err := scanStamp(row)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Stamp{}, false, nil
+	case err != nil:
+		return Stamp{}, false, fmt.Errorf("failed to read stamp %d/%d/%d%s: %w", z, x, y, suffix, err)
+	}
+	return stamp, true, nil
+}
+
+// Delete removes the stamp for a tile. Removing a stamp that is not there is
+// not an error: the caller's intent ("this tile has no stamp") already holds.
+func (s *Store) Delete(z, x, y int, suffix string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Drop any buffered stamp first, or the flush would resurrect it.
+	want := Stamp{Z: z, X: x, Y: y, Suffix: suffix}
+	for i := range s.batch {
+		if sameTile(s.batch[i], want) {
+			s.batch = append(s.batch[:i], s.batch[i+1:]...)
+			break
+		}
+	}
+
+	const q = `DELETE FROM tile_stamp WHERE zoom_level=? AND tile_column=? AND tile_row=? AND suffix=?`
+	if _, err := s.db.Exec(q, z, x, y, suffix); err != nil {
+		return fmt.Errorf("failed to delete stamp %d/%d/%d%s: %w", z, x, y, suffix, err)
+	}
+	return nil
+}
+
+// Query returns every stamp matching the filter, ordered by zoom, column, row
+// and suffix so callers (and their tests) see a stable order.
+//
+// A slice rather than an iterator: the callers are the purge command, which has
+// to count and sample the selection before doing anything with it, and tests.
+// Neither streams, and a filtered selection is small next to the tileset.
+func (s *Store) Query(f Filter) ([]Stamp, error) {
+	if err := s.Flush(); err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	where, args := f.sql()
+	q := `SELECT zoom_level, tile_column, tile_row, suffix, osm_base_ts, rendered_at, source, renderer_rev
+		FROM tile_stamp` + where + ` ORDER BY zoom_level, tile_column, tile_row, suffix`
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query stamps: %w", err)
+	}
+	defer rows.Close() // nolint:errcheck
+
+	var out []Stamp
+	for rows.Next() {
+		stamp, err := scanStamp(rows)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan stamp: %w", err)
+		}
+		out = append(out, stamp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read stamps: %w", err)
+	}
+	return out, nil
+}
+
+// sql renders the filter as a WHERE clause and its arguments.
+func (f Filter) sql() (string, []any) {
+	var conds []string
+	var args []any
+
+	if !f.DataBefore.IsZero() {
+		// NULL and '' are "no source timestamp recorded". They must not match:
+		// this filter selects tiles to delete or re-render, and an unknown
+		// version is not evidence of an old one.
+		conds = append(conds, "(osm_base_ts IS NOT NULL AND osm_base_ts <> '' AND osm_base_ts < ?)")
+		args = append(args, formatTime(f.DataBefore))
+	}
+	if !f.RenderedBefore.IsZero() {
+		conds = append(conds, "rendered_at < ?")
+		args = append(args, formatTime(f.RenderedBefore))
+	}
+	if f.RendererRevNot != "" {
+		// COALESCE so that a row with no recorded revision counts as different
+		// from the running binary — which it is; nothing recorded it.
+		conds = append(conds, "COALESCE(renderer_rev, '') <> ?")
+		args = append(args, f.RendererRevNot)
+	}
+	if f.Suffix != nil {
+		conds = append(conds, "suffix = ?")
+		args = append(args, *f.Suffix)
+	}
+	if f.MinZoom != nil {
+		conds = append(conds, "zoom_level >= ?")
+		args = append(args, *f.MinZoom)
+	}
+	if f.MaxZoom != nil {
+		conds = append(conds, "zoom_level <= ?")
+		args = append(args, *f.MaxZoom)
+	}
+
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// Flush writes buffered stamps to the database.
+func (s *Store) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flushLocked()
+}
+
+// flushLocked writes buffered stamps. Must be called with the lock held.
+func (s *Store) flushLocked() (err error) {
+	if len(s.batch) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin stamp transaction: %w", err)
+	}
+	defer tx.Rollback() // nolint:errcheck
+
+	const q = `INSERT OR REPLACE INTO tile_stamp
+		(zoom_level, tile_column, tile_row, suffix, osm_base_ts, rendered_at, source, renderer_rev)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+
+	stmt, err := tx.Prepare(q)
+	if err != nil {
+		return fmt.Errorf("failed to prepare stamp insert: %w", err)
+	}
+	defer func() {
+		if closeErr := stmt.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to close stamp insert statement: %w", closeErr)
+		}
+	}()
+
+	for _, stamp := range s.batch {
+		var osmBase any
+		if !stamp.OSMBase.IsZero() {
+			osmBase = formatTime(stamp.OSMBase)
+		}
+		renderedAt := stamp.RenderedAt
+		if renderedAt.IsZero() {
+			// rendered_at is NOT NULL, and a stamp written by the pipeline
+			// always carries one. Defaulting rather than failing keeps a
+			// bookkeeping gap from becoming a tile-write failure.
+			renderedAt = time.Now()
+		}
+
+		if _, err := stmt.Exec(stamp.Z, stamp.X, stamp.Y, stamp.Suffix,
+			osmBase, formatTime(renderedAt), stamp.Source, stamp.RendererRev); err != nil {
+			return fmt.Errorf("failed to insert stamp %d/%d/%d%s: %w",
+				stamp.Z, stamp.X, stamp.Y, stamp.Suffix, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit stamps: %w", err)
+	}
+
+	s.batch = s.batch[:0]
+	return nil
+}
+
+// Close flushes and closes the store.
+func (s *Store) Close() error {
+	if err := s.Flush(); err != nil {
+		return errors.Join(err, s.db.Close())
+	}
+	if err := s.db.Close(); err != nil {
+		return fmt.Errorf("failed to close stamp database %q: %w", s.path, err)
+	}
+	return nil
+}
+
+// Path returns the file the store was opened from.
+func (s *Store) Path() string { return s.path }
+
+func sameTile(a, b Stamp) bool {
+	return a.Z == b.Z && a.X == b.X && a.Y == b.Y && a.Suffix == b.Suffix
+}
+
+// formatTime renders a timestamp in the storage layout; see tsLayout.
+func formatTime(t time.Time) string {
+	return t.UTC().Format(tsLayout)
+}
+
+// ParseTime parses a stored timestamp. It accepts any RFC3339 value, not only
+// this package's layout, so a row written by hand or by another tool is still
+// readable.
+func ParseTime(s string) (time.Time, error) {
+	return time.Parse(time.RFC3339, s)
+}
+
+// rowScanner is the part of *sql.Row and *sql.Rows scanStamp needs.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanStamp reads one row into a Stamp.
+//
+// An unparseable timestamp is returned as the zero time rather than as an
+// error. Callers treat a zero OSMBase as "unknown", and every uncertain case in
+// the freshness check renders and every uncertain case in purge is left alone —
+// so a corrupt cell degrades to "no information", which both of those handle,
+// instead of failing an entire run over one bad row.
+func scanStamp(row rowScanner) (Stamp, error) {
+	var (
+		stamp      Stamp
+		osmBase    sql.NullString
+		renderedAt string
+		source     sql.NullString
+		rev        sql.NullString
+	)
+
+	if err := row.Scan(&stamp.Z, &stamp.X, &stamp.Y, &stamp.Suffix,
+		&osmBase, &renderedAt, &source, &rev); err != nil {
+		return Stamp{}, err
+	}
+
+	if osmBase.Valid && osmBase.String != "" {
+		if t, err := ParseTime(osmBase.String); err == nil {
+			stamp.OSMBase = t
+		}
+	}
+	if t, err := ParseTime(renderedAt); err == nil {
+		stamp.RenderedAt = t
+	}
+	stamp.Source = source.String
+	stamp.RendererRev = rev.String
+
+	return stamp, nil
+}
