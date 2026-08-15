@@ -20,6 +20,11 @@ const (
 	// MBTiles 1.3 spec requires pbf tile_data to be gzip-compressed, while
 	// raster formats (png, jpg, webp) are stored verbatim.
 	FormatPBF = "pbf"
+
+	// FormatPNG is the metadata format value for PNG tiles, and the format
+	// assumed for a non-empty tileset that declares none — see
+	// checkFormatMatchesExistingTiles.
+	FormatPNG = "png"
 )
 
 // TileEntry represents a single tile to be written.
@@ -124,9 +129,10 @@ var ErrFormatMismatch = errors.New("mbtiles: tileset already contains tiles in a
 // its worst form.
 //
 // An empty tileset may change format freely: there is nothing to be
-// inconsistent with. --force deliberately does not bypass this, because force
-// means "render these tiles again", not "reinterpret the bytes already in the
-// file".
+// inconsistent with. A non-empty one that declares no format at all is treated
+// as PNG rather than waved through — see the comment at that branch. --force
+// deliberately does not bypass any of this, because force means "render these
+// tiles again", not "reinterpret the bytes already in the file".
 func checkFormatMatchesExistingTiles(db *sql.DB, format string) error {
 	if format == "" {
 		return nil
@@ -136,21 +142,40 @@ func checkFormatMatchesExistingTiles(db *sql.DB, format string) error {
 	err := db.QueryRow("SELECT value FROM metadata WHERE name = 'format'").Scan(&existing)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return nil // fresh file, or one that never recorded a format
+		existing = "" // fresh file, or one that never recorded a format
 	case err != nil:
 		return fmt.Errorf("failed to read existing tileset format: %w", err)
 	}
 
-	if existing == "" || strings.EqualFold(existing, format) {
+	if strings.EqualFold(existing, format) {
 		return nil
 	}
 
+	// An empty tileset may change format freely, so the tile count decides
+	// before the declaration does.
 	var hasTiles bool
 	if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM tiles LIMIT 1)").Scan(&hasTiles); err != nil {
 		return fmt.Errorf("failed to check for existing tiles: %w", err)
 	}
 	if !hasTiles {
 		return nil
+	}
+
+	// A non-empty tileset that never declared a format is not a free pass: the
+	// tiles are *some* format, and insertMetadata is about to label them with
+	// this run's. Every file this project has written declared one, so an
+	// undeclared non-empty set is a legacy or foreign database, and PNG is what
+	// those were before WebP existed. Treating it as PNG lets a PNG run resume
+	// normally and stops a WebP run from relabelling bytes it did not write.
+	if existing == "" {
+		if strings.EqualFold(format, FormatPNG) {
+			return nil
+		}
+		return fmt.Errorf("%w: it holds tiles but declares no format, so they are "+
+			"assumed to be %s, and this run writes %s. Write to a different file, "+
+			"or delete this one and start over "+
+			"(--force re-renders tiles, it does not convert them)",
+			ErrFormatMismatch, FormatPNG, format)
 	}
 
 	return fmt.Errorf("%w: it holds %s tiles, and this run writes %s. "+
