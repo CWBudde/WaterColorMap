@@ -723,6 +723,17 @@ func parseBBox(s string) ([4]float64, error) {
 	if bbox[1] >= bbox[3] {
 		return [4]float64{}, fmt.Errorf("minLat (%.4f) must be < maxLat (%.4f)", bbox[1], bbox[3])
 	}
+	// Reject bounds outside the world instead of letting the tile grid clamp
+	// them: a bbox like "181,-1,182,1" does not intersect the Web Mercator
+	// domain at all, and silently rendering the easternmost column instead of
+	// erroring hides a typo behind a plausible-looking batch run.
+	if bbox[0] < tile.MinLon || bbox[2] > tile.MaxLon {
+		return [4]float64{}, fmt.Errorf("longitude range (%.4f, %.4f) must lie within [%.0f, %.0f]",
+			bbox[0], bbox[2], tile.MinLon, tile.MaxLon)
+	}
+	if bbox[1] < -90 || bbox[3] > 90 {
+		return [4]float64{}, fmt.Errorf("latitude range (%.4f, %.4f) must lie within [-90, 90]", bbox[1], bbox[3])
+	}
 
 	return bbox, nil
 }

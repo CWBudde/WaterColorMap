@@ -316,3 +316,40 @@ func TestTilesInBBoxWholeWorld(t *testing.T) {
 		t.Errorf("TileCount(world, 0, 2) = %d, but TilesInBBox returned %d", count, len(tiles))
 	}
 }
+
+// TestTilesInBBoxOutOfWorldClipsToNearestEdge pins the geographic clamp.
+//
+// maptile.At snaps latitude to the Mercator cutoff but wraps longitude into an
+// unsigned X, so a bbox west of -180 used to land on large X values that the
+// grid clamp then pinned to the *easternmost* column. Clipping the corner points
+// to [-180, 180] first keeps them attached to the edge they are nearest to.
+func TestTilesInBBoxOutOfWorldClipsToNearestEdge(t *testing.T) {
+	tests := []struct {
+		name  string
+		bbox  [4]float64
+		wantX uint32
+	}{
+		{name: "west of the antimeridian", bbox: [4]float64{-181, -10, -180.5, 10}, wantX: 0},
+		{name: "east of the antimeridian", bbox: [4]float64{180.5, -1, 182, 1}, wantX: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tiles := TilesInBBox(tt.bbox, 2, 2)
+			if len(tiles) == 0 {
+				t.Fatalf("TilesInBBox(%v, 2, 2) returned no tiles", tt.bbox)
+			}
+			for _, c := range tiles {
+				if err := c.Validate(); err != nil {
+					t.Errorf("enumerated an impossible tile %s: %v", c, err)
+				}
+				if c.X != tt.wantX {
+					t.Errorf("tile %s: X = %d, want %d", c, c.X, tt.wantX)
+				}
+			}
+			if count := TileCount(tt.bbox, 2, 2); count != len(tiles) {
+				t.Errorf("TileCount = %d, but TilesInBBox returned %d", count, len(tiles))
+			}
+		})
+	}
+}

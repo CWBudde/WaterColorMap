@@ -205,6 +205,41 @@ func TileRangeFromBounds(minZ, maxZ uint32, bounds [4]float64) TileRange {
 	}
 }
 
+// WorldBounds is the WGS84 extent addressable by the Web Mercator tile grid.
+// Longitudes are the full domain; latitudes stop at the Mercator cutoff, beyond
+// which the projection runs to infinity.
+const (
+	MinLon = -180.0
+	MaxLon = 180.0
+	MinLat = -85.05112878
+	MaxLat = 85.05112878
+)
+
+// clampToWorld pulls a point into the addressable Web Mercator extent.
+//
+// maptile.At snaps latitude to the Mercator cutoff but leaves longitude alone,
+// so a point at lon=-181 wraps around to a large unsigned X that then looks like
+// the *easternmost* column after the grid clamp below. Clipping the geographic
+// coordinate first keeps an out-of-world corner attached to the edge it is
+// actually nearest to. Callers that must reject such input outright (the CLI's
+// bbox parser) validate before ever getting here.
+func clampToWorld(p orb.Point) orb.Point {
+	lon, lat := p[0], p[1]
+	switch {
+	case lon < MinLon:
+		lon = MinLon
+	case lon > MaxLon:
+		lon = MaxLon
+	}
+	switch {
+	case lat < MinLat:
+		lat = MinLat
+	case lat > MaxLat:
+		lat = MaxLat
+	}
+	return orb.Point{lon, lat}
+}
+
 // tileIndexRange returns the inclusive x/y tile index range covering two corner
 // points at one zoom, ordered and clamped to the 2^z grid.
 //
@@ -215,8 +250,8 @@ func TileRangeFromBounds(minZ, maxZ uint32, bounds [4]float64) TileRange {
 // below go through here so the count and the list cannot disagree.
 func tileIndexRange(minPoint, maxPoint orb.Point, z int) (minX, maxX, minY, maxY uint32) {
 	zoom := maptile.Zoom(z)
-	minTile := maptile.At(minPoint, zoom)
-	maxTile := maptile.At(maxPoint, zoom)
+	minTile := maptile.At(clampToWorld(minPoint), zoom)
+	maxTile := maptile.At(clampToWorld(maxPoint), zoom)
 
 	// Ensure min/max are correctly ordered (Y is inverted in TMS)
 	minX, maxX = minTile.X, maxTile.X
