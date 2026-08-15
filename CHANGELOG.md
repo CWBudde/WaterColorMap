@@ -106,6 +106,18 @@
   and its base show the same road classes at the same ground width. The `prebuild-hannover` and
   `prebuild` Justfile recipes dropped the flag accordingly.
 
+### Performance
+
+- **mask/watercolor:** run the per-layer mask pipeline over pooled scratch buffers instead of
+  allocating a full-size image per stage. Every mask kernel gained an `*Into` variant writing a
+  caller-owned destination, and `processMask` now keeps one allocation (the final mask, which the
+  land path hands on to parks) where it used to make four to six. `BenchmarkFullPipeline`:
+  5.85 MiB → 2.19 MiB per tile (−62%) in 38 allocations instead of 143 (−73%), with bit-identical
+  output. Wall time is unchanged within measurement noise — the payoff is GC pace under the
+  concurrent tile server. Closes PLAN.md § 5.11.3; see
+  `docs/performance/allocation-optimization.md` for the invariants that keep recycled buffers from
+  leaking stale pixels.
+
 ### Documentation
 
 - **scaling:** add `docs/data-scaling-strategy.md`, closing PLAN.md § 5.1. Measured rather than

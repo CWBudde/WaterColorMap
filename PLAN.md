@@ -14,6 +14,8 @@ This document outlines the complete implementation plan for creating Stamen Wate
 >   — 4.10 (ocean/coastline) is complete; its record stays below
 > - Phase 5.11.2 (blur rewrite: measurements, rationale, rescaled sigmas) →
 >   [docs/performance/blur-optimization.md](docs/performance/blur-optimization.md)
+> - Phase 5.11.3 (buffer reuse: measurements, invariants, `*Into` conventions) →
+>   [docs/performance/allocation-optimization.md](docs/performance/allocation-optimization.md)
 > - Phase 7.1/7.2/7.3/7.7 (build, tile-server hardening, code quality) →
 >   [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
 
@@ -387,11 +389,15 @@ correctly for tag-only edits still needs the node-location store.
       so treat them as historical)
 - [x] Optimize Perlin noise generation (eliminated 6-7x redundant allocations)
 
-**Current Performance** (256x256 tile, 5 layers):
+**Current Performance** (`BenchmarkFullPipeline`, 256x256 tile, 5 layers, after 5.11.3):
 
-- Time per tile: ~86ms
-- Memory per tile: ~29MB
-- Allocations: 1.3M
+- Memory per tile: ~2.2MB
+- Allocations: ~38
+
+The "~86ms / 29MB / 1.3M allocations" that stood here came from the same stale profile
+as the findings below and had already been invalidated twice, by 5.11.2 and 5.11.3.
+Time per tile is not quoted because the development machine's run-to-run spread is
+wider than any change measured against it; use `benchstat` over interleaved runs.
 
 **Key Findings** (historical, from the stale profile):
 
@@ -423,17 +429,34 @@ nominal sigma, so tiles keep their look while sigma now means blur width in pixe
 Full measurements, rationale and the remaining `BoxCols` vectorisation follow-up →
 [docs/performance/blur-optimization.md](docs/performance/blur-optimization.md)
 
-#### 5.11.3 Memory Allocation Optimization 🟡 HIGH PRIORITY
+#### 5.11.3 Memory Allocation Optimization ✅ COMPLETE
 
-**Target**: Reduce per-tile memory from 29MB → <20MB (Expected gain: 10-15% speedup via GC reduction)
+**Result**: `BenchmarkFullPipeline` allocates 2.19 MiB per tile instead of 5.85 MiB
+(-62%) in 38 allocations instead of 143 (-73%), with bit-identical output.
 
-- [ ] Implement buffer pool for common image sizes (256x256, 512x512)
-- [ ] Add buffer reuse in blur operations (avoid creating new buffers per call)
-- [ ] Profile memory allocations after buffer pooling
-- [ ] Measure GC impact reduction
-- [ ] Document buffer pool usage patterns
+Every kernel in `internal/mask` gained an `*Into` variant writing a caller-owned
+destination, and the per-layer mask pipeline now runs over a pooled `maskScratch`
+instead of allocating a full-size `*image.Gray` per stage and keeping one. Two
+allocations per layer remain and are irreducible: the final mask (the land path hands
+it to parks) and the painted layer (the compositor holds them all at once).
 
-**Context**: gift library creates 64-bit RGBA buffers (745MB allocated per benchmark), 4x overhead vs 8-bit buffers. Pooling and reuse can dramatically reduce allocation pressure.
+The checklist that used to stand here was written against a stale picture and was not
+followed literally. It asked for a pool keyed on "common image sizes (256x256,
+512x512)" and blamed the `gift` library's 64-bit RGBA buffers — but 5.11.2 already
+replaced `gift` with `internal/mask/blurkernel` on `[]uint8` (it is test-only now),
+and production never processes a 256² image: `RequiredPaddingPx` puts a 256 tile on a
+384² metatile. A size-keyed pool also saves nothing until destination-taking variants
+exist. The pooled-context idiom already used three times in the tree was extended
+instead.
+
+Note also that wall time did not measurably improve, and the "10-15% speedup via GC
+reduction" this section promised was never achievable at this scale. The payoff is GC
+pace under the concurrent tile server. The remaining CPU cost is per-pixel accessors,
+which is 5.11.4's job — every kernel now has a destination-taking form, so 5.11.4 can
+rewrite loop bodies without touching a call site.
+
+Measurements, the four buffer-reuse invariants and the `*Into` conventions →
+[docs/performance/allocation-optimization.md](docs/performance/allocation-optimization.md)
 
 #### 5.11.4 Pixel Access Optimization 🟡 HIGH PRIORITY
 

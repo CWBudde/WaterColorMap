@@ -76,6 +76,10 @@ outstanding.
 - [docs/performance/blur-optimization.md](docs/performance/blur-optimization.md) —
   the blur rewrite: kernel selection, AVX2 path, RMSE budgets, and **why the
   default sigmas were rescaled**. Read before changing any blur sigma.
+- [docs/performance/allocation-optimization.md](docs/performance/allocation-optimization.md) —
+  the buffer-reuse work: the pooled-context idiom, the `*Into` conventions, and the
+  four invariants that keep recycled buffers from leaking stale pixels. Read before
+  adding a mask kernel or touching `maskScratch` / `ProcessorContext`.
 - [docs/watercolor-tuning.md](docs/watercolor-tuning.md) — the `watercolor:` config
   block: every knob, which of the five pipeline stages it belongs to, and the
   current defaults. Supersedes the stale parameter list in `3.6`.
