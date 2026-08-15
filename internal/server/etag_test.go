@@ -127,6 +127,73 @@ func TestCacheControlOverrideStillWins(t *testing.T) {
 	}
 }
 
+// The MBTiles backend wrote raw bytes with no validator at all, so a client had
+// no way to revalidate and every request cost a full body. A row has no mtime,
+// so the bytes themselves are the only honest validator.
+func TestMBTilesConditionalRequestReturns304(t *testing.T) {
+	const z, x, y = 13, 4317, 2692
+
+	dbPath, want := newTestMBTiles(t, z, x, y)
+
+	h, err := NewMBTilesHandler(MBTilesConfig{MBTilesPath: dbPath, CacheControl: "no-cache"}, nil)
+	if err != nil {
+		t.Fatalf("NewMBTilesHandler: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	const url = "/tiles/z13_x4317_y2692.png"
+
+	first := httptest.NewRecorder()
+	h.Handler().ServeHTTP(first, httptest.NewRequest(http.MethodGet, url, nil))
+	if first.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", first.Code)
+	}
+	if got := first.Body.Bytes(); string(got) != string(want) {
+		t.Fatal("the stored tile bytes were not served verbatim")
+	}
+
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag on the MBTiles response")
+	}
+	// A row has no modification time; claiming one would be a guess.
+	if got := first.Header().Get("Last-Modified"); got != "" {
+		t.Errorf("Last-Modified = %q, want none — a row has no mtime", got)
+	}
+
+	second := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("If-None-Match", etag)
+	h.Handler().ServeHTTP(second, req)
+
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304 (body %q)", second.Code, second.Body.String())
+	}
+	if second.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty on a 304", second.Body.String())
+	}
+
+	// The same row must validate the same way twice, or every request would
+	// re-download a tile that never changed.
+	third := httptest.NewRecorder()
+	h.Handler().ServeHTTP(third, httptest.NewRequest(http.MethodGet, url, nil))
+	if got := third.Header().Get("ETag"); got != etag {
+		t.Errorf("ETag = %q on a second read, want the stable %q", got, etag)
+	}
+}
+
+func TestRowETagDistinguishesContent(t *testing.T) {
+	if rowETag([]byte("one")) == rowETag([]byte("two")) {
+		t.Error("two different tiles share an ETag")
+	}
+	// Two separate slices with the same content, so the hash is what is being
+	// compared rather than the identity of one expression.
+	first, second := []byte("same"), []byte("same")
+	if rowETag(first) != rowETag(second) {
+		t.Error("the same bytes produced two ETags")
+	}
+}
+
 // An error response must never be cached or validated: a cached 404 pins a tile
 // broken long after the render that would have fixed it.
 func TestErrorResponsesCarryNoValidator(t *testing.T) {

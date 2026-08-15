@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
 	"github.com/cwbudde/watercolormap/internal/tileformat"
@@ -112,14 +115,31 @@ func (h *MBTilesHandler) serveTile(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", h.cacheControl)
 	w.Header().Set("Content-Type", h.contentType)
+	w.Header().Set("ETag", rowETag(data))
 	// Always a hit: this backend reads a finished tileset and has no generator,
 	// so there is no other outcome for it to report.
 	w.Header().Set(cacheStatusHeader, cacheStatusHit)
 
-	// Write the tile bytes verbatim
-	if _, err := w.Write(data); err != nil {
-		h.log().Error("Failed to write response", "error", err)
-	}
+	// ServeContent rather than a bare Write, so a client holding the tile is
+	// answered with a 304 instead of the bytes. The zero modtime suppresses
+	// Last-Modified, which is right: a row has no modification time of its own,
+	// and the database file's would be wrong the moment `purge` writes to it
+	// underneath this open handle.
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(data))
+}
+
+// rowETag identifies a tile row by its length and an FNV-1a hash of its bytes.
+//
+// Unlike the folder backend there is no mtime to key on, so the content is the
+// only honest validator. Hashing is affordable here because the request has
+// already paid for a SQLite read and the bytes are in hand: ~10-30 µs over a
+// typical tile, in exchange for skipping the body on every revalidation.
+//
+// Strong, because the body is those bytes exactly.
+func rowETag(data []byte) string {
+	h := fnv.New64a()
+	_, _ = h.Write(data) // hash.Hash never returns an error
+	return fmt.Sprintf(`"%x-%x"`, len(data), h.Sum64())
 }
 
 // Close closes the MBTiles reader.
