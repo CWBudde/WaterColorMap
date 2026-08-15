@@ -12,10 +12,20 @@ import (
 )
 
 // Config keys for the freshness flags. Per-command section, so underscores.
+//
+// `serve` has its own set rather than reading `generate`'s: the two commands
+// are configured independently everywhere else, and a staleness cutoff meant
+// for an overnight batch run silently re-rendering tiles under a live server
+// would be a surprise. The flags, their parsing and their meaning are shared —
+// see freshnessPolicyFromKeys.
 const (
 	staleDataBeforeKey     = "generate.stale_data_before"
 	staleRenderedBeforeKey = "generate.stale_rendered_before"
 	staleRendererRevKey    = "generate.stale_renderer_rev"
+
+	serveStaleDataBeforeKey     = "serve.stale_data_before"
+	serveStaleRenderedBeforeKey = "serve.stale_rendered_before"
+	serveStaleRendererRevKey    = "serve.stale_renderer_rev"
 )
 
 // rendererRev identifies this binary in the stamps it writes.
@@ -36,14 +46,30 @@ func rendererRev() string {
 // malformed timestamp fails here, before the first tile: a run that silently
 // ignored it would report success having re-rendered nothing.
 func freshnessPolicyFromConfig() (pipeline.FreshnessPolicy, error) {
+	return freshnessPolicyFromKeys(
+		staleDataBeforeKey, staleRenderedBeforeKey, staleRendererRevKey)
+}
+
+// serveFreshnessPolicyFromConfig reads `serve`'s copy of the same flags. An
+// on-demand server skips a tile it already has; with a policy set it re-renders
+// the ones whose stamps say they are out of date, which is the same question
+// `generate --stale-*` answers, asked one tile at a time.
+func serveFreshnessPolicyFromConfig() (pipeline.FreshnessPolicy, error) {
+	return freshnessPolicyFromKeys(
+		serveStaleDataBeforeKey, serveStaleRenderedBeforeKey, serveStaleRendererRevKey)
+}
+
+// freshnessPolicyFromKeys is the shared parser behind both of the above, so the
+// two commands cannot come to disagree about what a cutoff means.
+func freshnessPolicyFromKeys(dataKey, renderedKey, revKey string) (pipeline.FreshnessPolicy, error) {
 	var policy pipeline.FreshnessPolicy
 
 	for _, f := range []struct {
 		dst *time.Time
 		key string
 	}{
-		{&policy.DataBefore, staleDataBeforeKey},
-		{&policy.RenderedBefore, staleRenderedBeforeKey},
+		{&policy.DataBefore, dataKey},
+		{&policy.RenderedBefore, renderedKey},
 	} {
 		raw := viper.GetString(f.key)
 		if raw == "" {
@@ -58,9 +84,49 @@ func freshnessPolicyFromConfig() (pipeline.FreshnessPolicy, error) {
 		*f.dst = parsed
 	}
 
-	policy.RendererRev = viper.GetBool(staleRendererRevKey)
+	policy.RendererRev = viper.GetBool(revKey)
 
 	return policy, nil
+}
+
+// openServeStampStore opens the stamp store for a folder-backed serve run.
+//
+// Failure is a warning, not a startup error: stamps are bookkeeping about the
+// tiles, and a server that refuses to start because it cannot write a sidecar
+// would trade a whole tile service for a provenance record. That is the same
+// stance the rest of the codebase takes on optional stores — a stamp that
+// cannot be written is logged and the tile is still produced. The caller then
+// serves unstamped, which is exactly what it did before stamps existed.
+//
+// Batching is turned off (size 1). The batch exists so a run writing hundreds
+// of tiles a minute does not make fsync the thing it waits for; a server
+// renders a tile now and then and stays up for weeks, so a buffer would hold
+// stamps in memory indefinitely and lose all of them to a crash. Writing each
+// stamp as it is made costs one small WAL transaction next to a Mapnik render
+// and an image write, and leaves no window at all.
+func openServeStampStore(tilesDir string) *tilestamp.Store {
+	if tilesDir == "" {
+		return nil
+	}
+
+	if err := os.MkdirAll(tilesDir, 0o755); err != nil {
+		logger.Warn("Serving without tile stamps: the tile directory is not usable",
+			"tiles_dir", tilesDir, "error", err)
+		return nil
+	}
+
+	store, err := tilestamp.OpenFolder(tilesDir)
+	if err != nil {
+		logger.Warn("Serving without tile stamps: the stamp store could not be opened",
+			"tiles_dir", tilesDir, "error", err)
+		return nil
+	}
+
+	if err := store.SetBatchSize(1); err != nil {
+		logger.Warn("Failed to make the tile stamp store write through; "+
+			"stamps may be lost if the server is killed", "error", err)
+	}
+	return store
 }
 
 // openStampStore opens the stamp store belonging to this run's output, or

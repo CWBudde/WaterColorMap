@@ -177,8 +177,8 @@ func TestPurgeFolderDataBeforeSelection(t *testing.T) {
 	stale := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	fresh := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	for _, s := range []tilestamp.Stamp{
-		{Z: 13, X: 1, Y: 1, OSMBase: stale, RenderedAt: stale},
-		{Z: 13, X: 2, Y: 2, OSMBase: fresh, RenderedAt: fresh},
+		{Z: 13, X: 1, Y: 1, Format: "png", OSMBase: stale, RenderedAt: stale},
+		{Z: 13, X: 2, Y: 2, Format: "png", OSMBase: fresh, RenderedAt: fresh},
 	} {
 		if err := store.Put(s); err != nil {
 			t.Fatalf("Put: %v", err)
@@ -219,10 +219,10 @@ func TestPurgeFolderDataBeforeSelection(t *testing.T) {
 	}
 	defer store.Close() // nolint:errcheck
 
-	if _, ok, err := store.Get(13, 1, 1, ""); err != nil || ok {
+	if _, ok, err := store.Get(13, 1, 1, "", "png"); err != nil || ok {
 		t.Errorf("stamp for the deleted tile still present (ok=%v, err=%v)", ok, err)
 	}
-	if _, ok, err := store.Get(13, 2, 2, ""); err != nil || !ok {
+	if _, ok, err := store.Get(13, 2, 2, "", "png"); err != nil || !ok {
 		t.Errorf("stamp for the surviving tile was removed (ok=%v, err=%v)", ok, err)
 	}
 }
@@ -478,5 +478,93 @@ func TestPurgeFolderDryRunCreatesNoStampStore(t *testing.T) {
 	}
 	if got := remainingTiles(t, dir); len(got) != 1 {
 		t.Errorf("remaining tiles = %v, want the tile untouched", got)
+	}
+}
+
+// A folder can hold z13_x1_y1.png and z13_x1_y1.webp side by side — two files,
+// rendered at two different times from possibly different data, and purge walks
+// exactly such folders. Each must be selected by its own stamp.
+//
+// This is the regression test for the stamp key: keyed by (z,x,y,suffix) alone,
+// the second render overwrote the first tile's provenance, so a staleness purge
+// deleted the wrong file — or deleted both, or neither, depending on which
+// format was written last.
+func TestPurgeFolderMixedFormatsUseTheirOwnStamps(t *testing.T) {
+	dir := seedTilesDir(t, []string{
+		"z13_x1_y1.png",  // stale
+		"z13_x1_y1.webp", // fresh, same coordinate
+		"z13_x2_y2.webp", // stale
+		"z13_x2_y2.png",  // fresh, same coordinate
+	})
+
+	store, err := tilestamp.OpenFolder(dir)
+	if err != nil {
+		t.Fatalf("OpenFolder: %v", err)
+	}
+	stale := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	fresh := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	for _, s := range []tilestamp.Stamp{
+		{Z: 13, X: 1, Y: 1, Format: "png", OSMBase: stale, RenderedAt: stale},
+		{Z: 13, X: 1, Y: 1, Format: "webp", OSMBase: fresh, RenderedAt: fresh},
+		{Z: 13, X: 2, Y: 2, Format: "webp", OSMBase: stale, RenderedAt: stale},
+		{Z: 13, X: 2, Y: 2, Format: "png", OSMBase: fresh, RenderedAt: fresh},
+	} {
+		if err := store.Put(s); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	withCommandFlags(t, map[string]any{
+		purgeTilesDirKey:    dir,
+		purgeMBTilesKey:     "",
+		purgeBBoxKey:        "",
+		purgeZoomMinKey:     -1,
+		purgeZoomMaxKey:     -1,
+		purgeSuffixKey:      "any",
+		purgeDataBeforeKey:  "2026-06-01T00:00:00Z",
+		purgeRenderedBefore: "",
+		purgeRendererRevNot: "",
+		purgeYesKey:         true,
+		purgeCompactKey:     false,
+	})
+
+	if err := runPurge(purgeCmd, nil); err != nil {
+		t.Fatalf("runPurge: %v", err)
+	}
+
+	want := []string{"z13_x1_y1.webp", "z13_x2_y2.png"}
+	if got := remainingTiles(t, dir); len(got) != len(want) ||
+		got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("remaining tiles = %v, want %v", got, want)
+	}
+
+	store, err = tilestamp.OpenFolder(dir)
+	if err != nil {
+		t.Fatalf("OpenFolder: %v", err)
+	}
+	defer store.Close() // nolint:errcheck
+
+	// The deleted files' stamps went with them; the survivors kept theirs.
+	for _, tc := range []struct {
+		format  string
+		want    bool
+		z, x, y int
+	}{
+		{format: "png", z: 13, x: 1, y: 1, want: false},
+		{format: "webp", z: 13, x: 1, y: 1, want: true},
+		{format: "webp", z: 13, x: 2, y: 2, want: false},
+		{format: "png", z: 13, x: 2, y: 2, want: true},
+	} {
+		_, ok, err := store.Get(tc.z, tc.x, tc.y, "", tc.format)
+		if err != nil {
+			t.Fatalf("Get(%d/%d/%d.%s): %v", tc.z, tc.x, tc.y, tc.format, err)
+		}
+		if ok != tc.want {
+			t.Errorf("stamp for %d/%d/%d.%s present = %v, want %v",
+				tc.z, tc.x, tc.y, tc.format, ok, tc.want)
+		}
 	}
 }

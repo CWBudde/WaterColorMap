@@ -284,8 +284,10 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       suffix or staleness, dry run by default. The rationale — why the timestamp comes from the
       response body, why the stamp rows are XYZ, and why the two commands' uncertainty
       asymmetries point in opposite directions — is archived in
-      [docs/tile-stamps-and-purge.md](docs/tile-stamps-and-purge.md). Still open: `serve` does
-      not stamp the tiles it renders on demand.
+      [docs/tile-stamps-and-purge.md](docs/tile-stamps-and-purge.md). `serve` stamps its
+      on-demand renders through the same store — one per server, shared by every tile size,
+      written through and flushed on shutdown — so a tileset filled in by browsing is
+      selectable by the same flags as a batch-generated one.
 
 - [x] **[P3]** Streaming tile enumeration and a checkpoint file. `generate`'s non-banded path no
       longer materialises anything per tile: `tile.TilesInBBoxSeq` is the enumeration as an
@@ -398,9 +400,9 @@ cadence follows from measured throughput.
 The _capability_ that was missing now exists: `watercolormap purge` deletes tiles by area, zoom or
 staleness, and every tile rendered by `generate` carries the source-data version it came from, so
 `generate --stale-data-before` expresses "re-render everything older than the last import" (5.1a).
-`serve` is not covered — its on-demand generator has no stamp store
-(`internal/server/ondemand_tiles.go`), so tiles it renders carry no version and purge's staleness
-selectors cannot see them. What is still open is that, the scheduling around the two commands, and
+`serve` is covered too: its on-demand generator writes into the server's stamp store
+(`internal/server/ondemand_tiles.go`), so a tile rendered by a request carries the same version a
+batch-rendered one does. What is still open is the scheduling around the two commands, and
 the diff-to-bbox step — the daily changed-node boxes are the input purge wants, and deriving them
 correctly for tag-only edits still needs the node-location store.
 → [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md)

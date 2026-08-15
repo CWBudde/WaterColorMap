@@ -25,21 +25,21 @@ func newFakeStampStore() *fakeStampStore {
 	return &fakeStampStore{stamps: map[string]tilestamp.Stamp{}}
 }
 
-func stampKey(z, x, y int, suffix string) string {
-	return tile.NewCoords(uint32(z), uint32(x), uint32(y)).String() + suffix
+func stampKey(z, x, y int, suffix, format string) string {
+	return tile.NewCoords(uint32(z), uint32(x), uint32(y)).String() + suffix + "." + format
 }
 
 func (f *fakeStampStore) Put(s tilestamp.Stamp) error {
 	f.puts = append(f.puts, s)
-	f.stamps[stampKey(s.Z, s.X, s.Y, s.Suffix)] = s
+	f.stamps[stampKey(s.Z, s.X, s.Y, s.Suffix, s.Format)] = s
 	return nil
 }
 
-func (f *fakeStampStore) Get(z, x, y int, suffix string) (tilestamp.Stamp, bool, error) {
+func (f *fakeStampStore) Get(z, x, y int, suffix, format string) (tilestamp.Stamp, bool, error) {
 	if f.getErr != nil {
 		return tilestamp.Stamp{}, false, f.getErr
 	}
-	s, ok := f.stamps[stampKey(z, x, y, suffix)]
+	s, ok := f.stamps[stampKey(z, x, y, suffix, format)]
 	return s, ok, nil
 }
 
@@ -71,7 +71,7 @@ func TestTileExistsFreshness(t *testing.T) {
 	after := lastImport.Add(24 * time.Hour)
 
 	fresh := tilestamp.Stamp{
-		Z: 13, X: 100, Y: 200,
+		Z: 13, X: 100, Y: 200, Format: "png",
 		OSMBase: after, RenderedAt: after, RendererRev: "v2+cafe",
 	}
 
@@ -99,7 +99,7 @@ func TestTileExistsFreshness(t *testing.T) {
 		{
 			name: "stale data stamp re-renders",
 			stamp: &tilestamp.Stamp{
-				Z: 13, X: 100, Y: 200, OSMBase: before, RenderedAt: after,
+				Z: 13, X: 100, Y: 200, Format: "png", OSMBase: before, RenderedAt: after,
 			},
 			policy: FreshnessPolicy{DataBefore: lastImport},
 			want:   false,
@@ -109,7 +109,7 @@ func TestTileExistsFreshness(t *testing.T) {
 			// only answer that cannot leave stale tiles behind is "render".
 			name: "stamp without a data timestamp re-renders",
 			stamp: &tilestamp.Stamp{
-				Z: 13, X: 100, Y: 200, RenderedAt: after,
+				Z: 13, X: 100, Y: 200, Format: "png", RenderedAt: after,
 			},
 			policy: FreshnessPolicy{DataBefore: lastImport},
 			want:   false,
@@ -123,7 +123,7 @@ func TestTileExistsFreshness(t *testing.T) {
 		{
 			name: "old render time re-renders",
 			stamp: &tilestamp.Stamp{
-				Z: 13, X: 100, Y: 200, OSMBase: after, RenderedAt: before,
+				Z: 13, X: 100, Y: 200, Format: "png", OSMBase: after, RenderedAt: before,
 			},
 			policy: FreshnessPolicy{RenderedBefore: lastImport},
 			want:   false,
@@ -137,7 +137,7 @@ func TestTileExistsFreshness(t *testing.T) {
 		{
 			name: "different renderer revision re-renders",
 			stamp: &tilestamp.Stamp{
-				Z: 13, X: 100, Y: 200, RenderedAt: after, RendererRev: "v1+beef",
+				Z: 13, X: 100, Y: 200, Format: "png", RenderedAt: after, RendererRev: "v1+beef",
 			},
 			policy: FreshnessPolicy{RendererRev: true},
 			want:   false,
@@ -151,7 +151,7 @@ func TestTileExistsFreshness(t *testing.T) {
 		{
 			// Any one failing criterion is enough to re-render.
 			name:   "fresh data but a different renderer re-renders",
-			stamp:  &tilestamp.Stamp{Z: 13, X: 100, Y: 200, OSMBase: after, RenderedAt: after},
+			stamp:  &tilestamp.Stamp{Z: 13, X: 100, Y: 200, Format: "png", OSMBase: after, RenderedAt: after},
 			policy: FreshnessPolicy{DataBefore: lastImport, RendererRev: true},
 			want:   false,
 		},
@@ -208,7 +208,7 @@ func TestTileExistsWithUnreadableStamp(t *testing.T) {
 func TestFreshStampDoesNotInventAMissingTile(t *testing.T) {
 	store := newFakeStampStore()
 	if err := store.Put(tilestamp.Stamp{
-		Z: 13, X: 100, Y: 200, OSMBase: time.Now(), RenderedAt: time.Now(),
+		Z: 13, X: 100, Y: 200, Format: "png", OSMBase: time.Now(), RenderedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -257,6 +257,11 @@ func TestPutStamp(t *testing.T) {
 	if got.Source != "http://localhost:12345/api/interpreter" {
 		t.Errorf("Source = %q, want the endpoint that answered", got.Source)
 	}
+	// The format is part of the stamp key, so a stamp that does not name it
+	// would describe whichever of z9_x4_y7@2x.png / .webp was written last.
+	if got.Format != "png" {
+		t.Errorf("Format = %q, want png", got.Format)
+	}
 	if got.RendererRev != "v2+cafe" {
 		t.Errorf("RendererRev = %q, want %q", got.RendererRev, "v2+cafe")
 	}
@@ -282,7 +287,7 @@ type failingStampStore struct{}
 
 func (failingStampStore) Put(tilestamp.Stamp) error { return errors.New("disk full") }
 
-func (failingStampStore) Get(int, int, int, string) (tilestamp.Stamp, bool, error) {
+func (failingStampStore) Get(int, int, int, string, string) (tilestamp.Stamp, bool, error) {
 	return tilestamp.Stamp{}, false, errors.New("disk full")
 }
 

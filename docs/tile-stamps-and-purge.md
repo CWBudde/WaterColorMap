@@ -38,9 +38,46 @@ cutoff and be selected for deletion.
 
 `convert` copies the stamps of the tiles it converts into the MBTiles file it
 writes; without that, converting a stamped folder would silently produce a
-tileset that answers "unknown" for every tile. `serve` does not stamp: its
-on-demand generator is constructed without a store, so a tile a request caused
-to be rendered carries no provenance. That is open work, not a decision.
+tileset that answers "unknown" for every tile. `serve` stamps too. Its on-demand
+generator is handed the same kind of store, opened once with the server and
+shared by every generator it builds — they differ only in tile size and all
+write into one tile folder, so a store per generator would put two SQLite
+handles, each with its own write buffer, on one file. The store writes through
+rather than batching (`Store.SetBatchSize(1)`): batching is sized for a run
+producing hundreds of tiles a minute, whereas a server renders a tile now and
+then and stays up for weeks, so a buffer would hold stamps in memory
+indefinitely and lose all of them to a crash. It is closed — and therefore
+flushed — after the on-demand backend stops, on the same graceful-shutdown path
+that drains connections. A store that cannot be opened is a warning and nothing
+more: the server serves unstamped rather than refusing to start, because a
+sidecar is not worth a tile service.
+
+## The stamp key includes the image format
+
+A stamp is addressed by zoom, column, row, suffix **and** image format, and the
+schema records that shape as `PRAGMA user_version = 2`. The format is there
+because a tile folder may hold `z13_x1_y1.png` and `z13_x1_y1.webp` at once —
+`purge` walks exactly such folders, which is why it uses `walkTilesDirectory`
+rather than `scanTilesDirectory` — and those are two files, written at two
+times, possibly from two different Overpass responses. Keyed without the format,
+the second render silently overwrote the first file's provenance, and a
+staleness purge then deleted whichever file the surviving stamp did not
+describe.
+
+Version 1 — the key without the format, which recorded no version and so reads
+back as `user_version 0` — is **refused**, not migrated. Nothing in a version 1
+row says which image format its tile was written in, so a migration would have
+to guess, and a wrong guess is precisely the bug being fixed: a purge deleting
+the file the stamp does not describe. Opening one fails with
+`tilestamp.ErrSchemaVersion`, naming the file and saying what to do — the store
+is a rebuildable sidecar, so deleting it costs a re-render and nothing else.
+`serve` treats that like any other unopenable store and serves unstamped;
+`generate` and `purge` stop before acting on a table they would misread.
+
+`purge` matches a folder tile only against the stamp for its own format. An
+MBTiles tile names no format, because the `tiles` table holds one row per
+z/x/y and there is nothing to disambiguate; any stamp for the coordinate
+selects it.
 
 ## Generation: skip-existing became a freshness question
 

@@ -65,6 +65,13 @@ func init() {
 	serveCmd.Flags().String("trusted-proxies", "", "Comma-separated CIDRs whose X-Forwarded-For is trusted (empty = ignore the header)")
 	serveCmd.Flags().Duration("shutdown-timeout", 30*time.Second, "Grace period for draining connections on SIGINT/SIGTERM")
 
+	serveCmd.Flags().String("stale-data-before", "",
+		"Re-render a cached tile whose source OSM data (osm_base_ts) is older than this RFC3339 timestamp")
+	serveCmd.Flags().String("stale-rendered-before", "",
+		"Re-render a cached tile written before this RFC3339 timestamp")
+	serveCmd.Flags().Bool("stale-renderer-rev", false,
+		"Re-render a cached tile stamped by a different renderer revision than the running binary")
+
 	mustBind := func(key string, name string) {
 		if err := viper.BindPFlag(key, serveCmd.Flags().Lookup(name)); err != nil {
 			panic(fmt.Sprintf("failed to bind flag: %v", err))
@@ -99,6 +106,10 @@ func init() {
 	mustBind("serve.tile_rate_max_entries", "tile-rate-max-entries")
 	mustBind("serve.trusted_proxies", "trusted-proxies")
 	mustBind("serve.shutdown_timeout", "shutdown-timeout")
+
+	mustBind(serveStaleDataBeforeKey, "stale-data-before")
+	mustBind(serveStaleRenderedBeforeKey, "stale-rendered-before")
+	mustBind(serveStaleRendererRevKey, "stale-renderer-rev")
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -211,7 +222,26 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
+		// Parsed before the store is opened and before the listener binds: a
+		// malformed cutoff should stop the server at startup, exactly as it
+		// stops a batch run.
+		freshness, err := serveFreshnessPolicyFromConfig()
+		if err != nil {
+			return err
+		}
+
+		// Opened once, here, and shared by every generator the server builds:
+		// they differ only in tile size and all write into tilesDir, so the
+		// store's lifetime is the server's. Closed after od.Stop below, which
+		// is what flushes it — defers run last-in-first-out, so the renders
+		// finish before the file they are recorded in is closed.
+		stamps := openServeStampStore(tilesDir)
+		defer closeStampStore(stamps)
+
 		od, err := server.NewOnDemandTiles(ds, server.OnDemandTilesConfig{
+			StampStore:               stampStoreOption(stamps),
+			Freshness:                freshness,
+			RendererRev:              rendererRev(),
 			Watercolor:               wcOverrides,
 			Ocean:                    ocean,
 			NaturalEarth:             naturalEarth,

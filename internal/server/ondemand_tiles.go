@@ -29,7 +29,22 @@ import (
 type OnDemandTilesConfig struct {
 	// Watercolor optionally overrides the watercolor parameters from config.
 	// Nil keeps the renderer on the untouched DefaultParams path.
-	Watercolor     *watercolor.Overrides
+	Watercolor *watercolor.Overrides
+	// StampStore records what source data each tile the server renders was
+	// made from. One store is shared by every generator this server builds —
+	// they differ only in tile size, and they all write into the same tile
+	// folder, so a store per generator would mean two handles on one file.
+	// Nil disables stamping, which is what a server started against a folder
+	// it cannot write a stamp database into gets.
+	StampStore pipeline.StampStore
+	// Freshness decides whether an existing tile may still be served from
+	// cache. The zero value asks nothing beyond existence, which is what the
+	// server did before stamps existed.
+	Freshness pipeline.FreshnessPolicy
+	// RendererRev identifies this binary in the stamps it writes. It has to be
+	// the value `generate` uses, or a stamp written by the server and one
+	// written by a batch run would not be comparable.
+	RendererRev    string
 	TilesDir       string
 	StylesDir      string
 	TexturesDir    string
@@ -765,6 +780,10 @@ func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) 
 			Watercolor:     t.cfg.Watercolor,
 			Ocean:          t.cfg.Ocean,
 			NaturalEarth:   t.cfg.NaturalEarth,
+			// One store, every tile size: see OnDemandTilesConfig.StampStore.
+			StampStore:  t.cfg.StampStore,
+			Freshness:   t.cfg.Freshness,
+			RendererRev: t.cfg.RendererRev,
 		},
 	)
 	if err != nil {
