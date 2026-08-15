@@ -20,6 +20,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/tileformat"
 	"github.com/cwbudde/watercolormap/internal/tilejson"
+	"github.com/cwbudde/watercolormap/internal/tilestamp"
 	"github.com/cwbudde/watercolormap/internal/watercolor"
 	"github.com/cwbudde/watercolormap/internal/worker"
 )
@@ -65,6 +66,18 @@ func init() {
 	generateCmd.Flags().String("output-file", "", "Output file path for MBTiles format (e.g., tiles.mbtiles)")
 	generateCmd.Flags().String("folder-structure", "flat", "Folder structure for folder format: flat (z{z}_x{x}_y{y}.png) or nested ({z}/{x}/{y}.png)")
 
+	// Freshness. All three are opt-in: with none of them set, an existing tile
+	// is skipped exactly as it always was. They read the stamps written
+	// alongside the tiles, so they can only re-render what a stamped run
+	// produced — an unstamped tile has no recorded data version and is
+	// therefore always re-rendered, never wrongly skipped.
+	generateCmd.Flags().String("stale-data-before", "",
+		"Re-render tiles whose source OSM data (osm_base_ts) is older than this RFC3339 timestamp")
+	generateCmd.Flags().String("stale-rendered-before", "",
+		"Re-render tiles written before this RFC3339 timestamp, whatever their data")
+	generateCmd.Flags().Bool("stale-renderer-rev", false,
+		"Re-render tiles stamped by a different build of this binary")
+
 	// Overpass flags. Only used by the single-server path; when overpass.servers
 	// is configured, each server carries its own worker count.
 	generateCmd.Flags().Int("overpass-workers", 4, "Number of parallel Overpass API requests (2-4 recommended for public API)")
@@ -102,6 +115,9 @@ func init() {
 		{"generate.format", "format"},
 		{"generate.output_file", "output-file"},
 		{"generate.folder_structure", "folder-structure"},
+		{staleDataBeforeKey, "stale-data-before"},
+		{staleRenderedBeforeKey, "stale-rendered-before"},
+		{staleRendererRevKey, "stale-renderer-rev"},
 		{"generate.overpass_workers", "overpass-workers"},
 		{"generate.band_fetch", "band-fetch"},
 		{"generate.band_level", "band-level"},
@@ -257,6 +273,46 @@ type singleOptions struct {
 	keepLayers      bool
 }
 
+// singleGeneratorOptions assembles the pipeline options for a single-tile run,
+// together with the stamp store the caller has to close. The base tile and its
+// @2x sibling share one value, so the two generators cannot come to disagree
+// about format, watercolor tuning or where the stamps go.
+func singleGeneratorOptions(
+	opts *singleOptions,
+	ocean renderer.OceanConfig,
+	naturalEarth renderer.NaturalEarthConfig,
+) (pipeline.GeneratorOptions, *tilestamp.Store, error) {
+	wcOverrides, err := loadWatercolorOverrides()
+	if err != nil {
+		return pipeline.GeneratorOptions{}, nil, err
+	}
+
+	freshness, err := freshnessPolicyFromConfig()
+	if err != nil {
+		return pipeline.GeneratorOptions{}, nil, err
+	}
+
+	// Single-tile mode always writes a folder: --format=mbtiles is refused
+	// without a bbox.
+	stamps, err := openStampStore("folder", opts.outputDir, "")
+	if err != nil {
+		return pipeline.GeneratorOptions{}, nil, fmt.Errorf("failed to open the tile stamp store: %w", err)
+	}
+
+	return pipeline.GeneratorOptions{
+		PNGCompression:  opts.pngCompression,
+		ImageFormat:     opts.imageFormat,
+		WebPEffort:      opts.webpEffort,
+		FolderStructure: opts.folderStructure,
+		Watercolor:      wcOverrides,
+		Ocean:           ocean,
+		NaturalEarth:    naturalEarth,
+		StampStore:      stampStoreOption(stamps),
+		Freshness:       freshness,
+		RendererRev:     rendererRev(),
+	}, stamps, nil
+}
+
 func runSingleGenerate(opts *singleOptions) error {
 	coords := tile.NewCoords(uint32(opts.zoom), uint32(opts.x), uint32(opts.y))
 
@@ -294,20 +350,13 @@ func runSingleGenerate(opts *singleOptions) error {
 	stylesDir := filepath.Join("assets", "styles")
 	texturesDir := filepath.Join("assets", "textures")
 
-	wcOverrides, err := loadWatercolorOverrides()
+	genOpts, stamps, err := singleGeneratorOptions(opts, ocean, naturalEarth)
 	if err != nil {
 		return err
 	}
+	defer closeStampStore(stamps)
 
-	gen, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize, opts.seed, opts.keepLayers, logger, pipeline.GeneratorOptions{
-		PNGCompression:  opts.pngCompression,
-		ImageFormat:     opts.imageFormat,
-		WebPEffort:      opts.webpEffort,
-		FolderStructure: opts.folderStructure,
-		Watercolor:      wcOverrides,
-		Ocean:           ocean,
-		NaturalEarth:    naturalEarth,
-	})
+	gen, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize, opts.seed, opts.keepLayers, logger, genOpts)
 	if err != nil {
 		return fmt.Errorf("failed to init generator: %w", err)
 	}
@@ -324,15 +373,7 @@ func runSingleGenerate(opts *singleOptions) error {
 	logger.Info("Tile generated", logFields...)
 
 	if opts.hidpi {
-		gen2x, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize*2, opts.seed, opts.keepLayers, logger, pipeline.GeneratorOptions{
-			PNGCompression:  opts.pngCompression,
-			ImageFormat:     opts.imageFormat,
-			WebPEffort:      opts.webpEffort,
-			FolderStructure: opts.folderStructure,
-			Watercolor:      wcOverrides,
-			Ocean:           ocean,
-			NaturalEarth:    naturalEarth,
-		})
+		gen2x, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize*2, opts.seed, opts.keepLayers, logger, genOpts)
 		if err != nil {
 			return fmt.Errorf("failed to init hidpi generator: %w", err)
 		}
@@ -352,7 +393,14 @@ type batchOptions struct {
 	// dataSource is set by runBatchGenerate once the source is built, so
 	// runTilePool can ask whether it supports area fetching without threading
 	// it through every call site.
-	dataSource      pipeline.DataSource
+	dataSource pipeline.DataSource
+	// stampStore records what source data each tile was rendered from, and is
+	// read back by the freshness policy below. Nil when no store could be
+	// opened, which the pipeline treats as "behave exactly as before".
+	stampStore pipeline.StampStore
+	// freshness is the validated --stale-* selection; the zero value means
+	// "an existing tile is a finished tile", the pre-existing behaviour.
+	freshness       pipeline.FreshnessPolicy
 	bboxStr         string
 	outputDir       string
 	dataSourceName  string
@@ -432,12 +480,31 @@ func runBatchGenerate(opts *batchOptions) error {
 		return err
 	}
 
+	// Freshness is parsed before anything is opened for writing, for the same
+	// reason the watercolor block is: a malformed timestamp should stop the run
+	// at startup.
+	freshness, err := freshnessPolicyFromConfig()
+	if err != nil {
+		return err
+	}
+	opts.freshness = freshness
+
 	// Create the MBTiles writer if needed
 	mbtilesWriter, err := openMBTilesWriter(opts, bbox)
 	if err != nil {
 		return err
 	}
 	defer closeMBTilesWriter(mbtilesWriter)
+
+	// After the MBTiles writer, because for that format the stamps live in the
+	// file it just created. The deferred close therefore runs before the
+	// writer's, which is the order that leaves a consistent file behind.
+	stamps, err := openStampStore(opts.format, opts.outputDir, opts.outputFile)
+	if err != nil {
+		return fmt.Errorf("failed to open the tile stamp store: %w", err)
+	}
+	defer closeStampStore(stamps)
+	opts.stampStore = stampStoreOption(stamps)
 
 	// Create generator with optional TileWriter
 	var tileWriter pipeline.TileWriter
@@ -640,6 +707,9 @@ func newBatchGenerator(opts *batchOptions, ds pipeline.DataSource, tileSize int,
 			Watercolor:      wcOverrides,
 			Ocean:           opts.ocean,
 			NaturalEarth:    opts.naturalEarth,
+			StampStore:      opts.stampStore,
+			Freshness:       opts.freshness,
+			RendererRev:     rendererRev(),
 		},
 	)
 }
