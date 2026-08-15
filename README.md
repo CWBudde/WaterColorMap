@@ -122,6 +122,29 @@ watercolormap convert --input-dir ./tiles --output hanover.mbtiles
 
 `--output` is required. See `watercolormap convert --help` for the metadata flags (`--name`, `--description`, `--attribution`, `--bounds`).
 
+### Delete tiles
+
+```bash
+# What would go? (dry run — this is the default)
+watercolormap purge --tiles-dir ./tiles --bbox 9.7,52.3,9.9,52.4 --zoom-min 13
+
+# Actually delete it
+watercolormap purge --tiles-dir ./tiles --bbox 9.7,52.3,9.9,52.4 --zoom-min 13 --yes
+```
+
+Tiles can also be selected by how stale they are, which reads the stamps
+`generate` writes alongside them — the Overpass source-data version, the render
+time, and the build that produced the tile:
+
+```bash
+# Everything rendered from OSM data older than the last import
+watercolormap purge --mbtiles hanover.mbtiles --data-before 2026-08-01T00:00:00Z --yes --compact
+```
+
+Pair it with `generate --stale-data-before` to re-render exactly what was
+removed. A tile with no stamp is never deleted by a staleness flag, and is
+always re-rendered by one: deletion is not undoable, a re-render is.
+
 ### Generate textures
 
 ```bash
@@ -189,7 +212,14 @@ By default, tiles are written to `./tiles` as PNG files using the naming scheme:
 tiles/
   z13_x4297_y2754.png
   z13_x4297_y2754@2x.png        # optional HiDPI output
+  tilejson.json                 # written by batch runs
+  stamps.db                     # per-tile source-data stamps
 ```
+
+`stamps.db` records, for each tile, the Overpass source-data version it was
+rendered from, when it was rendered, which endpoint answered and which build
+produced it. `generate --stale-*` and `purge --data-before` read it. An MBTiles
+tileset keeps the same information in a `tile_stamp` table inside the file.
 
 HiDPI (`@2x`) tiles are produced **on demand** by `watercolormap serve`: request
 `z13_x4297_y2754@2x.png` and it renders one. `--hidpi` on `watercolormap generate`
@@ -286,7 +316,7 @@ Keys that are actually read:
 - `overpass.endpoint` / `overpass.servers`: read by `serve` only — `generate` always builds a default single-endpoint Overpass source
 - `ocean.*`: the water polygons used for ocean and coastline rendering (see below)
 - `natural-earth.*`: the generalised shapefiles used at z0-5 (see below)
-- `generate.*`, `serve.*`, `convert.*`, `textures.*`: mirror the flags of the respective command
+- `generate.*`, `serve.*`, `convert.*`, `purge.*`, `textures.*`: mirror the flags of the respective command
 
 ### Ocean and coastlines
 
