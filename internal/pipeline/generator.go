@@ -465,6 +465,18 @@ func cropNRGBA(src image.Image, rect image.Rectangle) *image.NRGBA {
 	}
 
 	dst := image.NewNRGBA(image.Rect(0, 0, rect.Dx(), rect.Dy()))
+
+	// The composited tile is always an *image.NRGBA, so the crop is a row-wise memcpy.
+	// The generic path below stays for anything else a caller might hand in.
+	if s, ok := src.(*image.NRGBA); ok {
+		rowLen := 4 * rect.Dx()
+		for y := 0; y < rect.Dy(); y++ {
+			copy(dst.Pix[y*dst.Stride:][:rowLen], s.Pix[s.PixOffset(rect.Min.X, rect.Min.Y+y):][:rowLen])
+		}
+
+		return dst
+	}
+
 	for y := 0; y < rect.Dy(); y++ {
 		for x := 0; x < rect.Dx(); x++ {
 			dst.Set(x, y, src.At(rect.Min.X+x, rect.Min.Y+y))
