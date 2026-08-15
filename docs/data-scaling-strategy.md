@@ -767,31 +767,38 @@ leaving a later refactor to swap it silently. The synthetic pipeline goldens are
 unaffected (`syntheticDataSource` involves no map iteration); the two Hannover
 cases move and need `just update-goldens-hannover` from a machine with network.
 
-### Source freshness is nearly free, and currently buys nothing
+### Source freshness is nearly free, and is now recorded
 
 The Niedersachsen container keeps itself current from Geofabrik minutely diffs
 ([docs/local-overpass.md](local-overpass.md)). So the _data_ is fresh within
 minutes at essentially zero operational cost.
 
-**No tile carries a source-data version.** Skip-existing — both the `os.Stat` path
-and `mbtiles.Writer.HasTile` — answers "does this tile exist", never "was it
-rendered from data at least as new as X". An existing PNG is therefore treated as
-valid forever. **File mtime is the only staleness proxy that exists**, and nothing
-currently reads it.
+**Every rendered tile now carries a source-data version.** `generate` writes a
+stamp per tile into `internal/tilestamp`: the Overpass `osm3s.timestamp_osm_base`
+of the response it rendered from, when it was rendered, which endpoint answered,
+and which build of this binary produced it. The store is a sidecar living with
+the tiles — an extra `tile_stamp` table inside the `.mbtiles` file, or
+`stamps.db` beside `tilejson.json` in a tile folder.
 
-That is the mechanism any update policy has to be built on, and the first thing to
-change if a real policy is wanted: stamp the source data timestamp (Overpass
-reports it) into the tile record or a sidecar, so "re-render everything older than
-the last import" becomes expressible at all.
+The timestamp is read from the response body rather than taken from the clock,
+which matters as soon as the response cache is on: a cache hit reports the age
+of the _data_, not the age of the fetch.
+
+Skip-existing therefore no longer has to mean "does this tile exist". With
+`--stale-data-before`, `--stale-rendered-before` or `--stale-renderer-rev`, it
+means "is this tile still good", and "re-render everything older than the last
+import" is expressible. Without those flags the behaviour is unchanged, and an
+uncertain case — no stamp, an unreadable stamp, an unparseable timestamp — always
+renders, because a wrong skip leaves a permanent hole.
 
 ### Recommended: two layers, neither honest alone
 
 **Layer 1 — incremental expiry from the diffs.**
 
 Take the daily `.osc.gz`, union the bounding boxes of the changed nodes in one
-`osmium` pass, expand each by the metatile pad, compute the covering tiles per
-zoom, delete those PNGs, and let the next scheduled run's skip-existing refill
-them. Cheap, and it uses machinery that already works.
+`osmium` pass, expand each by the metatile pad, and hand the resulting boxes to
+`watercolormap purge --bbox … --yes`; the next scheduled run's skip-existing
+refills them. Cheap, and it uses machinery that already works.
 
 **The real gap, stated plainly: this misses tag-only edits.** A way whose nodes are
 untouched but whose tags change — a forest retagged, a road reclassified from
@@ -829,13 +836,18 @@ worse than no schedule.
   the cost of a long catch-up afterwards). Not decided. Enabling the response cache
   partially forces the first choice, since a cached response freezes that tile's
   input at fetch time.
-- **There is no purge command.** Expiry as described above is `rm` on a computed
-  path list, run by hand. Nothing in `internal/cmd` deletes tiles, from a folder or
-  from an MBTiles file.
-- **MBTiles can be updated in place.** `internal/mbtiles/writer.go:261` uses
-  `INSERT OR REPLACE INTO tiles`, so overwriting an existing tile works. The
-  read side needed for skip-on-resume now exists too (`HasTile`, § 1). What is
-  missing is only deletion.
+- **Expiry is now a command.** `watercolormap purge` deletes from a tile folder or
+  an MBTiles file, selecting by `--bbox`, zoom range and `--suffix`, or by
+  staleness (`--data-before`, `--rendered-before`, `--renderer-rev-not`) read from
+  the stamps. It is a dry run unless `--yes` is given, and always prints the count
+  and a sample first. What is still done by hand is deriving the bounding boxes
+  from a diff — see the layer-1 note above.
+- **MBTiles can be updated in place, in both directions.**
+  `internal/mbtiles/writer.go` uses `INSERT OR REPLACE INTO tiles`, so overwriting
+  an existing tile works; `HasTile` (§ 1) is the read side skip-on-resume needs;
+  and `DeleteTile`/`DeleteTiles`/`Vacuum` are the delete side purge needs. A tile
+  and its stamp are deleted in one transaction, so a stamp can never outlive the
+  tile it describes and make a later run skip a hole.
 
 ## 5. A finding worth its own section: the public API 406 is not rate limiting
 
@@ -927,8 +939,10 @@ Follow-ups this work surfaced, roughly in priority order:
    knowing beyond the recommendation: the generator **skips the Overpass fetch
    entirely** below the ceiling, so the low tier renders offline. See
    [zoom-levels.md](zoom-levels.md).
-7. **Tile data-version stamp and a purge command** (§ 4) — prerequisites for any
-   real update policy.
+7. ~~**Tile data-version stamp and a purge command** (§ 4)~~ — done. Stamps are
+   written by `generate` into `internal/tilestamp`; `watercolormap purge` selects
+   on them. What remains of the update policy is the diff-to-bbox step, which is
+   layer 1 above and needs `osm2pgsql --expire-tiles` to handle tag-only edits.
 8. **Streaming task enumeration in `worker.Pool`** (§ 1, defect 3) — not needed for
    Germany, needed beyond it; preserve the `len(results) == len(tasks)` invariant.
 

@@ -187,6 +187,21 @@ overpass:
 #   output_file: "" # required for format: mbtiles
 #   # folder_structure: flat = z{z}_x{x}_y{y}.{ext}, nested = {z}/{x}/{y}.{ext}
 #   folder_structure: "flat"
+#
+#   # Freshness. Every rendered tile is stamped with the source-data version it
+#   # came from (Overpass osm3s.timestamp_osm_base), when it was rendered, which
+#   # endpoint answered and which build produced it. The stamps live with the
+#   # tiles: a tile_stamp table in the .mbtiles file, or stamps.db in the tile
+#   # folder.
+#   #
+#   # These three turn skip-existing from "does this tile exist" into "is this
+#   # tile still good". All are opt-in: with none set, an existing tile is
+#   # skipped exactly as before. A tile whose freshness cannot be established --
+#   # no stamp, an unreadable one, an unparseable timestamp -- is always
+#   # re-rendered, because a wrong skip leaves a permanent hole.
+#   stale_data_before: "" # RFC3339; re-render tiles rendered from older OSM data
+#   stale_rendered_before: "" # RFC3339; re-render tiles written before this
+#   stale_renderer_rev: false # re-render tiles stamped by another build
 
 # --- serve -----------------------------------------------------------------
 # serve:
@@ -239,6 +254,27 @@ overpass:
 #   description: "Watercolor-styled map tiles"
 #   attribution: "© OpenStreetMap contributors"
 #   bounds: "" # optional "minLon,minLat,maxLon,maxLat" for the metadata
+
+# --- purge (delete rendered tiles) -----------------------------------------
+# Selects by where a tile is (bbox, zoom, variant) and by what it was rendered
+# from (the stamps `generate` wrote). Deleting requires yes: true -- without it
+# purge only reports the count and a sample of what it would delete.
+#
+# A tile with no stamp is never selected by a staleness key. That is the
+# opposite of the render side, where anything uncertain is re-rendered: there
+# uncertainty costs CPU, here it would cost the tile.
+# purge:
+#   tiles_dir: "" # purge a tile folder ...
+#   mbtiles: "" # ... or an .mbtiles file; exactly one of the two
+#   bbox: "" # "minLon,minLat,maxLon,maxLat"
+#   zoom_min: -1 # -1 = no lower bound (0 is a real zoom level)
+#   zoom_max: -1 # -1 = no upper bound
+#   data_before: "" # RFC3339; tiles rendered from OSM data older than this
+#   rendered_before: "" # RFC3339; tiles written before this
+#   renderer_rev_not: "" # tiles stamped by a build other than this one
+#   suffix: "any" # any, base, or @2x
+#   yes: false # false = dry run, the default
+#   compact: false # VACUUM the .mbtiles afterwards to reclaim the freed space
 
 # --- textures (generate the seamless watercolor textures) ------------------
 # textures:
