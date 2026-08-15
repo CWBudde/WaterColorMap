@@ -130,6 +130,29 @@ overpass:
 #   progress: true
 #   allow_failures: false # keep going when individual tiles fail
 #
+#   # Checkpointing: record how far a batch run got, so an interrupted run
+#   # resumes where it stopped instead of re-examining the whole tileset.
+#   #
+#   # Empty (the default) means off. "auto" puts the file at
+#   # <output-dir>/.watercolormap-checkpoint.json; any other value is used as
+#   # the path. On the command line, `--checkpoint` with no value means "auto".
+#   #
+#   # What is stored is a watermark over the deterministic tile enumeration:
+#   # the highest position such that every tile below it *succeeded*. A failed
+#   # tile blocks the watermark, so a resumed run re-attempts it -- the same
+#   # rule as everywhere else here, never skip something that might not be
+#   # there. Resuming is then arithmetic (skip N entries), which is the point:
+#   # a resumed country-sized run does not stat hundreds of thousands of tiles
+#   # first. Skip-existing still guards every tile that does get rendered.
+#   #
+#   # A checkpoint whose run key (bbox, zoom range, format, image_format) does
+#   # not match the current run is ignored with a warning, never reinterpreted;
+#   # force: true ignores it too. It cannot be combined with band_fetch, which
+#   # renders out of enumeration order. The file is deleted when the whole
+#   # range completes without failures.
+#   checkpoint: ""
+#   checkpoint_interval: 2000 # write the checkpoint every N completed tiles
+#
 #   # Rendering
 #   force: false # regenerate even if the tile already exists
 #   tile_size: 256 # 512 for Hi-DPI base tiles

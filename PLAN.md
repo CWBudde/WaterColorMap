@@ -287,8 +287,36 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       [docs/tile-stamps-and-purge.md](docs/tile-stamps-and-purge.md). Still open: `serve` does
       not stamp the tiles it renders on demand.
 
-- [ ] **[P3]** Streaming tile enumeration and a checkpoint file. `worker/pool.go` buffers the whole
-      task list (`make(chan Task, len(tasks))`) — 317,618 structs for Germany z0–14.
+- [x] **[P3]** Streaming tile enumeration and a checkpoint file. `generate`'s non-banded path no
+      longer materialises anything per tile: `tile.TilesInBBoxSeq` is the enumeration as an
+      `iter.Seq` (`TilesInBBox` is now that sequence collected, so every existing caller and test
+      is untouched), a producer goroutine feeds a `workers*2` channel selecting on `ctx.Done()`,
+      and `worker.Config.OnResult` takes the results one at a time so `RunStream` retains none of
+      them. Both halves mattered: the 317,618 buffered `Task` structs had a matching 317,618
+      `Result` structs one layer down.
+
+      **`Pool.Run`'s contract was the constraint, not an afterthought.** `len(results) ==
+      len(tasks)` is what `runTilePool` counts failures against, so `Run` ignores `OnResult`
+      outright rather than sharing the streaming path's bookkeeping. The banded path also keeps
+      the materialised tile list — it schedules by band, not by enumeration order, and that list
+      is the price of band grouping rather than of the pool. Cancellation accounting is the
+      property `reconcileBandResults` exists for, restated: the producer counts what it emitted
+      and everything unemitted is reported as failed, so an interrupted run still cannot exit 0
+      having rendered part of a tileset.
+
+      The checkpoint (`internal/checkpoint`, `--checkpoint`, off by default) stores a **watermark
+      over the enumeration**, not a tile set: the highest index such that every tile below it
+      succeeded, with a small frontier for out-of-order completions. A **failed tile blocks the
+      watermark** so a resume re-attempts it — the same rule as `tileExists`, never skip
+      something that might not be there. Resuming is then pure arithmetic: skip N entries, no
+      re-stat of hundreds of thousands of tiles, with skip-existing still guarding everything
+      actually emitted. Writes go through temp file + fsync + rename like `encodeTileAtomic`,
+      because a checkpoint truncated by the interrupt it exists to survive would be read by the
+      next run. A run-key mismatch (bbox, zoom range, format, image format, suffix) or a schema
+      mismatch is ignored loudly rather than reinterpreted, `--force` ignores it too, and
+      `--checkpoint` is refused together with `--band-fetch`, whose out-of-order scheduling gives
+      the index watermark no meaning. Rationale archived in
+      [docs/data-scaling-strategy.md § 1](docs/data-scaling-strategy.md).
 
 ### 5.2 Parallel Tile Rendering
 

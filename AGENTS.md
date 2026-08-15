@@ -27,6 +27,7 @@ Module: `github.com/cwbudde/watercolormap` (Go 1.25, cgo — Mapnik 3.1+ require
 | `internal/pipeline`             | End-to-end tile generation                                                     |
 | `internal/server`               | Tile HTTP server, on-demand generation, admission control                      |
 | `internal/worker`               | Batch worker pool and progress reporting                                       |
+| `internal/checkpoint`           | Batch-run progress file (watermark over the tile enumeration, resume)          |
 | `internal/tile`, `internal/geo` | Tile coords and Web-Mercator math (`geo` is a leaf package)                    |
 | `internal/mbtiles`              | MBTiles reader/writer, plus the tile delete/vacuum path                        |
 | `internal/tilestamp`            | Per-tile source-data stamps (SQLite sidecar); XYZ rows, **not** TMS            |

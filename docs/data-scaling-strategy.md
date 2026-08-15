@@ -167,23 +167,66 @@ render it. A wrong "skip" leaves a permanent hole nothing later in the run will
 fill; a wrong "render" costs a few seconds and overwrites the tile with an
 identical one.
 
-**3. No checkpoint, and no streaming enumeration.**
-`internal/worker/pool.go:73` materialises the entire task list up front:
+**3. No checkpoint, and no streaming enumeration — fixed on this branch.**
+`Pool.Run` materialises the entire task list up front (`taskCh := make(chan Task,
+len(tasks))`), which for Germany z0-14 is 317,618 `Task` structs allocated and
+buffered before the first tile renders, plus 317,618 `Result` structs collected
+on the way back. Survivable — the structs are small — but it also meant the run
+had no notion of progress it could resume from beyond "which tiles already
+exist".
 
-```go
-taskCh := make(chan Task, len(tasks))
-```
+`generate`'s non-banded path no longer goes through `Pool.Run`:
 
-For Germany z0-14 that is 317,618 `Task` structs allocated and buffered before the
-first tile renders. It is survivable — the structs are small — but it means the
-run has no notion of progress it could resume from beyond "which tiles already
-exist". Streaming the enumeration is the obvious follow-up; it is not needed for
-Germany and would be needed for the planet.
+- `tile.TilesInBBoxSeq` is the enumeration as an `iter.Seq[Coords]`;
+  `TilesInBBox` is now just that sequence collected into a slice, so every
+  existing caller and test is unaffected. A producer goroutine feeds a channel of capacity `workers*2` and
+  selects on `ctx.Done()`, exactly as the banded producer already did.
+- `worker.Config.OnResult` takes the results one at a time, so `RunStream`
+  retains none of them. `runTilePool` counts, and keeps the first 50 failures
+  for logging. Peak bookkeeping is now the worker count, not the tile count.
+- `Pool.Run` is untouched in contract: it ignores `OnResult` entirely, so
+  `len(results) == len(tasks)` still holds unconditionally for its callers (see
+  `docs/history/phase-7-hardening.md` § 7.7). The banded path, which schedules by
+  band rather than by enumeration order, still takes the materialised tile list —
+  that list is the price of band grouping, not of the pool.
+- Cancellation accounting is preserved the way `reconcileBandResults` preserves
+  it: the producer counts what it emitted, and every tile it never got to is
+  reported as a failure. An interrupted run cannot exit 0 having rendered part of
+  a tileset.
 
-Note the buffering is also load-bearing: `Pool.Run` relies on the send never
-blocking, which is what makes `len(results) == len(tasks)` an unconditional
-invariant (see `docs/history/phase-7-hardening.md` § 7.7). Any streaming rewrite
-has to preserve that or fix `runTilePool`'s failure counting at the same time.
+### Resume without re-statting the tileset
+
+`--checkpoint` (off by default; `<output>/.watercolormap-checkpoint.json` when
+the flag is given without a value) writes `internal/checkpoint`'s small JSON
+file every 2,000 tiles and again on shutdown, through the same
+temp-file + fsync + rename discipline as `encodeTileAtomic` — a checkpoint
+truncated by the very interrupt it exists to survive would be read by the next
+run, which is worse than having none.
+
+What it stores is a **watermark over the enumeration**, not a set of tiles: the
+highest index such that every tile below it **succeeded**. Completions arrive out
+of order, so a small frontier set holds successes ahead of the watermark until
+the gap closes; it is bounded by how far out of order workers can finish, not by
+the length of the run. A **failed tile blocks the watermark**, so a resume
+re-attempts it — the same rule as `tileExists` above: never skip something that
+might not be there.
+
+Resuming then costs nothing: the run fast-forwards the sequence past `watermark`
+items, which is arithmetic, and skip-existing still guards every tile that does
+get emitted. That is the point — a resumed z14 country run does not re-stat
+hundreds of thousands of tiles before rendering the first new one.
+
+Two refusals, both of the "a wrong success is worse than a wrong failure"
+family. A checkpoint whose `run_key` (bbox, zoom range, container format, image
+format, suffix) or schema does not match the current run is **ignored loudly**,
+never reinterpreted: resuming one bbox's watermark into another's enumeration
+would skip tiles nobody ever rendered, and skip-existing could not catch it
+because those tiles were never emitted to be checked. `--force` ignores it too.
+And `--checkpoint` is rejected together with `--band-fetch`, because a banded run
+renders out of enumeration order and its watermark would mean nothing.
+
+The checkpoint is deleted when the whole range completes with no failures — the
+file exists to describe unfinished work.
 
 ### Operational rule
 
@@ -193,6 +236,12 @@ the next run skips everything already on disk with a `stat` per tile. MBTiles
 resume now works too (defect 2 above), so this is a preference rather than a
 requirement — but the folder path stays the recommendation for a multi-day run,
 because it does not hold a SQLite write transaction open across the whole batch.
+
+**Give a multi-day run `--checkpoint`.** Skip-existing alone makes a resumed
+Germany z0-14 run pay 317,618 existence probes before its first new tile; the
+checkpoint turns that into skipping a counted prefix. The two are complementary,
+not alternatives: the checkpoint decides what is not even offered, skip-existing
+still guards everything that is.
 
 ## 2. Vector tile input: rejected
 
