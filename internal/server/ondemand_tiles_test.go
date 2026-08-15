@@ -26,6 +26,12 @@ func TestParseTilePath(t *testing.T) {
 		{"hidpi tile", "/tiles/z5_x1_y2@2x.png", "z5_x1_y2", "@2x", tileformat.PNG},
 		{"webp tile", "/tiles/z13_x4317_y2692.webp", "z13_x4317_y2692", "", tileformat.WebP},
 		{"hidpi webp tile", "/tiles/z5_x1_y2@2x.webp", "z5_x1_y2", "@2x", tileformat.WebP},
+		// ParseExt is case-insensitive, so an uppercase extension is accepted
+		// and therefore has to stay parseable: trimming the normalised
+		// ".webp" would leave ".WEBP" on the name for ParseCoords to reject.
+		{"uppercase webp tile", "/tiles/z13_x4317_y2692.WEBP", "z13_x4317_y2692", "", tileformat.WebP},
+		{"uppercase png tile", "/tiles/z13_x4317_y2692.PNG", "z13_x4317_y2692", "", tileformat.PNG},
+		{"uppercase hidpi webp tile", "/tiles/z5_x1_y2@2x.WebP", "z5_x1_y2", "@2x", tileformat.WebP},
 	}
 	for _, tt := range ok {
 		t.Run(tt.name, func(t *testing.T) {
