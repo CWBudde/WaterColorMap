@@ -10,7 +10,10 @@
 // output, and all arithmetic is fixed point with FracBits fractional bits.
 package blurkernel
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 // FracBits is the fixed-point precision of the kernel weights. Weights for one
 // pass sum to exactly 1<<FracBits, so a full-white input yields exactly 255 and
@@ -98,7 +101,28 @@ func (p Plan) Radius() int {
 // land shade lands on the direct path. That makes the convolution the common
 // case and the box blur the exception — which is also why maxConvRadius below
 // is set where it is.
+// A tile pass blurs a dozen or more masks with a handful of distinct sigmas, and every
+// call used to rebuild the tap table from scratch. Plans are pure functions of sigma and
+// callers only ever read Taps, so they can be shared.
 func PlanFor(sigma float64) Plan {
+	if plan, ok := planCache.Load(sigma); ok {
+		p, ok := plan.(Plan)
+		if ok {
+			return p
+		}
+	}
+
+	p := planFor(sigma)
+	planCache.Store(sigma, p)
+
+	return p
+}
+
+// planCache memoises PlanFor. The cached Plan's Taps slice is shared by every caller,
+// which is why nothing in this package writes to it after PlanFor returns.
+var planCache sync.Map
+
+func planFor(sigma float64) Plan {
 	if sigma <= 0 || sigma < 0.05 {
 		return Plan{Mode: ModeNone}
 	}
