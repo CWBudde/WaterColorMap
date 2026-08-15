@@ -3,6 +3,7 @@ package tile
 import (
 	"errors"
 	"fmt"
+	"iter"
 
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/maptile"
@@ -315,23 +316,47 @@ func BBoxTileBoundsAt(bbox [4]float64, z int) BBoxTileBounds {
 // TilesInBBox returns all tile coordinates within a bounding box across a zoom range.
 // bbox: [minLon, minLat, maxLon, maxLat] in WGS84
 // Calculates correct tile coordinates at each zoom level independently.
+//
+// It materialises the whole list, which for a country-sized bbox is hundreds of
+// thousands of entries. Callers that only walk the list once should take
+// TilesInBBoxSeq instead; this stays for the callers that genuinely need random
+// access (band grouping, tests).
 func TilesInBBox(bbox [4]float64, zoomMin, zoomMax int) []Coords {
-	// Pre-allocate with estimated capacity
-	estimatedCount := TileCount(bbox, zoomMin, zoomMax)
-	tiles := make([]Coords, 0, estimatedCount)
+	tiles := make([]Coords, 0, TileCount(bbox, zoomMin, zoomMax))
+	for c := range TilesInBBoxSeq(bbox, zoomMin, zoomMax) {
+		tiles = append(tiles, c)
+	}
+	return tiles
+}
 
-	for z := zoomMin; z <= zoomMax; z++ {
-		b := BBoxTileBoundsAt(bbox, z)
+// TilesInBBoxSeq yields the same coordinates as TilesInBBox, in the same order,
+// without holding them all in memory.
+//
+// The order is part of the contract: zoom, then x, then y. A batch run
+// checkpoints by position in this sequence, so changing the order would
+// invalidate every checkpoint written by an older build — and, worse, would do
+// so silently, since a resumed run would skip a prefix of a different set of
+// tiles.
+//
+// It derives its per-zoom index range from BBoxTileBoundsAt, the same helper
+// TilesInBBox, TileCount and the purge membership test use, so the streaming
+// path inherits the world clamp instead of re-deriving — and possibly
+// disagreeing about — the grid.
+func TilesInBBoxSeq(bbox [4]float64, zoomMin, zoomMax int) iter.Seq[Coords] {
+	return func(yield func(Coords) bool) {
+		for z := zoomMin; z <= zoomMax; z++ {
+			b := BBoxTileBoundsAt(bbox, z)
 
-		// Generate all tiles at this zoom level
-		for x := b.MinX; x <= b.MaxX; x++ {
-			for y := b.MinY; y <= b.MaxY; y++ {
-				tiles = append(tiles, NewCoords(uint32(z), x, y))
+			// Generate all tiles at this zoom level
+			for x := b.MinX; x <= b.MaxX; x++ {
+				for y := b.MinY; y <= b.MaxY; y++ {
+					if !yield(NewCoords(uint32(z), x, y)) {
+						return
+					}
+				}
 			}
 		}
 	}
-
-	return tiles
 }
 
 // TileCount returns the number of tiles in a bounding box across a zoom range.
