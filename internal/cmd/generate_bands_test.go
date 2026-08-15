@@ -53,6 +53,12 @@ type fakeBandGenerator struct {
 	// standing in for a tile with no features of its own inside a non-empty
 	// band.
 	emptyFor map[string]bool
+	// existing stands in for tiles already on disk or in the MBTiles file.
+	existing map[string]bool
+}
+
+func (g *fakeBandGenerator) TileExists(coords tile.Coords, _ string) bool {
+	return g.existing != nil && g.existing[coords.String()]
 }
 
 // tileBox converts a tile's bounds into the BoundingBox shape the datasource
@@ -348,8 +354,14 @@ func TestBandFetchEveryTileGetsExactlyOneResult(t *testing.T) {
 	}
 }
 
-// TestBandFetchHonoursCancellation: a cancelled run must still produce one
-// result per tile, so failures are counted rather than tiles lost.
+// TestBandFetchHonoursCancellation is the guard against an interrupted run
+// reporting success.
+//
+// runBatchGenerate counts failures from the returned results and from nothing
+// else, so a cancelled banded run that simply emitted fewer results would show
+// zero failures -- and would go on to write TileJSON and flush the MBTiles
+// metadata for a tileset that is only partly rendered. Every requested tile
+// must therefore come back, carrying an error.
 func TestBandFetchHonoursCancellation(t *testing.T) {
 	coords := block(14, 8632, 5380, 4)
 	ds := &fakeAreaSource{features: oneFeature()}
@@ -361,12 +373,158 @@ func TestBandFetchHonoursCancellation(t *testing.T) {
 	results, _ := runBandedTilePool(ctx, gen, &fakeBandGenerator{}, ds,
 		coords, bandTestOptions(2, 10), "")
 
-	// The producer stops early on a cancelled context, so fewer tasks may be
-	// emitted -- but nothing may hang, and every emitted task must answer.
+	if len(results) != len(coords) {
+		t.Fatalf("got %d results for %d tiles; a cancelled run must not lose tiles, "+
+			"or the caller counts zero failures and reports success", len(results), len(coords))
+	}
+
+	seen := map[string]int{}
+	failed := 0
 	for _, r := range results {
 		if r.Task.Coords == (tile.Coords{}) {
 			t.Error("result with no task attached")
 		}
+		seen[r.Task.Coords.String()]++
+		if r.Err != nil {
+			failed++
+		}
+	}
+	for _, c := range coords {
+		if seen[c.String()] != 1 {
+			t.Errorf("tile %s got %d results, want exactly 1", c.String(), seen[c.String()])
+		}
+	}
+	if failed == 0 {
+		t.Error("a cancelled run reported no failures at all")
+	}
+}
+
+// TestReconcileBandResultsFillsGaps covers the reconciliation directly,
+// including the case where the producer stops for a reason other than
+// cancellation -- which must still be a failure and not a silent success.
+func TestReconcileBandResultsFillsGaps(t *testing.T) {
+	coords := block(14, 8632, 5380, 2)
+
+	partial := []worker.Result{{Task: worker.Task{Coords: coords[0]}}}
+
+	for _, cause := range []error{context.Canceled, nil} {
+		got := reconcileBandResults(partial, coords, "", cause)
+		if len(got) != len(coords) {
+			t.Fatalf("cause=%v: got %d results, want %d", cause, len(got), len(coords))
+		}
+
+		failures := 0
+		for _, r := range got {
+			if r.Err != nil {
+				failures++
+			}
+		}
+		if want := len(coords) - 1; failures != want {
+			t.Errorf("cause=%v: %d failures, want %d", cause, failures, want)
+		}
+	}
+
+	// A complete result set is returned untouched.
+	complete := make([]worker.Result, 0, len(coords))
+	for _, c := range coords {
+		complete = append(complete, worker.Result{Task: worker.Task{Coords: c}})
+	}
+	if got := reconcileBandResults(complete, coords, "", context.Canceled); len(got) != len(coords) {
+		t.Errorf("a complete result set was modified: %d results, want %d", len(got), len(coords))
+	}
+}
+
+// TestBandFetchSkipsCompletedBands: the skip-existing check lives inside the
+// generator, i.e. after the fetch, so without filtering here a resumed run
+// would re-query Overpass for every band it had already finished -- and the
+// fetch is ~71% of a run's wall clock.
+func TestBandFetchSkipsCompletedBands(t *testing.T) {
+	coords := block(14, 8632, 5380, 2)
+
+	existing := map[string]bool{}
+	for _, c := range coords {
+		existing[c.String()] = true
+	}
+
+	ds := &fakeAreaSource{features: oneFeature()}
+	gen := newRecordingGenerator()
+	bandGen := &fakeBandGenerator{existing: existing}
+
+	results, _ := runBandedTilePool(context.Background(), gen, bandGen, ds,
+		coords, bandTestOptions(1, 10), "")
+
+	if got := ds.count(); got != 0 {
+		t.Errorf("a fully rendered band issued %d Overpass queries, want 0", got)
+	}
+	// Every tile still answers, so the caller's accounting is unaffected and
+	// the generator gets to log its own skips.
+	if len(results) != len(coords) {
+		t.Fatalf("got %d results, want %d", len(results), len(coords))
+	}
+	with, without := gen.counts()
+	if with != 0 || without != len(coords) {
+		t.Errorf("%d tiles used band data and %d took the plain path, want 0 and %d",
+			with, without, len(coords))
+	}
+}
+
+// TestBandFetchStillFetchesPartiallyCompletedBands: one missing tile is enough
+// to justify the query, and the band must not be skipped wholesale.
+func TestBandFetchStillFetchesPartiallyCompletedBands(t *testing.T) {
+	coords := block(14, 8632, 5380, 2)
+
+	// All but the last already rendered.
+	existing := map[string]bool{}
+	for _, c := range coords[:len(coords)-1] {
+		existing[c.String()] = true
+	}
+
+	ds := &fakeAreaSource{features: oneFeature()}
+	gen := newRecordingGenerator()
+	bandGen := &fakeBandGenerator{existing: existing}
+
+	results, _ := runBandedTilePool(context.Background(), gen, bandGen, ds,
+		coords, bandTestOptions(1, 10), "")
+
+	if got := ds.count(); got != 1 {
+		t.Errorf("a partly rendered band issued %d queries, want 1", got)
+	}
+	if len(results) != len(coords) {
+		t.Fatalf("got %d results, want %d", len(results), len(coords))
+	}
+	with, without := gen.counts()
+	if with != 1 {
+		t.Errorf("%d tiles rendered from band data, want 1 (the missing one)", with)
+	}
+	if without != len(coords)-1 {
+		t.Errorf("%d tiles took the plain path, want %d", without, len(coords)-1)
+	}
+}
+
+// TestBandFetchIgnoresExistingTilesUnderForce: --force means render it again,
+// so nothing may be skipped.
+func TestBandFetchIgnoresExistingTilesUnderForce(t *testing.T) {
+	coords := block(14, 8632, 5380, 2)
+
+	existing := map[string]bool{}
+	for _, c := range coords {
+		existing[c.String()] = true
+	}
+
+	ds := &fakeAreaSource{features: oneFeature()}
+	gen := newRecordingGenerator()
+	bandGen := &fakeBandGenerator{existing: existing}
+
+	opts := bandTestOptions(1, 10)
+	opts.force = true
+
+	runBandedTilePool(context.Background(), gen, bandGen, ds, coords, opts, "")
+
+	if got := ds.count(); got != 1 {
+		t.Errorf("--force issued %d queries, want 1 — existing tiles must not be skipped", got)
+	}
+	if with, _ := gen.counts(); with != len(coords) {
+		t.Errorf("%d tiles rendered from band data, want %d", with, len(coords))
 	}
 }
 

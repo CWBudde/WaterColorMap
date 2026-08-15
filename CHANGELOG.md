@@ -47,6 +47,14 @@
   which at band scale could answer sixteen tiles from a server holding data for one corner of the
   block. Band routing requires containment and splits otherwise.
 
+  Banded runs keep the two guarantees the per-tile path has always given. **Resume still skips**:
+  the existing-tile check lives inside the generator, i.e. after the fetch, so a band is now
+  filtered to the tiles that still need rendering and skipped entirely when none do — a resumed
+  run issues no Overpass queries at all, instead of re-fetching every block it had already
+  finished. And **an interrupted run still fails**: every requested tile comes back with a result,
+  so Ctrl-C reports failures and exits non-zero rather than counting none, writing TileJSON and
+  flushing MBTiles metadata for a half-rendered tileset.
+
   Also fixes `types.FeatureCollection.Count()`, which omitted `Rivers` — so a tile whose only
   features were waterways counted as empty.
 

@@ -40,6 +40,7 @@ type bandStats struct {
 	splits           int
 	perTileFallbacks int
 	emptyFallbacks   int
+	skippedBands     int
 }
 
 func (s *bandStats) add(bands, fetches, splits, perTile, empty int) {
@@ -52,11 +53,21 @@ func (s *bandStats) add(bands, fetches, splits, perTile, empty int) {
 	s.emptyFallbacks += empty
 }
 
+// skipped counts a band whose tiles were all already rendered, so no query was
+// issued for it. Reported separately: a resumed run showing few fetches and
+// many skips is working, and should not look like one that failed to fetch.
+func (s *bandStats) skipped() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.skippedBands++
+}
+
 // bandTileGenerator is the slice of pipeline.Generator the scheduler needs.
 // Narrow on purpose, so the tests can fake it without a Mapnik build.
 type bandTileGenerator interface {
 	BandFetchBounds(coords []tile.Coords) (types.BoundingBox, error)
 	SliceForTile(band *types.TileData, coords tile.Coords) *types.TileData
+	TileExists(coords tile.Coords, filenameSuffix string) bool
 }
 
 // runBandedTilePool renders coords by fetching Overpass data one band at a
@@ -139,7 +150,7 @@ func runBandedTilePool(
 		}
 	}()
 
-	results := pool.RunStream(ctx, taskCh, len(coords))
+	results := reconcileBandResults(pool.RunStream(ctx, taskCh, len(coords)), coords, suffix, ctx.Err())
 	progress.Done()
 
 	stats.mu.Lock()
@@ -149,11 +160,53 @@ func runBandedTilePool(
 		"splits", stats.splits,
 		"per_tile_fallbacks", stats.perTileFallbacks,
 		"empty_slice_fallbacks", stats.emptyFallbacks,
+		"bands_already_complete", stats.skippedBands,
 		"tiles", len(coords),
 	)
 	stats.mu.Unlock()
 
 	return results, progress.Summary()
+}
+
+// reconcileBandResults guarantees one result per requested tile, inventing a
+// failure for any tile the producer never got as far as emitting.
+//
+// worker.Pool.Run gives callers len(results) == len(tasks) unconditionally, and
+// runBatchGenerate counts failures from nothing else. The banded producer can
+// stop early — a cancelled context is the ordinary way — which without this
+// would leave those tiles with no result at all, so `failureError` would see
+// zero failures, TileJSON would be written and the MBTiles metadata flushed,
+// and an interrupted run would exit 0 having rendered part of a tileset. That
+// is the same failure this project refuses elsewhere: a wrong success is far
+// worse than a wrong failure, because nothing downstream ever revisits it.
+//
+// cause is the context's error, which is nil if the producer stopped for some
+// other reason; a missing result is a failure either way, so an unexplained one
+// still gets an error rather than passing silently.
+func reconcileBandResults(results []worker.Result, coords []tile.Coords, suffix string, cause error) []worker.Result {
+	if len(results) == len(coords) {
+		return results
+	}
+
+	answered := make(map[tile.Coords]struct{}, len(results))
+	for _, r := range results {
+		answered[r.Task.Coords] = struct{}{}
+	}
+
+	if cause == nil {
+		cause = errors.New("tile was never scheduled: band production stopped early")
+	}
+
+	for _, c := range coords {
+		if _, ok := answered[c]; ok {
+			continue
+		}
+		results = append(results, worker.Result{
+			Task: worker.Task{Coords: c, Suffix: suffix},
+			Err:  cause,
+		})
+	}
+	return results
 }
 
 // fetchAndEmitBand fetches one band and emits its tiles' tasks. It returns the
@@ -174,15 +227,30 @@ func fetchAndEmitBand(
 	// bottom of the split recursion and the reason a band failure is never
 	// reported against sixteen tiles.
 	if b.Level == 0 || len(b.Tiles) == 1 {
-		for _, c := range b.Tiles {
-			if !emitTask(ctx, taskCh, worker.Task{Coords: c, Force: opts.force, Suffix: suffix}) {
-				return nil, false
-			}
-		}
-		return nil, true
+		return nil, emitPlainTasks(ctx, taskCh, b.Tiles, opts, suffix)
 	}
 
-	bounds, err := bandGen.BandFetchBounds(b.Tiles)
+	// Only tiles that still need rendering justify a fetch. The skip-existing
+	// check otherwise happens inside the generator, i.e. *after* the band
+	// query has already been paid for -- so a resumed run would re-fetch every
+	// band it had already finished, and with the fetch at ~71% of wall clock
+	// that is the whole cost of the run. Worse, against a flaky Overpass it
+	// would also burn the retry and split paths for tiles nobody needs.
+	//
+	// Existing tiles are still emitted as ordinary tasks: the generator's own
+	// check short-circuits them before any fetch, they log the skip, and --
+	// the part that matters -- they still produce a result, so the caller's
+	// one-result-per-tile accounting is unaffected.
+	missing := tilesNeedingRender(bandGen, b.Tiles, opts.force, suffix)
+
+	if len(missing) == 0 {
+		stats.skipped()
+		return nil, emitPlainTasks(ctx, taskCh, b.Tiles, opts, suffix)
+	}
+
+	// Bounds cover only the tiles that need data, so a band that is mostly
+	// complete asks for correspondingly less.
+	bounds, err := bandGen.BandFetchBounds(missing)
 	if err != nil {
 		return splitOrDrop(b, stats), true
 	}
@@ -204,7 +272,21 @@ func fetchAndEmitBand(
 		return splitOrDrop(b, stats), true
 	}
 
+	needsData := make(map[tile.Coords]struct{}, len(missing))
+	for _, c := range missing {
+		needsData[c] = struct{}{}
+	}
+
 	for _, c := range b.Tiles {
+		// An already-rendered tile is emitted plain: the data was never fetched
+		// on its behalf and the generator will skip it before looking at any.
+		if _, ok := needsData[c]; !ok {
+			if !emitTask(ctx, taskCh, worker.Task{Coords: c, Force: opts.force, Suffix: suffix}) {
+				return nil, false
+			}
+			continue
+		}
+
 		slice := bandGen.SliceForTile(data, c)
 
 		// An empty slice at a zoom where emptiness is an error means either a
@@ -221,6 +303,36 @@ func fetchAndEmitBand(
 		}
 	}
 	return nil, true
+}
+
+// emitPlainTasks emits tiles with no prefetched data attached, i.e. on exactly
+// the path they took before band fetching existed. It reports false when the
+// producer should stop.
+func emitPlainTasks(ctx context.Context, taskCh chan<- worker.Task, coords []tile.Coords, opts *batchOptions, suffix string) bool {
+	for _, c := range coords {
+		if !emitTask(ctx, taskCh, worker.Task{Coords: c, Force: opts.force, Suffix: suffix}) {
+			return false
+		}
+	}
+	return true
+}
+
+// tilesNeedingRender returns the tiles a band actually has to fetch data for.
+//
+// With --force that is all of them: force means render these again, not
+// reinterpret what is already there.
+func tilesNeedingRender(bandGen bandTileGenerator, coords []tile.Coords, force bool, suffix string) []tile.Coords {
+	if force {
+		return coords
+	}
+
+	missing := make([]tile.Coords, 0, len(coords))
+	for _, c := range coords {
+		if !bandGen.TileExists(c, suffix) {
+			missing = append(missing, c)
+		}
+	}
+	return missing
 }
 
 // splitOrDrop returns the sub-bands of b, counting the split.
