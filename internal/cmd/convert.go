@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -159,6 +160,59 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// parseTilePathInLayout identifies one file below root as a tile, in either
+// folder layout. It reports false for anything that is not one, which includes
+// tilejson.json, stamps.db and any stray file a user has left in the folder.
+func parseTilePathInLayout(root, path string) (tileInfo, tileformat.Format, bool) {
+	filename := filepath.Base(path)
+
+	if m := flatTilePattern.FindStringSubmatch(filename); m != nil {
+		// The regexp only matches digits, so a failure here means the number
+		// does not fit an int; skip such a file.
+		z, x, y, ok := parseTileCoords(m)
+		if !ok {
+			logger.Warn("Skipping tile with out-of-range coordinates", "path", path)
+			return tileInfo{}, "", false
+		}
+		// The regexp only admits extensions tileformat knows, so this cannot
+		// fail; the check keeps the switch total.
+		format, ok := tileformat.ParseExt(m[5])
+		if !ok {
+			return tileInfo{}, "", false
+		}
+		return tileInfo{z: z, x: x, y: y, suffix: m[4], path: path}, format, true
+	}
+
+	m := nestedTileFilePattern.FindStringSubmatch(filename)
+	if m == nil {
+		return tileInfo{}, "", false
+	}
+
+	// Nested tiles are {z}/{x}/{y}.{ext} relative to the root, so the two
+	// directories above the file carry the rest of the coordinate. Anything at
+	// another depth is not a tile of this tileset, whatever its name.
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return tileInfo{}, "", false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) != 3 {
+		return tileInfo{}, "", false
+	}
+
+	z, x, y, ok := parseTileCoords([]string{"", parts[0], parts[1], m[1]})
+	if !ok {
+		logger.Warn("Skipping tile with out-of-range coordinates", "path", path)
+		return tileInfo{}, "", false
+	}
+	format, ok := tileformat.ParseExt(m[3])
+	if !ok {
+		return tileInfo{}, "", false
+	}
+
+	return tileInfo{z: z, x: x, y: y, suffix: m[2], path: path}, format, true
+}
+
 // parseTileCoords converts the z/x/y capture groups of the tile filename
 // pattern into ints. It reports false when any of them is not representable.
 func parseTileCoords(matches []string) (z, x, y int, ok bool) {
@@ -177,13 +231,75 @@ func parseTileCoords(matches []string) (z, x, y int, ok bool) {
 
 type tileInfo struct {
 	path string
-	z    int
-	x    int
-	y    int
+	// suffix is "" for a base tile and "@2x" for its HiDPI sibling. convert
+	// ignores it — an MBTiles file has one tile per z/x/y — but purge selects
+	// on it, and the scan is the only place that can tell them apart.
+	suffix string
+	z      int
+	x      int
+	y      int
+}
+
+// flatTilePattern matches the flat layout: z{z}_x{x}_y{y}[@2x].{ext}.
+var flatTilePattern = regexp.MustCompile(`^z(\d+)_x(\d+)_y(\d+)(@2x)?\.(png|webp)$`)
+
+// nestedTileFilePattern matches the leaf of the nested layout: {y}[@2x].{ext}.
+// The zoom and column come from the two directories above it, so this alone is
+// not enough to identify a tile — see scanTilesDirectory.
+var nestedTileFilePattern = regexp.MustCompile(`^(\d+)(@2x)?\.(png|webp)$`)
+
+// walkTilesDirectory finds every tile file below dir, in either folder layout,
+// and reports how many of each image format it saw along with the zoom range.
+//
+// It applies no policy: `convert` needs a single format and refuses a mixed
+// folder, but `purge` deletes files and has no reason to care what they are
+// encoded as. Keeping the policy in scanTilesDirectory means purge cannot be
+// blocked by a rule that only exists for the MBTiles metadata table.
+func walkTilesDirectory(dir string) (tiles []tileInfo, counts map[tileformat.Format]int, minZoom, maxZoom int, err error) {
+	counts = map[tileformat.Format]int{}
+	minZoom = 999
+
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		tile, format, ok := parseTilePathInLayout(dir, path)
+		if !ok {
+			return nil
+		}
+		counts[format]++
+		tiles = append(tiles, tile)
+
+		if tile.z < minZoom {
+			minZoom = tile.z
+		}
+		if tile.z > maxZoom {
+			maxZoom = tile.z
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+
+	return tiles, counts, minZoom, maxZoom, nil
 }
 
 // scanTilesDirectory scans a directory for tile files and returns tile info
 // along with the image format they are all in.
+//
+// Both folder layouts are recognised: flat (z{z}_x{x}_y{y}.{ext}) and nested
+// ({z}/{x}/{y}.{ext}), the two --folder-structure produces. The scan used to
+// see only the flat one, which made `convert` silently produce an empty MBTiles
+// file from a nested folder — it found no filenames matching its pattern and
+// reported "no tiles found" for a directory full of tiles. purge reads the same
+// folders and would have had the same blind spot, so the layouts are handled
+// here, once.
 //
 // The format is detected rather than configured: the folder is the authority on
 // what its bytes are, and a wrong flag would produce an MBTiles file whose
@@ -191,63 +307,7 @@ type tileInfo struct {
 // with nothing to notice it. A folder holding both formats is refused for the
 // same reason: one MBTiles file records exactly one format.
 func scanTilesDirectory(dir string) ([]tileInfo, int, int, tileformat.Format, error) {
-	// Pattern: z{zoom}_x{x}_y{y}.{ext} or z{zoom}_x{x}_y{y}@2x.{ext}
-	pattern := regexp.MustCompile(`^z(\d+)_x(\d+)_y(\d+)(?:@2x)?\.(png|webp)$`)
-
-	var tiles []tileInfo
-	counts := map[tileformat.Format]int{}
-	minZoom := 999
-	maxZoom := 0
-
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		// Match filename
-		filename := filepath.Base(path)
-		matches := pattern.FindStringSubmatch(filename)
-		if matches == nil {
-			return nil
-		}
-
-		// Parse coordinates. The regexp only matches digits, so a failure here
-		// means the number does not fit an int; skip such a file.
-		z, x, y, ok := parseTileCoords(matches)
-		if !ok {
-			logger.Warn("Skipping tile with out-of-range coordinates", "path", path)
-			return nil
-		}
-
-		// The regexp only admits extensions tileformat knows, so this cannot
-		// fail; the check keeps the switch total.
-		format, ok := tileformat.ParseExt(matches[4])
-		if !ok {
-			return nil
-		}
-		counts[format]++
-
-		tiles = append(tiles, tileInfo{
-			z:    z,
-			x:    x,
-			y:    y,
-			path: path,
-		})
-
-		// Track zoom range
-		if z < minZoom {
-			minZoom = z
-		}
-		if z > maxZoom {
-			maxZoom = z
-		}
-
-		return nil
-	})
+	tiles, counts, minZoom, maxZoom, err := walkTilesDirectory(dir)
 	if err != nil {
 		return nil, 0, 0, "", err
 	}
