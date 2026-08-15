@@ -230,10 +230,13 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       open, and `HasTile` is format-blind), and `serve` 404s the extension it is not configured
       for rather than serving one format's bytes under the other's name.
 
-- [ ] **[P2]** Overpass failover. Routing takes the first coverage match and returns its error
-      verbatim (`internal/datasource/overpass.go:609-627`), so one flaky container fails every tile
-      in its box without ever trying the nil-coverage fallback. Also order-dependent: a nested
-      coverage box is unreachable unless listed first.
+- [x] **[P2]** Overpass failover. Every matching server is now tried in order, and the joined
+      error names each one. `shouldTryNextServer` (`internal/datasource/failover.go`) holds the
+      classification: a cancelled context and an over-cap response are _not_ retried elsewhere,
+      because the caller is gone in the first case and the next server returns the same body in
+      the second. The order-dependence is unchanged but no longer silent — a coverage box fully
+      inside an earlier one now warns at startup. This is also the first test coverage the routing
+      loop has ever had.
 - [x] **[P2]** Make `@2x` on-demand-only rather than a second full render pass. `runHiDPIBatch`
       is gone; `generate --bbox --hidpi` now errors instead of silently producing half the tiles
       a script asked for, and `--hidpi` survives for single tiles. `serve` already rendered `@2x`
