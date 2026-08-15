@@ -20,6 +20,9 @@ go.work
 # Generated tiles
 tiles/*.png
 tiles/**/*.png
+# The per-tile source-data stamp store `generate` and `serve` write beside them
+tiles/stamps.db
+tiles/**/stamps.db
 testdata/output/
 
 # Generated test artifacts (use repo-root testdata/*)

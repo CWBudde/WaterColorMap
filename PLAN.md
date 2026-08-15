@@ -281,14 +281,31 @@ zoom-by-zoom behaviour in [docs/zoom-levels.md](docs/zoom-levels.md).
 - [ ] Document hosting recommendations
 - [ ] Set up initial hosting solution
 
-### 5.6 On-the-Fly Rendering Service
+### 5.6 On-the-Fly Rendering Service ✅ COMPLETE
 
-- [ ] Design Go tile server architecture
-- [ ] Implement tile caching strategy
-- [ ] Add cache hit/miss handling
-- [ ] Implement LRU cache or Redis
-- [ ] Test server under load
-- [ ] Optimize for cache performance
+Most of the service already existed — two backends, admission control, per-tile
+deduplication, a fetch queue, retries and a status stream — but none of its cache was
+_measurable_ or _cheap_. Closed by adding the four things that were missing: per-request
+accounting (`X-Cache` plus a `cache` object in `/tiles/status`, with staleness counted as a
+reason so a too-aggressive `--stale-*` cutoff is visible); an `ETag` and conditional requests on
+both backends; an in-process LRU of tile-file metadata that removes two `os.Stat`s and a stamp
+lookup per hit (measured 3769 → 2278 ns/op on the stamped hit path); and `just load-test`, seven
+benchmarks over the real handler with the render stubbed out, which is where those numbers come
+from. **Redis was declined rather than skipped** — a single static binary whose cache of record is
+the tile directory gains a mandatory service and a second copy of the bytes, and the cross-node
+case it would be bought for belongs to 5.5 and is served by the `ETag` work instead.
+
+One behaviour change to know about: **`--cache-control` now defaults to `no-cache`** rather than
+`no-store`, because `no-store` forbids the client from keeping anything and so made the validator
+dead code. A positive `max-age` stays opt-in — it outlives `purge`.
+→ [docs/tile-server-architecture.md](docs/tile-server-architecture.md)
+
+- [x] Design Go tile server architecture (written down, at last)
+- [x] Implement tile caching strategy — four layers, and why tile bytes are not one of them
+- [x] Add cache hit/miss handling — the handling existed; the accounting did not
+- [x] Implement LRU cache or Redis — `internal/lru` in front of the tile directory; Redis declined
+- [x] Test server under load — `just load-test`, plus a `-race` concurrency test for CI
+- [x] Optimize for cache performance — ETag/304, one stat per hit, none on a metadata hit
 
 ### 5.6a Browser Playground (WebAssembly On-Demand)
 

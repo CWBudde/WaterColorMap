@@ -25,7 +25,8 @@ Module: `github.com/cwbudde/watercolormap` (Go 1.25, cgo — Mapnik 3.1+ require
 | `internal/watercolor`           | Per-layer painting and watercolor styling                                      |
 | `internal/composite`            | Layer compositing order and blending                                           |
 | `internal/pipeline`             | End-to-end tile generation                                                     |
-| `internal/server`               | Tile HTTP server, on-demand generation, admission control                      |
+| `internal/server`               | Tile HTTP server, on-demand generation, admission control, caching             |
+| `internal/lru`                  | Bounded LRU with TTL and statistics (leaf package)                             |
 | `internal/worker`               | Batch worker pool and progress reporting                                       |
 | `internal/checkpoint`           | Batch-run progress file (watermark over the tile enumeration, resume)          |
 | `internal/tile`, `internal/geo` | Tile coords and Web-Mercator math (`geo` is a leaf package)                    |
@@ -45,6 +46,7 @@ just lint           # golangci-lint
 just check          # fmt + lint + test
 just serve          # tile server + Leaflet demo, generates missing tiles
 just bench-blur     # blur kernel benchmarks
+just load-test      # tile-server benchmarks (hit path, dedup, admission)
 just update-goldens # regenerate golden images (TestPipelineStages)
 ```
 
@@ -86,6 +88,12 @@ outstanding.
   thresholds, Mapnik scale tiers). Read before changing any zoom window.
 - [docs/MULTI-SERVER-OVERPASS.md](docs/MULTI-SERVER-OVERPASS.md) — multi-endpoint
   Overpass configuration.
+- [docs/tile-server-architecture.md](docs/tile-server-architecture.md) — what
+  `serve` is: the request path, why admission sits below the cache check, the
+  four caching layers and why tile bytes are not one of them, the
+  `Cache-Control`/`ETag` policy and its conflict with `purge`, and the load-test
+  method. Read before changing the cache-hit path, admission control or the
+  per-tile lock.
 - [docs/tile-stamps-and-purge.md](docs/tile-stamps-and-purge.md) — the per-tile
   source-data stamp and the `purge` command: what a stamp records, where it
   lives, and why `generate` and `purge` resolve uncertainty in opposite

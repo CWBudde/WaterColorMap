@@ -196,6 +196,12 @@ it, so a repeat view costs a 304 rather than the bytes, and a tile removed by
 faster, at the price that a purged tile stays in caches for up to `max-age`.
 `--cache-control no-store` restores the old behaviour of refetching everything.
 
+An in-process cache of tile metadata (`--tile-meta-cache-entries`,
+`--tile-meta-cache-ttl`) keeps a hit from touching the filesystem at all. Its TTL
+also bounds how long a tile deleted by `purge` can still be served — see
+[docs/tile-server-architecture.md](docs/tile-server-architecture.md) for the full
+picture.
+
 ## Browser Playground (WASM)
 
 There is a minimal browser playground (Leaflet) that renders tiles on demand entirely in the browser — it queries Overpass directly and rasterises in WASM, with no backend. It can be deployed via GitHub Pages.
