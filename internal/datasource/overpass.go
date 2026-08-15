@@ -21,6 +21,9 @@ type OverpassConfig struct {
 	RetryConfig *overpass.RetryConfig
 	// HTTPClient allows custom HTTP client (default: a client with Timeout set)
 	HTTPClient *http.Client
+	// Cache, when non-nil, serves repeated queries from disk instead of
+	// re-fetching them. See ResponseCache.
+	Cache *ResponseCache
 	// Endpoint is the Overpass API URL (default: https://overpass-api.de/api/interpreter)
 	Endpoint string
 	// MaxResponseBytes caps a single Overpass response body. Zero means
@@ -95,9 +98,10 @@ func PrivateInstanceConfig(endpoint string) OverpassConfig {
 // OverpassDataSource fetches OSM data from Overpass API
 type OverpassDataSource struct {
 	client              overpass.Client
-	storeRawResponse    bool // If true, stores raw Overpass response in TileData (for debugging)
-	clipGeomToBbox      bool // If true, uses "out geom(bbox)" - DO NOT USE (known Overpass API bug)
-	allowEmptyResponses bool // If true, an empty mid-zoom response is a warning, not an error
+	cache               *ResponseCache // nil when response caching is disabled
+	storeRawResponse    bool           // If true, stores raw Overpass response in TileData (for debugging)
+	clipGeomToBbox      bool           // If true, uses "out geom(bbox)" - DO NOT USE (known Overpass API bug)
+	allowEmptyResponses bool           // If true, an empty mid-zoom response is a warning, not an error
 }
 
 // NewOverpassDataSource creates a new Overpass data source with default settings.
@@ -138,7 +142,10 @@ func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 	if cfg.MaxResponseBytes == 0 {
 		cfg.MaxResponseBytes = DefaultMaxResponseBytes
 	}
-	httpClient := withResponseLimit(cfg.HTTPClient, cfg.MaxResponseBytes)
+	// The cache wraps the limiter, not the other way round: the size cap has to
+	// stay in force on the miss path, where the bytes actually arrive from the
+	// network.
+	httpClient := withResponseCache(withResponseLimit(cfg.HTTPClient, cfg.MaxResponseBytes), cfg.Cache)
 
 	var client overpass.Client
 	if cfg.RetryConfig != nil {
@@ -160,6 +167,7 @@ func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 
 	return &OverpassDataSource{
 		client:           client,
+		cache:            cfg.Cache,
 		storeRawResponse: false, // Don't store raw response by default (saves memory)
 		clipGeomToBbox:   false, // Don't clip geometry (prevents artifacts from Overpass bug)
 	}
@@ -496,14 +504,21 @@ func (ds *OverpassDataSource) Close() error {
 	return nil
 }
 
-// ClearCache is a no-op for current version (no cache support)
+// ClearCache removes every on-disk Overpass response cached by this
+// datasource. It is a no-op when response caching is disabled.
 func (ds *OverpassDataSource) ClearCache() {
-	// No cache in current version
+	if ds.cache == nil {
+		return
+	}
+	if err := ds.cache.Clear(); err != nil {
+		slog.Warn("could not clear the Overpass response cache", "err", err)
+	}
 }
 
-// CacheSize returns 0 (no cache in current version)
+// CacheSize returns the number of cached Overpass responses currently on disk,
+// or 0 when response caching is disabled.
 func (ds *OverpassDataSource) CacheSize() int {
-	return 0
+	return ds.cache.Entries()
 }
 
 // ServerConfig defines configuration for a single Overpass server with its coverage area.
@@ -514,6 +529,10 @@ type ServerConfig struct {
 	RetryConfig *overpass.RetryConfig
 	// HTTPClient allows custom HTTP client
 	HTTPClient *http.Client
+	// Cache is the shared on-disk response cache, or nil. Sharing one cache
+	// across servers is safe and desirable: entries are keyed by endpoint, so
+	// per-server responses never collide, but they do share one size budget.
+	Cache *ResponseCache
 	// Coverage defines the geographic area this server covers (nil = covers everything)
 	Coverage *types.BoundingBox
 	// Endpoint is the Overpass API URL
@@ -574,6 +593,7 @@ func NewMultiOverpassDataSource(configs ...ServerConfig) *MultiOverpassDataSourc
 			RetryConfig:      cfg.RetryConfig,
 			HTTPClient:       cfg.HTTPClient,
 			MaxResponseBytes: cfg.MaxResponseBytes,
+			Cache:            cfg.Cache,
 		}
 
 		// Apply defaults if needed

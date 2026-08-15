@@ -198,13 +198,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 			logger.Info("Ocean rendering enabled", "shapefile", ocean.FullPath, "simplified", ocean.SimplifiedPath)
 		}
 
-		dataSourceName := viper.GetString("data-source")
-		var ds pipeline.DataSource
-		switch dataSourceName {
-		case "overpass":
-			ds = createOverpassDataSource(overpassWorkers, ocean.Enabled(), logger)
-		default:
-			return fmt.Errorf("unsupported data source: %s", dataSourceName)
+		ds, err := serveDataSource(overpassWorkers, ocean.Enabled(), logger)
+		if err != nil {
+			return err
 		}
 
 		wcOverrides, err := loadWatercolorOverrides()
@@ -359,18 +355,48 @@ func serveUntil(stopCtx context.Context, srv *http.Server, shutdownTimeout time.
 	return nil
 }
 
+// serveDataSource resolves the configured data source for `serve`.
+//
+// It mirrors newTileDataSource in generate.go; both exist so that the two
+// commands share createOverpassDataSource below and therefore honour the same
+// config blocks.
+func serveDataSource(overpassWorkers int, allowEmpty bool, logger *slog.Logger) (pipeline.DataSource, error) {
+	name := viper.GetString("data-source")
+	switch name {
+	case "overpass":
+		return createOverpassDataSource(overpassWorkers, allowEmpty, logger)
+	default:
+		return nil, fmt.Errorf("unsupported data source: %s", name)
+	}
+}
+
 // createOverpassDataSource creates an Overpass datasource from configuration.
 // Supports both single-server and multi-server (geographic routing) configurations.
 //
 // allowEmpty relaxes the empty-response check; pass the result of
 // oceanConfig().Enabled(), because an open-ocean tile legitimately returns no
 // Overpass features. See OverpassDataSource.WithEmptyResponsesAllowed.
-func createOverpassDataSource(overpassWorkers int, allowEmpty bool, logger *slog.Logger) pipeline.DataSource {
+//
+// The `cache:` block is read here and nowhere else. Both `serve` and `generate`
+// come through this function, so reading it here structurally prevents the
+// one-command-honours-the-block bug that `overpass:` used to have (see the
+// comment on newTileDataSource in generate.go).
+// A malformed `cache:` block fails the run here rather than degrading to "no
+// cache", for the same reason oceanConfig validates eagerly: a typo that
+// silently disables a feature the user asked for is worse than a startup error,
+// and a run that quietly refetches everything looks like a performance mystery
+// rather than a configuration mistake.
+func createOverpassDataSource(overpassWorkers int, allowEmpty bool, logger *slog.Logger) (pipeline.DataSource, error) {
+	cache, err := overpassCacheConfig(logger)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check for multi-server configuration
 	if viper.IsSet("overpass.servers") {
 		var configs []map[string]interface{}
 		if err := viper.UnmarshalKey("overpass.servers", &configs); err == nil && len(configs) > 0 {
-			return createMultiServerDataSource(configs, allowEmpty, logger)
+			return createMultiServerDataSource(configs, cache, allowEmpty, logger), nil
 		}
 	}
 
@@ -385,12 +411,33 @@ func createOverpassDataSource(overpassWorkers int, allowEmpty bool, logger *slog
 	}
 
 	logger.Info("Using single Overpass server", "endpoint", endpoint, "workers", overpassWorkers)
-	return datasource.NewOverpassDataSourceWithWorkers(endpoint, overpassWorkers).
-		WithEmptyResponsesAllowed(allowEmpty)
+
+	// NewOverpassDataSourceWithConfig rather than ...WithWorkers, because the
+	// cache has to reach the client and the shorthand constructor has no slot
+	// for it. The two are otherwise identical: WithWorkers builds exactly this
+	// config.
+	cfg := datasource.DefaultOverpassConfig()
+	cfg.Endpoint = endpoint
+	if overpassWorkers > 0 {
+		cfg.Workers = overpassWorkers
+	}
+	cfg.Cache = cache
+
+	return datasource.NewOverpassDataSourceWithConfig(cfg).
+		WithEmptyResponsesAllowed(allowEmpty), nil
 }
 
 // createMultiServerDataSource creates a multi-server routing datasource from config.
-func createMultiServerDataSource(configs []map[string]interface{}, allowEmpty bool, logger *slog.Logger) pipeline.DataSource {
+//
+// cache may be nil. When set, every server shares it: entries are keyed by
+// endpoint, so responses from different servers never collide, but they do
+// share one size budget.
+func createMultiServerDataSource(
+	configs []map[string]interface{},
+	cache *datasource.ResponseCache,
+	allowEmpty bool,
+	logger *slog.Logger,
+) pipeline.DataSource {
 	var serverConfigs []datasource.ServerConfig
 
 	for i, cfg := range configs {
@@ -403,6 +450,7 @@ func createMultiServerDataSource(configs []map[string]interface{}, allowEmpty bo
 			Workers:             workers,
 			Name:                name,
 			AllowEmptyResponses: allowEmpty,
+			Cache:               cache,
 		}
 
 		// Parse coverage area if specified
