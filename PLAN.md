@@ -304,11 +304,16 @@ selection are already implemented and proven (`internal/renderer/ocean.go`, `Jus
 That is also the answer to the question "vector tile input" was being asked.
 → [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md)
 
+The zoom stack as it stands today — what each zoom fetches, which dataset answers
+it, and the zoom-conditioned behaviour that lives nowhere near the rule tables —
+is written down in [docs/zoom-levels.md](docs/zoom-levels.md). It records the
+z0–5 gap rather than closing it.
+
 - [ ] Define zoom range strategy (0-5: Natural Earth, 6-9: country, 10+: OSM)
 - [ ] Implement zoom-specific data filtering
 - [ ] Create generalized rendering for low zooms
 - [ ] Test rendering at each zoom range
-- [ ] Document zoom level characteristics
+- [x] Document zoom level characteristics (`docs/zoom-levels.md`)
 
 ### 5.4 Tile Storage Format
 
