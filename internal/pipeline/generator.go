@@ -878,6 +878,18 @@ type maskSet struct {
 
 // buildMasks extracts alpha masks from rendered layers and creates the non-land union.
 // The actual blur/noise/threshold processing is now handled by the watercolor processor.
+// alphaMaskOrEmpty returns the layer's alpha mask, or an all-zero mask of the tile bounds
+// when the layer was not rendered. Callers keep these masks (the debug context holds a
+// reference to each), so they are freshly allocated rather than pooled - but only once:
+// extracting into an empty mask that is then thrown away was an allocation per layer.
+func alphaMaskOrEmpty(img image.Image, bounds image.Rectangle) *image.Gray {
+	if img == nil {
+		return mask.NewEmptyMask(bounds)
+	}
+
+	return mask.ExtractAlphaMask(img)
+}
+
 func buildMasks(
 	rawLayers map[geojson.LayerType]image.Image,
 	params watercolor.Params,
@@ -896,39 +908,14 @@ func buildMasks(
 	baseBounds := image.Rect(0, 0, params.TileSize, params.TileSize)
 
 	// Extract alpha masks from each layer
-	waterMask := mask.NewEmptyMask(baseBounds)
-	riversMask := mask.NewEmptyMask(baseBounds)
-	roadsMask := mask.NewEmptyMask(baseBounds)
-	railroadsMask := mask.NewEmptyMask(baseBounds)
-	highwaysAlpha := mask.NewEmptyMask(baseBounds)
-	urbanMask := mask.NewEmptyMask(baseBounds)
-	civicMask := mask.NewEmptyMask(baseBounds)
-	buildingsMask := mask.NewEmptyMask(baseBounds)
-
-	if waterImg != nil {
-		waterMask = mask.ExtractAlphaMask(waterImg)
-	}
-	if riversImg != nil {
-		riversMask = mask.ExtractAlphaMask(riversImg)
-	}
-	if roadsImg != nil {
-		roadsMask = mask.ExtractAlphaMask(roadsImg)
-	}
-	if railroadsImg != nil {
-		railroadsMask = mask.ExtractAlphaMask(railroadsImg)
-	}
-	if highwaysImg != nil {
-		highwaysAlpha = mask.ExtractAlphaMask(highwaysImg)
-	}
-	if urbanImg != nil {
-		urbanMask = mask.ExtractAlphaMask(urbanImg)
-	}
-	if civicImg != nil {
-		civicMask = mask.ExtractAlphaMask(civicImg)
-	}
-	if buildingsImg != nil {
-		buildingsMask = mask.ExtractAlphaMask(buildingsImg)
-	}
+	waterMask := alphaMaskOrEmpty(waterImg, baseBounds)
+	riversMask := alphaMaskOrEmpty(riversImg, baseBounds)
+	roadsMask := alphaMaskOrEmpty(roadsImg, baseBounds)
+	railroadsMask := alphaMaskOrEmpty(railroadsImg, baseBounds)
+	highwaysAlpha := alphaMaskOrEmpty(highwaysImg, baseBounds)
+	urbanMask := alphaMaskOrEmpty(urbanImg, baseBounds)
+	civicMask := alphaMaskOrEmpty(civicImg, baseBounds)
+	buildingsMask := alphaMaskOrEmpty(buildingsImg, baseBounds)
 
 	// Capture alpha masks (all grayscale)
 	dc.Capture("01_water_alpha", "Alpha mask from water layer", waterMask, 1)
