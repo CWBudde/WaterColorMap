@@ -259,3 +259,23 @@ func assertRowsEqual(t *testing.T, got, want []byte, w, h, stride int, format st
 		}
 	}
 }
+
+// TestPlanForCachesAndRejectsNaN pins both halves of the memoization: a repeated sigma
+// returns the same tap slice rather than a rebuilt one, and a NaN sigma is answered
+// before the cache. NaN never equals itself, so caching it would miss every lookup and
+// grow the map on every call.
+func TestPlanForCachesAndRejectsNaN(t *testing.T) {
+	first := PlanFor(2.45)
+	second := PlanFor(2.45)
+
+	if first.Mode != ModeConv || len(first.Taps) == 0 {
+		t.Fatalf("expected sigma 2.45 on the convolution path, got %v", first.Mode)
+	}
+	if &first.Taps[0] != &second.Taps[0] {
+		t.Error("repeated PlanFor rebuilt the tap table instead of reusing the cached one")
+	}
+
+	if got := PlanFor(math.NaN()); got.Mode != ModeNone {
+		t.Errorf("PlanFor(NaN) = %v, want ModeNone", got.Mode)
+	}
+}

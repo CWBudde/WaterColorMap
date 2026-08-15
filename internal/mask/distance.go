@@ -361,8 +361,13 @@ func DistanceToIntensity(distMask *image.Gray, gamma float64) *image.Gray {
 // which must have the same bounds as distMask. Safe in place: each pixel is read before
 // it is written.
 func DistanceToIntensityInto(distMask *image.Gray, gamma float64, output *image.Gray) {
-	bounds := distMask.Bounds()
+	distanceToIntensityIntoRect(distMask, gamma, output, distMask.Bounds())
+}
 
+// distanceToIntensityIntoRect is DistanceToIntensityInto restricted to a rectangle, so
+// that a destination larger than the region being computed keeps the rest of its pixels
+// untouched instead of running the curve over them.
+func distanceToIntensityIntoRect(distMask *image.Gray, gamma float64, output *image.Gray, bounds image.Rectangle) {
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			// Get normalized distance (0-255)
@@ -408,14 +413,21 @@ func CreateDistanceEdgeMaskWithContext(mask *image.Gray, radius float64, gamma f
 }
 
 // CreateDistanceEdgeMaskIntoWithContext is CreateDistanceEdgeMaskWithContext writing into a
-// caller-owned destination, which must have the same bounds as mask.
+// caller-owned destination.
 //
 // It needs no intermediate image of its own: the distance field lands in dst and the
 // intensity curve is then applied to it in place. Both passes are safe in place, but
 // callers here always want their input mask preserved, so pass a distinct destination.
+//
+// Unlike the other *Into helpers, dst is allowed to be larger than mask - the watercolor
+// processor keeps one tile-sized edge-mask buffer and paints masks of any size through it.
+// Only mask's bounds are written, by both passes; the rest of dst is left exactly as it
+// was, so a caller reusing a buffer that way has to clear it. Bounding both passes the
+// same way is the point: the transform's writes are clipped to mask's bounds anyway, so an
+// intensity pass running over all of dst would fold the previous layer's fringe back in.
 func CreateDistanceEdgeMaskIntoWithContext(
 	mask *image.Gray, radius float64, gamma float64, ctx *DistanceContext, dst *image.Gray,
 ) {
 	EuclideanDistanceTransformIntoWithContext(mask, radius, ctx, dst)
-	DistanceToIntensityInto(dst, gamma, dst)
+	distanceToIntensityIntoRect(dst, gamma, dst, mask.Bounds())
 }
