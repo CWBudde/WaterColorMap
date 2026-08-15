@@ -201,6 +201,40 @@ func TestNewEncoderRejectsUnknownFormat(t *testing.T) {
 	}
 }
 
+// TestNewEncoderKeepsExplicitEffortZero guards the flag/encoder contract: 0 is
+// nativewebp's fastest level, so it has to reach the encoder rather than being
+// read as "unset" and silently promoted to DefaultWebPEffort.
+//
+// The effort lives in unexported encoder state, so this asserts on output
+// instead — and specifically against DefaultWebPEffort, because that is the
+// comparison the old behaviour could not pass: promoting 0 to 4 made the two
+// encoders identical. Effort 0 does less analysis, so its output is larger.
+func TestNewEncoderKeepsExplicitEffortZero(t *testing.T) {
+	img := noiseTile(6)
+
+	encode := func(effort int) []byte {
+		enc, err := NewEncoder(EncoderOptions{Format: WebP, WebPEffort: effort})
+		if err != nil {
+			t.Fatalf("NewEncoder(effort %d): %v", effort, err)
+		}
+		var buf bytes.Buffer
+		if err := enc.Encode(&buf, img); err != nil {
+			t.Fatalf("Encode(effort %d): %v", effort, err)
+		}
+		return buf.Bytes()
+	}
+
+	zero, def := encode(0), encode(DefaultWebPEffort)
+	if bytes.Equal(zero, def) {
+		t.Fatalf("effort 0 and effort %d produced identical output (%d bytes); "+
+			"effort 0 was substituted rather than passed through", DefaultWebPEffort, len(zero))
+	}
+	if len(zero) <= len(def) {
+		t.Errorf("effort 0 produced %d bytes and effort %d produced %d; "+
+			"expected the faster level to be larger", len(zero), DefaultWebPEffort, len(def))
+	}
+}
+
 func TestNewEncoderRejectsOutOfRangeEffort(t *testing.T) {
 	for _, effort := range []int{-1, 7, 99} {
 		if _, err := NewEncoder(EncoderOptions{Format: WebP, WebPEffort: effort}); err == nil {
@@ -309,7 +343,7 @@ func BenchmarkEncodeTile(b *testing.B) {
 		opts EncoderOptions
 	}{
 		{"png", EncoderOptions{}},
-		{"webp", EncoderOptions{Format: WebP}},
+		{"webp_effort4", EncoderOptions{Format: WebP, WebPEffort: DefaultWebPEffort}},
 		{"webp_effort0", EncoderOptions{Format: WebP, WebPEffort: 0}},
 	}
 

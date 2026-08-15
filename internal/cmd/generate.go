@@ -53,7 +53,7 @@ func init() {
 	generateCmd.Flags().Bool("hidpi", false, "Also generate a 2x (@2x) tile alongside the base tile")
 	generateCmd.Flags().String("image-format", "png", "Tile image encoding: png or webp (webp is lossless, ~1.2x smaller)")
 	generateCmd.Flags().String("png-compression", "default", "PNG compression (default, speed, best, none); ignored for --image-format=webp")
-	generateCmd.Flags().Int("webp-effort", 0, "WebP compression effort 0-6 (0 = fastest, default 4); ignored for --image-format=png")
+	generateCmd.Flags().Int("webp-effort", tileformat.DefaultWebPEffort, "WebP compression effort 0-6 (0 = fastest); ignored for --image-format=png")
 	generateCmd.Flags().Int64("seed", 1337, "Deterministic seed for noise/texture alignment")
 	generateCmd.Flags().Bool("keep-layers", false, "Keep intermediate rendered layer PNGs for debugging")
 
