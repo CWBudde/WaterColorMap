@@ -72,7 +72,10 @@ overpass:
 #   # On-demand generation
 #   generate_missing: true
 #   disable_cache: false # always re-render, still writes to disk
-#   max_concurrent_generations: 0 # flag default is the CPU count
+#   # Defaults to the CPU count, which cannot be written as a literal here:
+#   # uncommenting this key replaces that default outright, and any value <= 0
+#   # is clamped to 1 (internal/server/ondemand_tiles.go), serialising rendering.
+#   max_concurrent_generations: 8
 #   generation_timeout: "2m"
 #   cache_control: "no-store"
 #   max_pending_generations: 0 # 0 = auto; excess requests get 503
