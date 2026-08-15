@@ -79,6 +79,11 @@ outstanding.
   cover. Use it after touching blur, noise, texture or metatile padding.
 - [docs/MULTI-SERVER-OVERPASS.md](docs/MULTI-SERVER-OVERPASS.md) — multi-endpoint
   Overpass configuration.
+- [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md) — how the data
+  side scales from one city to a country and what it would cost to go global:
+  the regional-Overpass approach, why vector tile input was rejected, measured
+  per-tile storage and throughput, and the update pipeline. Read before planning
+  any bulk generation run.
 
 **History (completed work, kept for the rationale)**
 
@@ -93,10 +98,9 @@ outstanding.
 
 **WASM playground**
 
-- [docs/WASM-PLAYGROUND-QUICKSTART.md](docs/WASM-PLAYGROUND-QUICKSTART.md),
-  [docs/WASM-PLAYGROUND-IMPLEMENTATION.md](docs/WASM-PLAYGROUND-IMPLEMENTATION.md),
-  [docs/WASM-PLAYGROUND-STATUS.md](docs/WASM-PLAYGROUND-STATUS.md)
-  (these three overlap; consolidating them is tracked in PLAN.md § 7.5)
+- [docs/wasm-playground.md](docs/wasm-playground.md) — the single reference for the
+  browser playground. It replaced three overlapping status documents under 7.5;
+  `docs/wasm-playground/README.md` is now just a pointer to it.
 
 ## Conventions worth knowing
 

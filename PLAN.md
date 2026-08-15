@@ -124,8 +124,8 @@ Two bugs found while verifying, both fixed:
 
 **Testing**:
 
-- [x] Pure ocean tile (z9_x266_y164, North Sea) renders as water
-- [x] Coastal tile (z9_x267_y165, East Frisian coast) renders sea _and_ land
+- [x] Pure ocean tile (`z9_x266_y164`, North Sea) renders as water
+- [x] Coastal tile (`z9_x267_y165`, East Frisian coast) renders sea _and_ land
 - [x] Inland tile is pixel-identical with the ocean pass on and off
 - [x] Zoom-dependent shapefile selection, config parsing/validation, the
       ocean/water union, and the empty-response opt-out are unit-tested
@@ -141,13 +141,93 @@ would need the shapefile, which is why it is not gated in yet.
 
 ## Phase 5: Scaling and Modern Improvements
 
-### 5.1 Data Scaling Strategy
+### 5.1 Data Scaling Strategy ✅ COMPLETE
 
-- [ ] Plan regional database approach
-- [ ] Evaluate vector tile input option
-- [ ] Document data management for large regions
-- [ ] Plan storage requirements
-- [ ] Design data update pipeline
+- [x] Plan regional database approach
+- [x] Evaluate vector tile input option
+- [x] Document data management for large regions
+- [x] Plan storage requirements
+- [x] Design data update pipeline
+
+The five items above were inherited verbatim from `docs/goal.md`, a research brief written before
+the implementation existed and assuming PostGIS. They could not be closed as written: the code went
+Overpass-only, and `internal/cmd/datasource_config_test.go:83` actively asserts that `"postgis"` is
+rejected. They are answered instead against what the code is, staged honestly — concrete for
+Niedersachsen → Germany, with global coverage costed rather than planned.
+→ [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md)
+
+Three things the work measured that change decisions elsewhere in this plan:
+
+- **The Overpass fetch is ~71% of per-tile wall clock** (2.24 s of 3.16 s, z13, local instance,
+  6 runs, cross-checked against a pass-through proxy). 5.11's optimisation roadmap targets the
+  ~18% render slice. That does not make 5.11 wrong, but the source side is where a bulk run's
+  time actually goes — hence the response cache below.
+- **WebP q80 is a 9.2× reduction** (124 KB → 13.4 KB mean over 20 tiles, z5–z17; damage ~4/255
+  mean per channel, and the tiles are label-free by policy so there is no text to smear).
+  This is a larger storage lever than any choice of zoom ceiling.
+- **There are no cheap empty tiles in PNG, confirmed outside the city**: a Sahara tile with
+  _zero_ OSM features still costs 108 KB, and a mid-Pacific ocean tile 127 KB — above the Hanover
+  mean. The texture and noise fill every pixel. In WebP the empty tile drops to 6 KB.
+
+Landed alongside the document, because both are load-bearing for the workflow it recommends:
+
+- **MBTiles resume.** `--format=mbtiles` re-rendered everything on every run: the skip-existing
+  check stat'd the _folder_ path even when output went through a `TileWriter`. Now
+  `pipeline.TileProber` (an optional interface, so a writer that cannot answer simply omits it)
+  plus `mbtiles.Writer.HasTile`. Every failure mode degrades to _render_, never to _skip_ — a
+  false skip leaves a permanent hole, a false render costs seconds.
+- **On-disk Overpass response cache**, `internal/datasource/cache.go` — a caching
+  `http.RoundTripper` under the go-overpass client, **default off**. It sits there rather than
+  wrapping the datasource because `NewFetchQueue` takes `*OverpassDataSource` concretely and
+  `ondemand_tiles.go` type-asserts on it, so a decorator would silently strip `serve` of its
+  fetch queue. The key is a hash of endpoint + query text and contains **no tile identity**,
+  which is what keeps it a pure performance change under the world-position rule. It caches the
+  verbatim upstream bytes, so nothing downstream can observe it. One measured consequence:
+  `@2x` padding is computed in world pixels, so the 512px query is byte-identical to the 256px
+  one and a `--hidpi` run now reuses the base pass's entries instead of refetching every metatile.
+  Its `httptest` tests also discharge 7.6's "mocked-HTTP Overpass tests" item.
+
+**A finding worth acting on**: the public `overpass-api.de` `406 Not Acceptable` that
+`docs/local-overpass.md` attributes to rate limiting is not rate limiting. The server rejects Go's
+default `User-Agent: Go-http-client/1.1`; the identical query from `curl` returns 200 in ~0.5 s.
+`go-overpass`'s `httpPost` never sets a UA. One line in the dependency 7.4 already wants pinned —
+and it would make the public API a usable fallback for coverage gaps.
+
+### 5.1a Follow-ups surfaced by the scaling analysis
+
+Filed rather than smuggled into the 5.1 work, in rough value order.
+
+- [ ] **[P1]** Set a `User-Agent` in `go-overpass` (see above). Cheapest item in this plan by a
+      wide margin, and it unblocks every routing recommendation that assumes a public fallback.
+- [ ] **[P1]** Evaluate WebP output end to end (9.2× measured). `internal/mbtiles/types.go:18`
+      already lists `webp` as a format string; nothing produces one. Needs a format flag, TileJSON
+      plumbing (`tilejson.go:36` hardcodes `png` as "the only tile format this project produces"),
+      and a decision on whether to keep PNG as an option.
+- [ ] **[P2]** Overpass failover. Routing takes the first coverage match and returns its error
+      verbatim (`internal/datasource/overpass.go:609-627`), so one flaky container fails every tile
+      in its box without ever trying the nil-coverage fallback. Also order-dependent: a nested
+      coverage box is unreachable unless listed first.
+- [ ] **[P2]** Make `@2x` on-demand-only rather than a second full render pass
+      (`runHiDPIBatch`). 4× storage and 2× compute from one policy decision.
+- [ ] **[P2]** Fetch per metatile band instead of per tile. `out geom` returns unclipped geometry,
+      so a motorway crossing 64 tiles is transferred 64 times; Germany's 237,424 z14 queries would
+      become ~3.7k. **Must stop at z15** — the building rules are not monotone across z16
+      (`overpass.go:477` drops `landuse=*` while adding `building`), so parent reuse is invalid there.
+- [ ] **[P3]** Sort features by OSM ID in `ExtractFeaturesFromOverpassResult` — it ranges over
+      `map[int64]*…` unsorted (`overpass_extract.go:32,49`), so feature order varies run to run and
+      **the same tile does not render byte-identically twice**. Measured on a z12 Hanover tile:
+      mean deviation 0.014/255, max 36, on 0.01% of channels — a handful of pixels where draw order
+      flips on an antialiased edge. Small, but it means PNG-level regression testing can never be
+      exact. The response cache neither causes nor worsens it: two cached runs differ by the same
+      0.016 as two uncached runs, which is precisely why the cache stores raw JSON rather than the
+      extracted collection — caching post-extraction would have frozen one arbitrary order and
+      changed behaviour instead of only timing. Fixing it will move the pipeline goldens, so do it
+      deliberately.
+- [ ] **[P3]** A tile purge command, and a source-data version stamp on rendered tiles. Without
+      one, skip-existing treats any existing PNG as valid forever and mtime is the only staleness
+      proxy — which is what keeps 5.7 open.
+- [ ] **[P3]** Streaming tile enumeration and a checkpoint file. `worker/pool.go` buffers the whole
+      task list (`make(chan Task, len(tasks))`) — 317,618 structs for Germany z0–14.
 
 ### 5.2 Parallel Tile Rendering
 
@@ -160,6 +240,13 @@ would need the shapefile, which is why it is not gated in yet.
 - [x] Add batch CLI command (`--bbox`, `--zoom-min`, `--zoom-max`, `--workers`, `--progress`)
 
 ### 5.3 Multi-Zoom Generation
+
+Natural Earth still exists only in this line and in `docs/goal.md` — there is no code anywhere.
+5.1 recommends filling z0–5 exactly the way the ocean was filled in 4.10: Natural Earth ships
+shapefiles, Mapnik's `shape` plugin is installed, and `shapeindex` plus zoom-based dataset
+selection are already implemented and proven (`internal/renderer/ocean.go`, `Justfile:204-243`).
+That is also the answer to the question "vector tile input" was being asked.
+→ [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md)
 
 - [ ] Define zoom range strategy (0-5: Natural Earth, 6-9: country, 10+: OSM)
 - [ ] Implement zoom-specific data filtering
@@ -212,6 +299,13 @@ would need the shapefile, which is why it is not gated in yet.
 **Note**: The playground now uses hybrid tile serving with pre-generated static tiles for the demo area (Hanover, zoom 13-14) served from GitHub Pages, falling back to on-demand WASM generation for uncovered areas.
 
 ### 5.7 Data Update Pipeline
+
+The _design_ is done under 5.1 — two layers: daily changed-node-bbox invalidation from the `.osc.gz`
+(which misses tag-only edits on ways whose nodes are untouched, and proper expiry needs a
+node-location store, i.e. `osm2pgsql --expire-tiles`), plus a periodic full regional re-render whose
+cadence follows from measured throughput. The _capability_ is what stays open: there is no purge
+command and no source-data version stamp on a rendered tile.
+→ [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md)
 
 - [ ] Design periodic data refresh strategy
 - [ ] Implement OSM diff application (optional)
@@ -555,9 +649,11 @@ bugs → [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
 
 - [ ] **[P2]** Separate pure-Go logic from CGO via build tags so genuinely good tests
       (`parseTilePath`, synthetic pipeline path, raster, mask/composite) run in a Mapnik-less env / CI.
-- [ ] **[P2]** Add `internal/raster` tests (353 LOC, pure Go, zero tests) and mocked-HTTP
-      (`httptest`) Overpass tests for caching/retry/error paths (current datasource "unit" tests are
-      tautological — only assert non-nil constructors).
+- [ ] **[P2]** Add `internal/raster` tests (353 LOC, pure Go, zero tests). The mocked-HTTP
+      (`httptest`) half of this item is **done**: `internal/datasource/cache_transport_test.go`
+      drives a counting `httptest.Server` through the cache/retry/error paths, including a
+      byte-identity check that a cache hit hands the client exactly what the network did. The
+      remaining tautological tests (non-nil constructor assertions) are still worth replacing.
 - [ ] **[P2]** Delete the ~7.2 MB orphaned goldens under `testdata/golden/watercolor-stages*/`
       (referenced by no test) and fix the `update-goldens` Justfile recipe (matches no test → no-op).
 - [ ] **[P3]** Replace timing-based assertions (`worker/pool_test.go:90,174`) with deterministic
@@ -578,13 +674,15 @@ describe what the code actually does; these entries track making the code do the
       hyphenated key maps to a name no shell can set (`WATERCOLORMAP_SERVE.ADDR`,
       `WATERCOLORMAP_OUTPUT-DIR`). The README's env-var precedence claim was removed rather than
       repaired. Fix: bind `cfgFile`, add `SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))`.
-- [ ] **[P2]** `generate` ignores the entire `overpass:` config block. `newTileDataSource`
-      (`internal/cmd/generate.go:361-368`) always constructs a default single-server Overpass source, so
-      neither `overpass.endpoint` nor the geographic routing in `overpass.servers` has any effect on
-      batch generation — only `serve` reads them (`serve.go:313-321`). This makes
-      `config.multi-overpass.example.yaml` misleading for exactly the workload (bulk generation) that
-      most wants multiple servers. Both example files now carry the caveat; the fix is to have
-      `generate` build its datasource the same way `serve` does.
+- [x] **[P2]** `generate` ignored the entire `overpass:` config block — `newTileDataSource` always
+      constructed a default single-server source, so neither `overpass.endpoint` nor the geographic
+      routing in `overpass.servers` affected batch generation, which is exactly the workload that most
+      wants multiple servers. **Fixed**: `newTileDataSource` (`internal/cmd/generate.go:403-419`) now
+      goes through the same `createOverpassDataSource` that `serve` uses, guarded by a regression test
+      covering both the `overpass.endpoint` and the coverage-routed `overpass.servers` case
+      (`internal/cmd/datasource_config_test.go:20-78`). The caveat has been dropped from both example
+      config files. Closed by the 5.1 work, which needed the routing to be real before it could
+      recommend it.
 - [ ] **[P3]** `wasm-deploy.yml` has no push-to-`main` trigger, so merging to main never redeploys the
       playground — only a release, a version tag, the weekly cron, or a manual dispatch does. Combined
       with the weekly cron having failed since January 2026, the deployed page can silently lag main

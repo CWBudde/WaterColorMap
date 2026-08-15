@@ -2,9 +2,9 @@
 # This demonstrates how to configure multiple Overpass API servers with
 # geographic routing.
 #
-# NOTE: multi-server routing is used by `serve` only. `generate` always builds
-# a default single-server Overpass source and ignores everything under
-# `overpass:`. See config.example.yaml for the remaining settings.
+# Both `serve` and `generate` honour this block — they build their datasource
+# through the same code path, so a bulk run routes per tile just as the server
+# does. See config.example.yaml for the remaining settings.
 
 # Data source configuration
 data-source: "overpass"
