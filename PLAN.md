@@ -187,11 +187,12 @@ Landed alongside the document, because both are load-bearing for the workflow it
   one and a `--hidpi` run now reuses the base pass's entries instead of refetching every metatile.
   Its `httptest` tests also discharge 7.6's "mocked-HTTP Overpass tests" item.
 
-**A finding worth acting on**: the public `overpass-api.de` `406 Not Acceptable` that
-`docs/local-overpass.md` attributes to rate limiting is not rate limiting. The server rejects Go's
-default `User-Agent: Go-http-client/1.1`; the identical query from `curl` returns 200 in ~0.5 s.
-`go-overpass`'s `httpPost` never sets a UA. One line in the dependency 7.4 already wants pinned —
-and it would make the public API a usable fallback for coverage gaps.
+**A finding worth acting on, since acted on**: the public `overpass-api.de` `406 Not Acceptable`
+long attributed to rate limiting was not rate limiting. The server rejects Go's default
+`User-Agent: Go-http-client/1.1`; the identical query from `curl` returns 200 in ~0.5 s.
+`go-overpass`'s `httpPost` never sets a UA. The fix did not need the dependency: a
+`RoundTripper` in `internal/datasource/useragent.go` sets the header below the client, so the
+public API is now a usable fallback for coverage gaps. See 5.1a's first item.
 
 ### 5.1a Follow-ups surfaced by the scaling analysis
 
