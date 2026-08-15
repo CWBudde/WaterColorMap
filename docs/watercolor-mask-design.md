@@ -45,6 +45,13 @@ Combined non-land mask (union):
 
 - `nonLandMask` := max(waterMask, roadsMask)
 
+**As shipped, this union has eight inputs, not two.** `buildMasks`
+(`internal/pipeline/generator.go`) unions water, rivers, roads, railroads,
+highways, urban, civic and buildings — every layer that should punch a hole in
+land, not just the two the original Stamen note names. The two-input form above
+is the shape of the idea; the eight-input form is what the land mask is actually
+inverted from.
+
 Fuzzy boundary mask (the Stamen step):
 
 1. `blur1` := GaussianBlur(nonLandMask)
@@ -82,10 +89,23 @@ from the same mask field, so it stays consistent across tiles.
 Other layers keep the same building blocks but must get their **masking
 relationships** right before painting:
 
-- `parksMask` := alpha(parks) AND `landMask`
-- `civicMask` := alpha(civic) AND `landMask`
+- `parksMask` := alpha(parks) AND max(`landMask`, alpha(urban), alpha(civic))
+- `civicMask` := alpha(civic) MINUS max(roads, railroads, highways)
+- `urbanMask` := alpha(urban) MINUS max(roads, railroads, highways)
 - `waterMask` := alpha(water)
 - `roadsMask` := alpha(roads)
+
+Two of these are worth explaining, because the obvious "AND `landMask`" version
+is wrong once civic and urban are in the non-land union above:
+
+- **Civic and urban are not intersected with land.** They are already subtracted
+  _from_ land, so intersecting them with the result would leave them nearly
+  empty. `paintAreaLayers` instead subtracts only the road/rail/highway union
+  from them, which is what keeps roads drawn on top of an area rather than
+  buried under it.
+- **Parks are constrained to land _plus_ urban and civic**, not to land alone,
+  for the same reason: a park inside a built-up area sits on a hole in the land
+  mask, so `AND landMask` would erase exactly the parks that matter most.
 
 Each layer then gets: blur → noise → threshold → antialias; texture application
 with the final mask as alpha; and optionally a further-blurred copy reused as a
