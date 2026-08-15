@@ -269,24 +269,12 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       scale could answer sixteen tiles from a server holding data for one corner. Band routing
       requires **containment** and splits otherwise.
 
-- [x] **[P3]** Sort features by OSM ID in `ExtractFeaturesFromOverpassResult`. Both element
-      loops now walk `slices.Sorted(maps.Keys(…))` rather than the raw `map[int64]*…`, so **the
-      same tile renders byte-identically twice**. What the old behaviour cost: mean deviation
-      0.014/255, max 36, on 0.01% of channels of a z12 Hanover tile — a handful of pixels where
-      draw order flipped on an antialiased edge. Small in the image, decisive for testing, since
-      it put a tolerance floor under every PNG-level regression test.
-
-      Ascending OSM ID is arbitrary _as a painting order_; only its stability matters, which is
-      why `TestExtractFeatureOrderIsByOSMID` names the choice rather than leaving a later
-      refactor to swap it silently. The response cache was never implicated — two cached runs
-      differed by the same 0.016 as two uncached ones — and it goes on storing raw JSON rather
-      than the extracted collection, now for its own reasons: one serialization format to keep
-      in sync with the decoder, and no stored collection that could outlive a change to the
-      extraction rules.
-
-      The synthetic pipeline goldens are unaffected (`syntheticDataSource` involves no map
-      iteration). The two Hannover cases move and need `just update-goldens-hannover` from a
-      machine with network.
+- [x] **[P3]** Sort features by OSM ID in `ExtractFeaturesFromOverpassResult`. Both element loops
+      now walk `slices.Sorted(maps.Keys(…))` rather than the raw `map[int64]*…`, so the same tile
+      renders byte-identically twice instead of drifting by up to 36/255 on the antialiased edges
+      where draw order flipped — which had put a tolerance floor under every PNG-level regression
+      test. Rationale, measurements and the golden-update note:
+      [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md).
 - [ ] **[P3]** A tile purge command, and a source-data version stamp on rendered tiles. Without
       one, skip-existing treats any existing PNG as valid forever and mtime is the only staleness
       proxy — which is what keeps 5.7 open.

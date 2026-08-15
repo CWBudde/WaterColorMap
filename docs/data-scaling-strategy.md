@@ -761,6 +761,12 @@ now for its own reasons rather than this one: no second serialization format to
 keep in sync with the decoder, and no stored collection that could outlive a
 change to the extraction rules.
 
+Ascending OSM ID is arbitrary _as a painting order_; only its stability matters,
+which is why `TestExtractFeatureOrderIsByOSMID` names the choice rather than
+leaving a later refactor to swap it silently. The synthetic pipeline goldens are
+unaffected (`syntheticDataSource` involves no map iteration); the two Hannover
+cases move and need `just update-goldens-hannover` from a machine with network.
+
 ### Source freshness is nearly free, and currently buys nothing
 
 The Niedersachsen container keeps itself current from Geofabrik minutely diffs
