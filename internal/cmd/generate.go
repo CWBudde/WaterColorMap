@@ -41,8 +41,11 @@ func init() {
 
 	// Batch generation flags
 	generateCmd.Flags().String("bbox", "", "Bounding box: minLon,minLat,maxLon,maxLat (e.g., \"9.7,52.3,9.9,52.4\")")
-	generateCmd.Flags().Int("zoom-min", 0, "Minimum zoom level for batch generation")
-	generateCmd.Flags().Int("zoom-max", 0, "Maximum zoom level for batch generation")
+	// The unset sentinel is -1, not 0. Zoom 0 is a real, renderable zoom — it is
+	// the single world tile, and the whole low-zoom tier starts there — so it
+	// cannot double as "flag not supplied".
+	generateCmd.Flags().Int("zoom-min", unsetZoom, "Minimum zoom level for batch generation")
+	generateCmd.Flags().Int("zoom-max", unsetZoom, "Maximum zoom level for batch generation")
 	generateCmd.Flags().IntP("workers", "w", 0, "Number of parallel workers (default: number of CPUs)")
 	generateCmd.Flags().Bool("progress", true, "Show progress bar during batch generation")
 	generateCmd.Flags().Bool("allow-failures", false, "Continue generation even if some tiles fail (useful for CI/CD with API rate limits)")
@@ -452,10 +455,31 @@ func runBatchGenerate(opts *batchOptions) error {
 	return flushMBTilesWriter(opts, mbtilesWriter)
 }
 
+// unsetZoom marks --zoom-min / --zoom-max as not supplied.
+//
+// It cannot be 0: zoom 0 is the single world tile, and a global low-zoom run
+// starts there, so treating 0 as "unset" made `--zoom-min 0` indistinguishable
+// from omitting the flag and put the whole tier out of reach.
+const unsetZoom = -1
+
 // validateBatchZoom checks that the batch zoom range is usable.
+//
+// Absence and range are separate checks on purpose. "You forgot the flag" and
+// "that zoom does not exist" are different mistakes and read badly when merged.
 func validateBatchZoom(zoomMin, zoomMax int) error {
-	if zoomMin <= 0 || zoomMax <= 0 {
+	if zoomMin == unsetZoom || zoomMax == unsetZoom {
 		return fmt.Errorf("--zoom-min and --zoom-max are required for batch generation")
+	}
+	for _, z := range []struct {
+		flag  string
+		value int
+	}{
+		{"--zoom-min", zoomMin},
+		{"--zoom-max", zoomMax},
+	} {
+		if z.value < 0 || z.value > tile.MaxZoom {
+			return fmt.Errorf("%s (%d) must be between 0 and %d", z.flag, z.value, tile.MaxZoom)
+		}
 	}
 	if zoomMin > zoomMax {
 		return fmt.Errorf("--zoom-min (%d) must be <= --zoom-max (%d)", zoomMin, zoomMax)

@@ -289,3 +289,30 @@ func TestTileCount(t *testing.T) {
 		t.Errorf("TileCount() = %d, but TilesInBBox returned %d tiles", count, len(tiles))
 	}
 }
+
+// TestTilesInBBoxWholeWorld pins the grid clamp.
+//
+// maptile.At maps lon=+180 to x=2^z and lat=-85.05 to y=2^z — one index past
+// the last real tile — so a whole-world bbox used to enumerate z0_x1_y0 and
+// z1_x2_y0. Those are tiles Coords.Validate rejects and no upstream can answer,
+// and they only became reachable once batch generation accepted --zoom-min 0.
+func TestTilesInBBoxWholeWorld(t *testing.T) {
+	world := [4]float64{-180, -85, 180, 85}
+
+	tiles := TilesInBBox(world, 0, 2)
+
+	// 1 + 4 + 16: the whole grid at each zoom, and nothing beyond it.
+	if len(tiles) != 21 {
+		t.Errorf("TilesInBBox(world, 0, 2) returned %d tiles, want 21: %v", len(tiles), tiles)
+	}
+	for _, c := range tiles {
+		if err := c.Validate(); err != nil {
+			t.Errorf("enumerated an impossible tile %s: %v", c, err)
+		}
+	}
+
+	// TileCount pre-sizes TilesInBBox, so the two must not drift apart.
+	if count := TileCount(world, 0, 2); count != len(tiles) {
+		t.Errorf("TileCount(world, 0, 2) = %d, but TilesInBBox returned %d", count, len(tiles))
+	}
+}
