@@ -18,6 +18,7 @@ import (
 
 	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
+	"github.com/cwbudde/watercolormap/internal/renderer"
 	"github.com/cwbudde/watercolormap/internal/safe"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/types"
@@ -27,12 +28,15 @@ import (
 type OnDemandTilesConfig struct {
 	// Watercolor optionally overrides the watercolor parameters from config.
 	// Nil keeps the renderer on the untouched DefaultParams path.
-	Watercolor               *watercolor.Overrides
-	TilesDir                 string
-	StylesDir                string
-	TexturesDir              string
-	PNGCompression           string
-	CacheControl             string
+	Watercolor     *watercolor.Overrides
+	TilesDir       string
+	StylesDir      string
+	TexturesDir    string
+	PNGCompression string
+	CacheControl   string
+	// Ocean points the ocean pass at the processed OSM water polygons.
+	// The zero value disables it.
+	Ocean                    renderer.OceanConfig
 	BaseTileSize             int
 	Seed                     int64
 	MaxConcurrentGenerations int
@@ -715,6 +719,7 @@ func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) 
 		pipeline.GeneratorOptions{
 			PNGCompression: t.cfg.PNGCompression,
 			Watercolor:     t.cfg.Watercolor,
+			Ocean:          t.cfg.Ocean,
 		},
 	)
 	if err != nil {

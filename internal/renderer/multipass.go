@@ -19,6 +19,7 @@ type MultiPassRenderer struct {
 	stylesDir      string
 	outputDir      string
 	tempDir        string
+	ocean          OceanConfig
 	baseTileSize   int
 	padPx          int
 }
@@ -105,6 +106,12 @@ func NewMultiPassRenderer(stylesDir, outputDir string, tileSize int, padPx int) 
 	}, nil
 }
 
+// SetOceanConfig enables the ocean pass. The zero value leaves it off, which is
+// how every call site that predates ocean rendering keeps its exact output.
+func (r *MultiPassRenderer) SetOceanConfig(cfg OceanConfig) {
+	r.ocean = cfg
+}
+
 // Close cleans up resources, including the renderer's private GeoJSON temp directory.
 func (r *MultiPassRenderer) Close() error {
 	err := r.mapnikRenderer.Close()
@@ -136,6 +143,7 @@ func (r *MultiPassRenderer) RenderTile(coords tile.Coords, data *types.TileData)
 	// Define the layers to render in order
 	layers := []geojson.LayerType{
 		geojson.LayerLand,      // Background layer (just background color)
+		geojson.LayerOcean,     // Open sea from the processed water polygons (skipped when unconfigured)
 		geojson.LayerWater,     // Water bodies
 		geojson.LayerRivers,    // Rivers and streams (linear waterways)
 		geojson.LayerParks,     // Parks and green spaces
@@ -195,6 +203,11 @@ func (r *MultiPassRenderer) renderLayer(
 		return r.renderLandLayer(coords, stylePath, bounds)
 	}
 
+	// Special case: ocean layer (features come from a shapefile, not Overpass)
+	if layer == geojson.LayerOcean {
+		return r.renderOceanLayer(coords, stylePath, bounds)
+	}
+
 	// Get features for this layer
 	features := geojson.GetLayerFeatures(data.Features, layer)
 	if len(features) == 0 {
@@ -248,6 +261,59 @@ func (r *MultiPassRenderer) renderLayer(
 	outputPath := filepath.Join(r.outputDir, fmt.Sprintf("%s_%s.png", coords.String(), layer))
 	if err := r.mapnikRenderer.RenderCurrentToFile(outputPath); err != nil {
 		result.Error = fmt.Errorf("failed to render: %w", err)
+		return result
+	}
+
+	result.OutputPath = outputPath
+	return result
+}
+
+// renderOceanLayer renders the open sea from the processed OSM water polygons.
+//
+// It bypasses the zero-feature skip in renderLayer on purpose: the whole point
+// of an ocean tile is that Overpass returned nothing for it, so "no features"
+// must not mean "no ocean". The shapefile is handed straight to Mapnik's shape
+// plugin, which does its own bbox lookup against the .index sidecar, so there is
+// no geometry work on the Go side.
+//
+// With no shapefile configured this returns an empty OutputPath, which every
+// consumer already treats as "layer absent".
+func (r *MultiPassRenderer) renderOceanLayer(
+	coords tile.Coords,
+	stylePath string,
+	bounds [4]float64,
+) *LayerRenderResult {
+	result := &LayerRenderResult{
+		Layer: geojson.LayerOcean,
+	}
+
+	shapefile := r.ocean.ShapefileForZoom(int(coords.Z))
+	if shapefile == "" {
+		result.OutputPath = ""
+		return result
+	}
+
+	styleXML, err := os.ReadFile(stylePath)
+	if err != nil {
+		result.Error = fmt.Errorf("failed to read ocean style: %w", err)
+		return result
+	}
+
+	modifiedStyleXML := strings.ReplaceAll(string(styleXML), "DATASOURCE_PLACEHOLDER", shapefile)
+
+	if err := r.mapnikRenderer.LoadXML(modifiedStyleXML); err != nil {
+		result.Error = fmt.Errorf("failed to load ocean style: %w", err)
+		return result
+	}
+
+	if err := r.mapnikRenderer.SetBounds(bounds[0], bounds[1], bounds[2], bounds[3]); err != nil {
+		result.Error = fmt.Errorf("failed to set bounds: %w", err)
+		return result
+	}
+
+	outputPath := filepath.Join(r.outputDir, fmt.Sprintf("%s_%s.png", coords.String(), geojson.LayerOcean))
+	if err := r.mapnikRenderer.RenderCurrentToFile(outputPath); err != nil {
+		result.Error = fmt.Errorf("failed to render ocean layer: %w", err)
 		return result
 	}
 

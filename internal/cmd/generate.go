@@ -16,6 +16,7 @@ import (
 
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
+	"github.com/cwbudde/watercolormap/internal/renderer"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/tilejson"
 	"github.com/cwbudde/watercolormap/internal/watercolor"
@@ -219,7 +220,12 @@ func runSingleGenerate(opts *singleOptions) error {
 		return fmt.Errorf("invalid coordinates: zoom/x/y must be non-negative")
 	}
 
-	ds, err := newTileDataSource(opts.dataSourceName)
+	ocean, err := oceanConfig()
+	if err != nil {
+		return err
+	}
+
+	ds, err := newTileDataSource(opts.dataSourceName, ocean.Enabled())
 	if err != nil {
 		return err
 	}
@@ -236,6 +242,7 @@ func runSingleGenerate(opts *singleOptions) error {
 		PNGCompression:  opts.pngCompression,
 		FolderStructure: opts.folderStructure,
 		Watercolor:      wcOverrides,
+		Ocean:           ocean,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to init generator: %w", err)
@@ -257,6 +264,7 @@ func runSingleGenerate(opts *singleOptions) error {
 			PNGCompression:  opts.pngCompression,
 			FolderStructure: opts.folderStructure,
 			Watercolor:      wcOverrides,
+			Ocean:           ocean,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to init hidpi generator: %w", err)
@@ -281,16 +289,19 @@ type batchOptions struct {
 	format          string
 	outputFile      string
 	folderStructure string
-	seed            int64
-	zoomMin         int
-	zoomMax         int
-	workers         int
-	tileSize        int
-	showProgress    bool
-	force           bool
-	hidpi           bool
-	keepLayers      bool
-	allowFailures   bool
+	// ocean is resolved in runBatchGenerate, not from a flag: it comes from the
+	// `ocean:` config block and is shared by the base and HiDPI generators.
+	ocean         renderer.OceanConfig
+	seed          int64
+	zoomMin       int
+	zoomMax       int
+	workers       int
+	tileSize      int
+	showProgress  bool
+	force         bool
+	hidpi         bool
+	keepLayers    bool
+	allowFailures bool
 }
 
 func runBatchGenerate(opts *batchOptions) error {
@@ -313,7 +324,13 @@ func runBatchGenerate(opts *batchOptions) error {
 	tiles := tile.TilesInBBox(bbox, opts.zoomMin, opts.zoomMax)
 	logBatchStart(opts, len(tiles))
 
-	ds, err := newTileDataSource(opts.dataSourceName)
+	ocean, err := oceanConfig()
+	if err != nil {
+		return err
+	}
+	opts.ocean = ocean
+
+	ds, err := newTileDataSource(opts.dataSourceName, ocean.Enabled())
 	if err != nil {
 		return err
 	}
@@ -390,13 +407,13 @@ func validateBatchZoom(zoomMin, zoomMax int) error {
 // `generate` hardcoded the empty endpoint and therefore always hit the public
 // overpass-api.de, ignoring a configured local instance and taking its rate
 // limits — see docs/local-overpass.md.
-func newTileDataSource(name string) (pipeline.DataSource, error) {
+func newTileDataSource(name string, allowEmpty bool) (pipeline.DataSource, error) {
 	switch name {
 	case "overpass":
 		if logger == nil {
 			initLogging()
 		}
-		return createOverpassDataSource(viper.GetInt("generate.overpass_workers"), logger), nil
+		return createOverpassDataSource(viper.GetInt("generate.overpass_workers"), allowEmpty, logger), nil
 	default:
 		return nil, fmt.Errorf("unsupported data source: %s", name)
 	}
@@ -544,6 +561,7 @@ func newBatchGenerator(opts *batchOptions, ds pipeline.DataSource, tileSize int,
 			TileWriter:      tileWriter,
 			FolderStructure: opts.folderStructure,
 			Watercolor:      wcOverrides,
+			Ocean:           opts.ocean,
 		},
 	)
 }

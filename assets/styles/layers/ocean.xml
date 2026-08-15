@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Map background-color="#00000000" srs="+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs +over">
+
+  <!-- Ocean Layer Style -->
+  <!-- Renders the open sea in the same pure blue (#0000FF) as water.xml, so the -->
+  <!-- pipeline can fold this pass into the water mask as a plain union. -->
+
+  <Style name="ocean">
+    <Rule>
+      <PolygonSymbolizer fill="#0000FF" clip="false" />
+    </Rule>
+  </Style>
+
+  <!-- Data Layers -->
+  <!-- Unlike every other layer this one is not fed from Overpass: OSM has no -->
+  <!-- ocean polygons. It reads the processed water polygons shapefile through -->
+  <!-- Mapnik's native shape plugin. The 3857 dataset is already in the map's -->
+  <!-- projection, so the layer srs matches the map srs and nothing reprojects. -->
+  <Layer name="ocean" srs="+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs +over">
+    <StyleName>ocean</StyleName>
+    <Datasource>
+      <Parameter name="type">shape</Parameter>
+      <Parameter name="file">DATASOURCE_PLACEHOLDER</Parameter>
+    </Datasource>
+  </Layer>
+
+</Map>

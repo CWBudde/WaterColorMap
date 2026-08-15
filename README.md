@@ -219,7 +219,29 @@ Keys that are actually read:
 - `output-dir`: where generated tiles go (default: `./tiles`)
 - `verbose`, `log-level`: logging (default level: `info`)
 - `overpass.endpoint` / `overpass.servers`: read by `serve` only — `generate` always builds a default single-endpoint Overpass source
+- `ocean.*`: the water polygons used for ocean and coastline rendering (see below)
 - `generate.*`, `serve.*`, `convert.*`, `textures.*`: mirror the flags of the respective command
+
+### Ocean and coastlines
+
+OpenStreetMap does not map the ocean — the sea is modelled as the absence of
+land — so the open sea has to come from somewhere else. Without it, ocean tiles
+render as land and coastal tiles come out inverted, with the sea painted tan and
+lakes painted blue.
+
+The source is the processed water polygons from
+[osmdata.openstreetmap.de](https://osmdata.openstreetmap.de/data/water-polygons.html),
+rendered directly through Mapnik's shapefile plugin:
+
+```bash
+just fetch-water-polygons              # ~1 GB into ./data (gitignored)
+# or, for low zooms only:
+just fetch-water-polygons-simplified   # ~120 MB
+```
+
+Then point `config.yaml` at them — see the `ocean:` block in
+[config.example.yaml](config.example.yaml). Ocean rendering is off until it is
+configured; inland tiles render identically either way.
 
 ## Development
 

@@ -193,6 +193,65 @@ verify-mapnik:
     @pkg-config --modversion mapnik || (echo "ERROR: pkg-config cannot find mapnik" && exit 1)
     @echo "Mapnik is properly installed!"
 
+# Processed OSM water polygons — the ocean source. OSM itself maps no ocean
+# (the sea is the absence of land), so the open sea has to come from here.
+# The 3857 variants are already in the renderer's projection, so nothing
+# reprojects at render time. See PLAN.md 4.10.
+water_polygons_dir := "data/water-polygons"
+water_polygons_base := "https://osmdata.openstreetmap.de/download"
+
+# Download the simplified water polygons (~120 MB, used for z<=9)
+fetch-water-polygons-simplified:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _fetch-water-polygons simplified-water-polygons-split-3857
+
+# Download the full water polygons (~800 MB, used for z>=10)
+fetch-water-polygons-full:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _fetch-water-polygons water-polygons-split-3857
+
+# Download both water polygon datasets (~1 GB total)
+fetch-water-polygons: fetch-water-polygons-simplified fetch-water-polygons-full
+    @echo "Water polygons ready in {{water_polygons_dir}}/"
+    @echo "Point config.yaml at them (see the 'ocean:' block in config.example.yaml)."
+
+# Download, unzip and index one water polygon dataset.
+#
+# shapeindex is what makes this usable: without the .index sidecar Mapnik scans
+# the whole shapefile for every tile instead of doing a bbox lookup.
+_fetch-water-polygons name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="{{water_polygons_dir}}"
+    mkdir -p "$dir"
+    if [ -d "$dir/{{name}}" ]; then
+      echo "{{name}} already present in $dir — skipping download."
+    else
+      echo "Downloading {{name}}.zip ..."
+      curl -fL --progress-bar -o "$dir/{{name}}.zip" "{{water_polygons_base}}/{{name}}.zip"
+      unzip -q -d "$dir" "$dir/{{name}}.zip"
+      rm -f "$dir/{{name}}.zip"
+    fi
+    for shp in "$dir/{{name}}"/*.shp; do
+      if [ ! -f "${shp%.shp}.index" ]; then
+        echo "Indexing $(basename "$shp") ..."
+        shapeindex "$shp"
+      fi
+    done
+    echo "Ready: $dir/{{name}}"
+
+# Fail early with a useful message instead of rendering tan oceans.
+require-water-polygons:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d "{{water_polygons_dir}}" ]; then
+      echo "No water polygons in {{water_polygons_dir}}." >&2
+      echo "Run:  just fetch-water-polygons" >&2
+      exit 1
+    fi
+
 # Build Docker image
 docker-build:
     @echo "Building Docker image..."

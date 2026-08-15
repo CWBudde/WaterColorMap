@@ -61,7 +61,7 @@ func TestNewTileDataSourceHonoursConfiguredServer(t *testing.T) {
 			t.Setenv("WATERCOLORMAP_OVERPASS_ENDPOINT", "http://127.0.0.1:1/should-not-be-used")
 			tt.config(srv.URL)
 
-			ds, err := newTileDataSource("overpass")
+			ds, err := newTileDataSource("overpass", false)
 			if err != nil {
 				t.Fatalf("newTileDataSource: %v", err)
 			}
@@ -80,7 +80,7 @@ func TestNewTileDataSourceHonoursConfiguredServer(t *testing.T) {
 }
 
 func TestNewTileDataSourceRejectsUnknownSource(t *testing.T) {
-	if _, err := newTileDataSource("postgis"); err == nil {
+	if _, err := newTileDataSource("postgis", false); err == nil {
 		t.Error("expected an error for an unsupported data source")
 	}
 }

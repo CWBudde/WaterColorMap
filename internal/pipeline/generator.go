@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/png"
 	"log/slog"
 	"os"
@@ -90,6 +91,11 @@ type GeneratorOptions struct {
 	// FolderStructure controls file naming for folder format. Supported values:
 	// "flat" (z{z}_x{x}_y{y}.png), "nested" ({z}/{x}/{y}.png).
 	FolderStructure string
+
+	// Ocean points the ocean pass at the processed OSM water polygons.
+	// The zero value disables it, and the pipeline then behaves exactly as it
+	// did before ocean rendering existed.
+	Ocean renderer.OceanConfig
 }
 
 // TileWriter writes tile data to a storage backend.
@@ -112,9 +118,9 @@ type Generator struct {
 	textures   map[geojson.LayerType]image.Image
 	logger     *slog.Logger
 	tuner      *watercolor.Tuner
-	options    GeneratorOptions
 	stylesDir  string
 	outputDir  string
+	options    GeneratorOptions
 	tileSize   int
 	seed       int64
 	keepLayers bool
@@ -394,6 +400,7 @@ func (g *Generator) renderLayersWithData(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create multipass renderer: %w", err)
 	}
+	mpRenderer.SetOceanConfig(g.options.Ocean)
 	defer mpRenderer.Close() // nolint:errcheck
 
 	renderResult, err := mpRenderer.RenderTile(coords, data)
@@ -404,12 +411,20 @@ func (g *Generator) renderLayersWithData(
 	// Read rendered PNG files into memory
 	rawLayers := make(map[geojson.LayerType]image.Image)
 	for layer, res := range renderResult.Layers {
-		if res == nil || res.OutputPath == "" {
-			g.log().Debug("Skipping empty layer", "layer", layer, "coords", coords.String())
+		if res == nil {
 			continue
 		}
+		// Check the error before the empty path, not after. A layer that fails
+		// to render reports both — an error and no output — so testing the path
+		// first swallowed every render failure as "layer absent". For ocean that
+		// silently reinstates the exact bug 4.10 is about: a missing shapefile
+		// would produce a tan sea and no complaint.
 		if res.Error != nil {
 			return nil, fmt.Errorf("failed to render layer %s: %w", layer, res.Error)
+		}
+		if res.OutputPath == "" {
+			g.log().Debug("Skipping empty layer", "layer", layer, "coords", coords.String())
+			continue
 		}
 
 		g.log().Debug("Painting layer", "layer", layer, "coords", coords.String())
@@ -421,6 +436,8 @@ func (g *Generator) renderLayersWithData(
 		rawLayers[layer] = img
 	}
 
+	foldOceanIntoWater(rawLayers)
+
 	return &renderLayersResult{
 		rawLayers:      rawLayers,
 		params:         params,
@@ -428,6 +445,46 @@ func (g *Generator) renderLayersWithData(
 		layerDir:       layerDir,
 		layerDirReturn: layerDirReturn,
 	}, nil
+}
+
+// foldOceanIntoWater merges the ocean pass into the water layer and drops the
+// ocean key, so that everything downstream sees a single water layer.
+//
+// This is what actually fixes 4.10, and it fixes both symptoms at once. Land is
+// not rendered from land polygons — it is painted by inverting the union of
+// everything that cuts into it (see buildMasks). Ocean therefore has to arrive
+// as water: once it does, open sea is blue and the land inversion excludes it,
+// so coastal tiles stop coming out backwards. Nothing else in the pipeline needs
+// to know ocean exists.
+//
+// Both passes render the same #0000FF over transparency at the same metatile
+// bounds and size, so drawing one over the other is exactly their union.
+func foldOceanIntoWater(rawLayers map[geojson.LayerType]image.Image) {
+	ocean := rawLayers[geojson.LayerOcean]
+	if ocean == nil {
+		return
+	}
+	delete(rawLayers, geojson.LayerOcean)
+
+	water := rawLayers[geojson.LayerWater]
+	if water == nil {
+		rawLayers[geojson.LayerWater] = ocean
+		return
+	}
+
+	bounds := ocean.Bounds()
+	if water.Bounds() != bounds {
+		// Cannot happen for a single tile — both come from the same metatile
+		// render — but silently unioning mismatched images would shift the
+		// coastline, so keep the ocean and say nothing false.
+		rawLayers[geojson.LayerWater] = ocean
+		return
+	}
+
+	merged := image.NewNRGBA(bounds)
+	draw.Draw(merged, bounds, ocean, bounds.Min, draw.Src)
+	draw.Draw(merged, bounds, water, bounds.Min, draw.Over)
+	rawLayers[geojson.LayerWater] = merged
 }
 
 // renderLayersResult holds the output from the rendering phase.

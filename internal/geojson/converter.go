@@ -13,8 +13,14 @@ import (
 type LayerType string
 
 const (
-	LayerWater     LayerType = "water"  // Polygonal water bodies (lakes, ponds)
-	LayerRivers    LayerType = "rivers" // Linear waterways (rivers, streams, canals)
+	LayerWater  LayerType = "water"  // Polygonal water bodies (lakes, ponds)
+	LayerRivers LayerType = "rivers" // Linear waterways (rivers, streams, canals)
+	// LayerOcean carries the open sea, which OSM does not map: it comes from the
+	// processed water polygons, not from Overpass, and so has no entry in
+	// types.FeatureCollection. It is a transport key only — the pipeline folds it
+	// into LayerWater before masking, so it never reaches a texture, a watercolor
+	// style or the composite order.
+	LayerOcean     LayerType = "ocean"
 	LayerLand      LayerType = "land"
 	LayerParks     LayerType = "parks"
 	LayerUrban     LayerType = "urban"     // Urban landuse areas (residential/commercial/industrial/retail)

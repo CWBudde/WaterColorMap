@@ -32,6 +32,26 @@ log-level: "info" # debug, info, warn, error
 overpass:
   endpoint: "https://overpass-api.de/api/interpreter"
 
+# Ocean / coastline rendering.
+#
+# OSM has no ocean polygons — the sea is modelled as the absence of land — so
+# without this block the open sea renders as land and coastal tiles come out
+# inverted. The data is the processed water polygons from
+# https://osmdata.openstreetmap.de/data/water-polygons.html; run
+# `just fetch-water-polygons` to download and index them into ./data.
+#
+# Leave the whole block out to disable ocean rendering; tiles then render
+# exactly as they did before. Configured paths are checked at startup.
+#
+# ocean:
+#   enabled: true
+#   # Full detail, used above simplified-max-zoom (~800 MB on disk).
+#   shapefile: "./data/water-polygons/water-polygons-split-3857/water_polygons.shp"
+#   # Simplified, used up to and including simplified-max-zoom (~120 MB).
+#   simplified-shapefile: "./data/water-polygons/simplified-water-polygons-split-3857/simplified_water_polygons.shp"
+#   # Last zoom served from the simplified set. Default: 9.
+#   simplified-max-zoom: 9
+
 # --- generate --------------------------------------------------------------
 # Values shown are the built-in defaults.
 # generate:

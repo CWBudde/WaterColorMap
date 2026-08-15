@@ -3,6 +3,7 @@ package datasource
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -93,9 +94,10 @@ func PrivateInstanceConfig(endpoint string) OverpassConfig {
 
 // OverpassDataSource fetches OSM data from Overpass API
 type OverpassDataSource struct {
-	client           overpass.Client
-	storeRawResponse bool // If true, stores raw Overpass response in TileData (for debugging)
-	clipGeomToBbox   bool // If true, uses "out geom(bbox)" - DO NOT USE (known Overpass API bug)
+	client              overpass.Client
+	storeRawResponse    bool // If true, stores raw Overpass response in TileData (for debugging)
+	clipGeomToBbox      bool // If true, uses "out geom(bbox)" - DO NOT USE (known Overpass API bug)
+	allowEmptyResponses bool // If true, an empty mid-zoom response is a warning, not an error
 }
 
 // NewOverpassDataSource creates a new Overpass data source with default settings.
@@ -170,6 +172,22 @@ func (ds *OverpassDataSource) WithRawResponseStorage(enabled bool) *OverpassData
 	return ds
 }
 
+// WithEmptyResponsesAllowed stops treating an empty mid-zoom Overpass response
+// as an error. Enable it whenever ocean rendering is configured.
+//
+// The emptiness check exists to catch silent Overpass failures — a 200 with no
+// data — which are otherwise indistinguishable from success. An open-ocean tile
+// is exactly that same shape: OSM does not map the sea, so Overpass legitimately
+// returns nothing, and the check fails the tile before the ocean polygons ever
+// get a chance to render. Telling the two apart would need the water-polygon
+// geometry here in Go, which is precisely what the shapefile approach avoids.
+// So with ocean data configured we trade the silent-failure detection for
+// correct ocean tiles, and log instead of erroring.
+func (ds *OverpassDataSource) WithEmptyResponsesAllowed(enabled bool) *OverpassDataSource {
+	ds.allowEmptyResponses = enabled
+	return ds
+}
+
 // WithGeometryClipping enables clipping geometry to bbox in Overpass query.
 //
 // WARNING: DO NOT USE IN PRODUCTION. This has a known Overpass API bug.
@@ -213,7 +231,13 @@ func (ds *OverpassDataSource) FetchTileDataWithBounds(ctx context.Context, tile 
 	// At zoom 5-13, we should always have roads/highways in any tile over land.
 	// An empty response likely indicates Overpass timeout or incomplete data.
 	if err := validateFeatureResponse(features, tile.Zoom); err != nil {
-		return nil, err
+		if !ds.allowEmptyResponses {
+			return nil, err
+		}
+		// Ocean rendering is configured, so an empty tile is most likely open
+		// sea and must still render. See WithEmptyResponsesAllowed.
+		slog.Warn("Overpass returned no features; continuing because ocean rendering is configured",
+			"zoom", tile.Zoom, "x", tile.X, "y", tile.Y, "err", err)
 	}
 
 	tileData := &types.TileData{
@@ -502,6 +526,9 @@ type ServerConfig struct {
 	MaxResponseBytes int64
 	// Workers controls parallelism for this server
 	Workers int
+	// AllowEmptyResponses stops treating an empty mid-zoom response as an error.
+	// See OverpassDataSource.WithEmptyResponsesAllowed.
+	AllowEmptyResponses bool
 }
 
 // MultiOverpassDataSource routes queries to different Overpass servers based on geography.
@@ -562,9 +589,10 @@ func NewMultiOverpassDataSource(configs ...ServerConfig) *MultiOverpassDataSourc
 		}
 
 		servers = append(servers, serverInstance{
-			datasource: NewOverpassDataSourceWithConfig(ovConfig),
-			coverage:   cfg.Coverage,
-			name:       cfg.Name,
+			datasource: NewOverpassDataSourceWithConfig(ovConfig).
+				WithEmptyResponsesAllowed(cfg.AllowEmptyResponses),
+			coverage: cfg.Coverage,
+			name:     cfg.Name,
 		})
 	}
 

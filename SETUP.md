@@ -127,9 +127,26 @@ go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 2. Edit `config.yaml` to customize settings (optional)
 
 3. Create output directories:
+
    ```bash
    mkdir -p tiles cache testdata/output
    ```
+
+4. Optional — download the ocean data:
+
+   ```bash
+   just fetch-water-polygons
+   ```
+
+   OSM contains no ocean polygons, so without this the open sea renders as land
+   and coastal tiles come out inverted. The recipe downloads the processed water
+   polygons from [osmdata.openstreetmap.de](https://osmdata.openstreetmap.de/data/water-polygons.html)
+   into the gitignored `./data` directory (~1 GB; `just fetch-water-polygons-simplified`
+   fetches only the ~120 MB low-zoom set) and builds the `.index` sidecars that
+   let Mapnik do a bbox lookup instead of scanning the whole shapefile.
+
+   Then uncomment the `ocean:` block in `config.yaml`. Ocean rendering stays off
+   until it is configured.
 
 ### Running Tests
 

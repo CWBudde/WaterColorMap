@@ -11,7 +11,7 @@ This document outlines the complete implementation plan for creating Stamen Wate
 >   [docs/watercolor-mask-design.md](docs/watercolor-mask-design.md)
 > - Phase 4.1–4.9 (compositing, hi-DPI, demo server, Hanover coverage, TileJSON) →
 >   [docs/history/phase-4-compositing-delivery.md](docs/history/phase-4-compositing-delivery.md)
->   — 4.10 (ocean/coastline) is still open and stays below
+>   — 4.10 (ocean/coastline) is complete; its record stays below
 > - Phase 5.11.2 (blur rewrite: measurements, rationale, rescaled sigmas) →
 >   [docs/performance/blur-optimization.md](docs/performance/blur-optimization.md)
 > - Phase 7.1/7.2/7.3/7.7 (build, tile-server hardening, code quality) →
@@ -67,157 +67,77 @@ Worth keeping in view here, because both outlive the phase:
   generates the same `9.65,52.32,9.85,52.43` bbox at every zoom, so at z10–z12 a
   screenful is far larger than the box (z10 is 2 tiles for a viewport wanting ~36)
   and the surrounding tiles are generated on demand. A full-screen low-zoom view
-  needs a wider bbox at those zooms, not a deeper zoom range — and, per 4.10 below,
-  correct low-zoom tiles need ocean rendering first.
+  needs a wider bbox at those zooms, not a deeper zoom range. The 4.10 ocean
+  prerequisite is now met, so this is unblocked.
 
-### 4.10 Ocean/Coastline Rendering 🔴 CRITICAL - BLOCKER FOR LOW ZOOM TILES
+### 4.10 Ocean/Coastline Rendering ✅ COMPLETE
 
-**Status**: 🔴 BROKEN - Ocean tiles render as land (tan background) instead of water (blue)
+**Problem**: OpenStreetMap has no ocean polygons — the sea is modelled as the
+absence of land. `natural=coastline` is a line, `natural=water` covers lakes and
+bays but not the open sea, and `place=sea` is a point label. The pipeline paints
+land by _inverting_ the union of everything that cuts into it (`buildMasks`), so
+with nothing covering the open sea every ocean tile inverted to full tan land and
+coastal tiles came out backwards: lakes blue, sea tan.
 
-**Problem Summary**:
+**Solution (Option 1 of the three considered)**: the processed water polygons
+from <https://osmdata.openstreetmap.de/data/water-polygons.html>, rendered
+through Mapnik's native `shape` input plugin. No Go geometry dependency: the
+Go-side work is download management and per-tile layer wiring. Option 2
+(hardcoded ocean bboxes plus a "zero features means ocean" heuristic) was
+rejected as wrong by construction and no help on coastal tiles; Option 3
+(reimplementing `osmcoastline`) stayed out of scope.
 
-OpenStreetMap's raw data does **not include ocean polygons**. The ocean is represented as the "absence of land" rather than explicit water features:
+- [x] `just fetch-water-polygons` downloads, unzips and `shapeindex`es both the
+      full and the simplified 3857 datasets into the gitignored `./data`. The 3857
+      variants need no reprojection; the `.index` sidecars turn every tile lookup
+      into a bbox query instead of a full shapefile scan.
+- [x] `ocean:` config block (`internal/cmd/ocean_config.go`) → `renderer.OceanConfig`,
+      threaded through `pipeline.GeneratorOptions`. Simplified set for z ≤ 9, full
+      set above; either stands in when only one is configured. Paths are validated
+      at startup. Unconfigured means disabled, and inland tiles then render
+      byte-identically to a build without ocean support.
+- [x] Dedicated ocean pass: `assets/styles/layers/ocean.xml` (`shape` plugin,
+      same `#0000FF` mask fill as `water.xml`) rendered by
+      `MultiPassRenderer.renderOceanLayer`, which deliberately bypasses the
+      zero-feature skip that would otherwise drop it.
+- [x] `foldOceanIntoWater` (`internal/pipeline/generator.go`) unions the ocean
+      pass into the water raw layer and drops the ocean key. Because land is
+      derived by inversion, this fixes ocean tiles and coastal inversion at once,
+      and nothing downstream — texture, tuning, composite order — needs to know
+      ocean exists.
+- [x] `WithEmptyResponsesAllowed` on the Overpass datasource: an empty z8–13
+      response used to fail the tile, which is exactly the shape of an open-ocean
+      tile. With ocean data configured it logs instead. The trade-off is
+      deliberate and documented at the method: silent-Overpass-failure detection
+      is given up in exchange for correct ocean tiles, since telling the two apart
+      would need the water-polygon geometry in Go.
 
-- `natural=coastline` are **lines only** (boundaries, not filled areas)
-- `natural=water` covers lakes, ponds, bays - **NOT the open ocean**
-- `place=sea` are **point labels** for naming seas - **NOT area polygons**
-- Ocean is implicit (everything not explicitly tagged as land)
+Two bugs found while verifying, both fixed:
 
-**Current (Broken) Behavior**:
+- Mapnik resolves a relative datasource path against the directory of the XML it
+  was loaded from, and `LoadXML` writes that XML to a temp file — so a relative
+  shapefile path was looked up next to `/tmp` and the ocean silently vanished.
+  `ShapefileForZoom` now returns an absolute path.
+- `renderLayersWithData` tested `OutputPath == ""` before `res.Error != nil`, so
+  every layer render _failure_ was swallowed as "layer absent". For ocean that
+  quietly reinstated the original bug. The checks are now the other way round.
 
-For pure ocean tiles (e.g., z9_x266_y164.png):
+**Testing**:
 
-1. Query Overpass API for features within tile bounds
-2. Overpass returns **NOTHING** (ocean is not mapped)
-3. `land.xml` fills tile with TAN background (#C4A574)
-4. `water.xml` has no data to render (no blue)
-5. **Result**: Ocean appears as LAND (tan) ❌
+- [x] Pure ocean tile (z9_x266_y164, North Sea) renders as water
+- [x] Coastal tile (z9_x267_y165, East Frisian coast) renders sea _and_ land
+- [x] Inland tile is pixel-identical with the ocean pass on and off
+- [x] Zoom-dependent shapefile selection, config parsing/validation, the
+      ocean/water union, and the empty-response opt-out are unit-tested
+- [x] Verified visually at z9 and z13 against the local Overpass instance
 
-For coastal tiles with islands:
+The ocean render tests need the downloaded shapefiles and skip without them;
+point `WATERCOLORMAP_WATER_POLYGONS_DIR` elsewhere if they do not live in `./data`.
 
-1. Islands may have `natural=water` polygons (lakes)
-2. Lakes render BLUE
-3. Surrounding ocean has no data → stays TAN
-4. **Result**: Islands appear as blue (water) while ocean appears as tan (land) - **completely backwards** ❌
-
-**Impact**:
-
-- **All ocean tiles at z≤10 are broken** (render as land instead of water)
-- **Coastal tiles are inverted** (islands appear as water, ocean as land)
-- Completely blocks proper rendering of any region with coastlines or ocean
-- Current workaround (fetching `natural=sea` and `place=sea`) does NOT work - these tags don't represent area polygons
-
-**Root Cause**:
-
-The rendering pipeline assumes all features (water, land, parks, etc.) are explicitly present as polygons in OSM data. This works for inland features but fails for oceans because:
-
-1. OSM uses an **implicit ocean model** (ocean = not land)
-2. Coastlines are directional lines (water is to the right)
-3. Converting coastlines to ocean polygons requires complex processing:
-   - Assembling multiple coastline ways into closed rings
-   - Determining which side is land vs. water
-   - Handling tile boundaries correctly
-   - Dealing with islands and multipolygon coastlines
-
-**Proposed Solutions**:
-
-#### Option 1: Use OSM Processed Water Polygons (CHOSEN — see decision below)
-
-**Pros**: Production-ready, used by professional renderers, comprehensive coverage
-
-**Cons**: External dependency, ~500MB-1GB download
-
-**Implementation**:
-
-- [ ] Download processed water polygons from https://osmdata.openstreetmap.de/data/water-polygons.html
-- [ ] Add new data source interface for shapefile/GeoPackage reading (alongside Overpass)
-- [ ] Integrate water polygons into the data pipeline
-- [ ] Query both Overpass (for detailed features) and water polygons (for ocean) per tile
-- [ ] Merge results before rendering
-- [ ] Test ocean tiles at z5-z10
-- [ ] Test coastal tiles with islands
-- [ ] Update documentation with water polygon setup instructions
-
-**Files**:
-
-- Water-polygons-split-4326.zip (~500MB) - split into smaller files for tile-based access
-- Simplified-water-polygons-split-4326.zip (~50MB) - simplified for low zoom levels
-
-**Data Source Priority**:
-
-1. Use simplified polygons for z ≤ 9
-2. Use full polygons for z ≥ 10
-3. Use Overpass for detailed inland water features at all zooms
-
-#### Option 2: Detect Ocean Tiles and Synthesize Water Polygons (QUICK FIX)
-
-**Pros**: No external dependencies, works with current architecture
-
-**Cons**: Heuristic-based, may miss edge cases, doesn't solve coastal complexity
-
-**Implementation**:
-
-- [ ] Add ocean tile detection logic in datasource layer
-- [ ] If tile query returns zero land features AND tile bounds intersect known ocean areas:
-  - Synthesize a water polygon covering the entire tile bounds
-  - Add to water feature collection before returning
-- [ ] Implement simple coastline detection:
-  - If `natural=coastline` ways are present, mark as coastal tile
-  - For coastal tiles, don't synthesize full-tile ocean (too complex)
-- [ ] Test with pure ocean tiles (North Sea, Atlantic)
-- [ ] Test with coastal tiles (verify no false positives)
-- [ ] Document limitations (coastal tiles may still have issues)
-
-**Limitations**:
-
-- Doesn't handle complex coastlines (bays, islands, estuaries)
-- Requires hardcoding ocean bounding boxes
-- Won't work for all edge cases
-
-#### Option 3: Implement Coastline Processing (ADVANCED)
-
-**Pros**: Complete solution using OSM's raw coastline data, no external files
-
-**Cons**: Extremely complex, error-prone, reinvents solved problems
-
-**Implementation**: NOT RECOMMENDED - this is what osmcoastline tool does, and it's complex enough to be its own project.
-
-**Decision (resolved): Option 1 — OSM processed water polygons.**
-
-We take the processed water polygons from <https://osmdata.openstreetmap.de/data/water-polygons.html> as the ocean source. Option 2 is explicitly rejected: hardcoded ocean bounding boxes plus a "zero features means ocean" heuristic would ship a wrong-by-construction rule that we would then have to unpick, and it does nothing for the coastal tiles that are the actual visual problem. Option 3 (reimplementing `osmcoastline`) stays out of scope.
-
-**Why this is a project, not a patch** — three things in the current code have to move before water polygons can render at all:
-
-1. `validateFeatureResponse` (`internal/datasource/overpass.go:627`) currently _errors_ on empty z8–13 tiles: `if zoom >= 8 && zoom <= 13 && totalFeatures == 0 { return fmt.Errorf("%w: zoom %d tile has no features …", ErrEmptyOverpassResponse, zoom) }`. A genuine open-ocean tile in that zoom band is exactly the "zero features" case, so it fails before rendering. Emptiness has to become "empty _and_ not covered by a water polygon" rather than an unconditional error.
-2. `renderLayer` (`internal/renderer/multipass.go:167`) skips any layer with zero features — `if len(features) == 0 { result.OutputPath = ""; return result }` (`:191`). Ocean coverage therefore cannot arrive as "no Overpass features + a blue background"; the water polygons must be injected as real features (or as a dedicated ocean layer with its own render path) before this check.
-3. **No new Go geometry dependency is needed.** Mapnik reads ESRI shapefiles natively through its `shape` input plugin (present in the local install, `/usr/lib/mapnik/*/input/shape.input`), so the downloaded `.shp` can be pointed at directly from a Mapnik datasource instead of being parsed in Go and re-emitted as GeoJSON. The Go-side work is download/cache management and per-tile layer wiring, not geometry.
-
-**Testing Requirements**:
-
-- [ ] Pure ocean tile rendering (z9_x266_y164 North Sea area)
-- [ ] Coastal tile with mainland and ocean (Hamburg area)
-- [ ] Island tile (British Isles, Mediterranean islands)
-- [ ] Bay/estuary tile (complex coastline)
-- [ ] Verify color inversion is fixed (ocean=blue, land=tan)
-- [ ] Check tile seams at coastlines
-- [ ] Test across zoom levels z5-z12
-
-**Related Code**:
-
-(Pointers below verified against the current tree — the previously listed `buildWaterQuery()` does not exist.)
-
-- `internal/datasource/overpass.go` — `buildTileQuery()` (`:229`) builds the whole tile query from the per-layer rule tables; the water layer is registered at `:315` and its tag rules live in `var waterRules` (`:332`), rendered into Overpass QL lines by `renderRules()` (`:295`). This is where an ocean/water-polygon source would have to be joined in, or deliberately bypassed.
-- `internal/datasource/overpass.go` — `validateFeatureResponse()` (`:627`), the empty-tile error described above.
-- `internal/datasource/overpass_extract.go` — `isWater()` (`:317`), used at `:101`, `:125` and `:292` to classify extracted tags into the water layer.
-- `internal/renderer/multipass.go` — `renderLayer()` (`:167`), zero-feature skip at `:191`.
-- `assets/styles/layers/water.xml` - water rendering style
-- `assets/styles/layers/land.xml` - background color definition
-
-**References**:
-
-- [OSM Water Polygons](https://osmdata.openstreetmap.de/data/water-polygons.html)
-- [OSM Coastline Processing](https://wiki.openstreetmap.org/wiki/Coastline)
-- [osmcoastline tool](https://osmcode.org/osmcoastline/)
+**Still open, inherited from this work**: seam behaviour along a coastline
+crossing a tile border is only checked by eye. `TestCompositedTileSeams` uses a
+synthetic data source and never sees a coastline; extending it to a coastal pair
+would need the shapefile, which is why it is not gated in yet.
 
 ## Phase 5: Scaling and Modern Improvements
 
@@ -615,10 +535,11 @@ bugs → [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
       MBTiles serve example (the pointer to "lines ~699" was wrong; it is in the MBTiles Usage section
       at the end), and the "gzip compression" bullet dropped as it contradicted 7.4's own fix above.
       Phase 3's `🟨 IN PROGRESS` → `✅ COMPLETE`, since all six of its 3.4 work items are `[x]`.
-      **4.10's `BLOCKER` marker was left alone: it is accurate, not stale.** All 21 of its checkboxes are
-      unchecked, there is no water-polygon datasource anywhere in the tree, and the only coastline
-      handling is the way-only Overpass query at `internal/datasource/overpass.go:334` — precisely the
-      lines-not-polygons failure the section describes.
+      **4.10's `BLOCKER` marker was left alone at the time: it was accurate, not stale.** All 21 of its
+      checkboxes were unchecked, there was no water-polygon datasource anywhere in the tree, and the only
+      coastline handling was the way-only Overpass query in `internal/datasource/overpass.go` — precisely
+      the lines-not-polygons failure the section described. 4.10 has since been implemented and the
+      marker is now `✅ COMPLETE`.
       Two claims in the old docs turned out to be false and are corrected in the merged file rather than
       carried over: there is **no IndexedDB cache** (`wasm.js` contains no IndexedDB at all), and the
       playground does **not** need a backend — `cmd/wasm` imports `internal/raster` and renders the full

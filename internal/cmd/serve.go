@@ -190,11 +190,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 		mux.Handle("/tiles/", withCORS(corsOrigin, withReadMethods(rateLimiter.Middleware(mbHandler.Handler()))))
 	} else {
 		logger.Info("Using folder-based tile serving with on-demand generation", "tiles_dir", tilesDir)
+		ocean, err := oceanConfig()
+		if err != nil {
+			return err
+		}
+		if ocean.Enabled() {
+			logger.Info("Ocean rendering enabled", "shapefile", ocean.FullPath, "simplified", ocean.SimplifiedPath)
+		}
+
 		dataSourceName := viper.GetString("data-source")
 		var ds pipeline.DataSource
 		switch dataSourceName {
 		case "overpass":
-			ds = createOverpassDataSource(overpassWorkers, logger)
+			ds = createOverpassDataSource(overpassWorkers, ocean.Enabled(), logger)
 		default:
 			return fmt.Errorf("unsupported data source: %s", dataSourceName)
 		}
@@ -206,6 +214,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 		od, err := server.NewOnDemandTiles(ds, server.OnDemandTilesConfig{
 			Watercolor:               wcOverrides,
+			Ocean:                    ocean,
 			TilesDir:                 tilesDir,
 			StylesDir:                filepath.Join("assets", "styles"),
 			TexturesDir:              filepath.Join("assets", "textures"),
@@ -352,12 +361,16 @@ func serveUntil(stopCtx context.Context, srv *http.Server, shutdownTimeout time.
 
 // createOverpassDataSource creates an Overpass datasource from configuration.
 // Supports both single-server and multi-server (geographic routing) configurations.
-func createOverpassDataSource(overpassWorkers int, logger *slog.Logger) pipeline.DataSource {
+//
+// allowEmpty relaxes the empty-response check; pass the result of
+// oceanConfig().Enabled(), because an open-ocean tile legitimately returns no
+// Overpass features. See OverpassDataSource.WithEmptyResponsesAllowed.
+func createOverpassDataSource(overpassWorkers int, allowEmpty bool, logger *slog.Logger) pipeline.DataSource {
 	// Check for multi-server configuration
 	if viper.IsSet("overpass.servers") {
 		var configs []map[string]interface{}
 		if err := viper.UnmarshalKey("overpass.servers", &configs); err == nil && len(configs) > 0 {
-			return createMultiServerDataSource(configs, logger)
+			return createMultiServerDataSource(configs, allowEmpty, logger)
 		}
 	}
 
@@ -372,11 +385,12 @@ func createOverpassDataSource(overpassWorkers int, logger *slog.Logger) pipeline
 	}
 
 	logger.Info("Using single Overpass server", "endpoint", endpoint, "workers", overpassWorkers)
-	return datasource.NewOverpassDataSourceWithWorkers(endpoint, overpassWorkers)
+	return datasource.NewOverpassDataSourceWithWorkers(endpoint, overpassWorkers).
+		WithEmptyResponsesAllowed(allowEmpty)
 }
 
 // createMultiServerDataSource creates a multi-server routing datasource from config.
-func createMultiServerDataSource(configs []map[string]interface{}, logger *slog.Logger) pipeline.DataSource {
+func createMultiServerDataSource(configs []map[string]interface{}, allowEmpty bool, logger *slog.Logger) pipeline.DataSource {
 	var serverConfigs []datasource.ServerConfig
 
 	for i, cfg := range configs {
@@ -385,9 +399,10 @@ func createMultiServerDataSource(configs []map[string]interface{}, logger *slog.
 		name := getStringOrDefault(cfg, "name", fmt.Sprintf("Server-%d", i+1))
 
 		sc := datasource.ServerConfig{
-			Endpoint: endpoint,
-			Workers:  workers,
-			Name:     name,
+			Endpoint:            endpoint,
+			Workers:             workers,
+			Name:                name,
+			AllowEmptyResponses: allowEmpty,
 		}
 
 		// Parse coverage area if specified

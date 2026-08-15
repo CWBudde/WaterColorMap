@@ -43,7 +43,7 @@ This document provides a comprehensive breakdown of all rendering elements acros
 
 ### Water Bodies
 
-- ✅ Lakes, seas, oceans
+- ✅ Lakes and inland water from OSM; the open sea from the processed water polygons
 - No zoom-based filtering
 
 ### Rivers
@@ -93,7 +93,8 @@ This document provides a comprehensive breakdown of all rendering elements acros
 
 ### Water Bodies
 
-- ✅ Lakes, seas, oceans (includes explicit sea/ocean polygons for proper coastal rendering)
+- ✅ Lakes and inland water from OSM; the open sea from the processed water
+  polygons, which OSM does not carry (configure `ocean:`, see README)
 
 ### Rivers
 

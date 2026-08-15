@@ -30,6 +30,9 @@ internal/watercolor/testdata/golden/
 cache/
 .gocache/
 
+# Downloaded datasets (OSM water polygons; `just fetch-water-polygons`)
+data/
+
 # IDE
 .idea/
 .vscode/
