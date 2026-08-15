@@ -23,9 +23,10 @@ package types
 // not have been fetched per tile. It can only paint inside the metatile via
 // stroke half-width across the boundary, which the padding crop removes.
 //
-// Order is preserved deliberately. Feature order already varies run to run
-// (ExtractFeaturesFromOverpassResult ranges over a map), and this must not add
-// a second, different source of variation on top of it.
+// Order is preserved deliberately. Feature order is draw order, and
+// ExtractFeaturesFromOverpassResult goes to the trouble of fixing it (OSM ID
+// ascending) so that a tile renders byte-identically twice; a filter that
+// reordered its input would hand that property straight back.
 func (fc FeatureCollection) FilterByBounds(b BoundingBox) FeatureCollection {
 	return FeatureCollection{
 		Water:     filterFeatures(fc.Water, b),
