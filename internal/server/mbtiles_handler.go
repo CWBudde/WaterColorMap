@@ -80,8 +80,13 @@ func (h *MBTilesHandler) serveTile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Note: suffix (@2x) is ignored for MBTiles serving
-	// Separate MBTiles files should be used for different tile sizes
+	// The @2x suffix is ignored here: a tileset holds one tile size, and this
+	// handler only reads what the file already contains. Unlike the folder
+	// backend, it has no generator to render a 512px tile on demand, so a
+	// retina request is answered with base-resolution data rather than 404ing
+	// a tile the client can still use. A deployment that needs true @2x has to
+	// serve the tile directory (`serve --tiles-dir`) instead of the MBTiles
+	// file — see the HiDPI note in CHANGELOG.md.
 	_ = suffix
 
 	// A tileset holds exactly one format, recorded in its metadata. Answering

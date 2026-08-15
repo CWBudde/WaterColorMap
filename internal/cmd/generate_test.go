@@ -36,9 +36,15 @@ func TestBatchRejectsHiDPI(t *testing.T) {
 }
 
 // TestBatchWithoutHiDPIPassesValidation is the counterpart: the same batch
-// config without --hidpi must get past validation. It fails later, on the
-// Overpass fetch or the asset paths, which is fine — what matters is that it
-// is not rejected up front.
+// config without --hidpi must reach runBatchGenerate rather than being rejected
+// up front.
+//
+// The stopping point has to be inside the batch path, or the test proves
+// nothing — the earlier format checks all return before the bbox branch is even
+// entered. An unsupported data source is the first failure past that branch
+// (runBatchGenerate resolves it after parsing the bbox and the zoom range, and
+// before any tile is rendered), so seeing its message means the batch path ran
+// and nothing was rendered getting there.
 func TestBatchWithoutHiDPIPassesValidation(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
@@ -47,17 +53,21 @@ func TestBatchWithoutHiDPIPassesValidation(t *testing.T) {
 	viper.Set("generate.zoom_min", 13)
 	viper.Set("generate.zoom_max", 13)
 	viper.Set("generate.hidpi", false)
-	viper.Set("generate.format", "mbtiles")
+	viper.Set("generate.format", "folder")
 	viper.Set("generate.folder_structure", "flat")
-	// Deliberately absent --output-file, so validation stops the run early and
-	// nothing renders. If --hidpi were still being checked, we would see its
-	// message instead of this one.
+	viper.Set("data-source", "definitely-not-a-data-source")
+
 	err := runGenerate(nil, nil)
 	if err == nil {
-		t.Fatal("expected the missing --output-file to be reported")
+		t.Fatal("expected the unsupported data source to be reported")
 	}
-	if !strings.Contains(err.Error(), "--output-file") {
-		t.Errorf("expected the --output-file error, got: %v", err)
+	if !strings.Contains(err.Error(), "unsupported data source") {
+		t.Errorf("expected the data source error from inside the batch path, got: %v", err)
+	}
+	// And specifically not the --hidpi rejection, which is what this test exists
+	// to rule out.
+	if strings.Contains(err.Error(), "--hidpi") {
+		t.Errorf("batch generation without --hidpi should not be rejected for it: %v", err)
 	}
 }
 
