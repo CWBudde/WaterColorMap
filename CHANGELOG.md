@@ -144,11 +144,21 @@
   names every one of them.
 
   Two failures are deliberately not retried elsewhere, because another server cannot help: a
-  cancelled or expired context, where the caller is already gone and a second attempt only delays
-  shutdown, and a response over the size cap, which is a property of the data and the configured
-  limit rather than of the server. Everything else — transport errors, 5xx, 429, an HTML error
-  page, and the empty mid-zoom response that is the shape of a silent upstream failure — is
-  exactly what a second server exists to answer.
+  cancelled or expired **caller** context, where the caller is already gone and a second attempt
+  only delays shutdown, and a response over the size cap, which is a property of the data and the
+  configured limit rather than of the server. Everything else — transport errors, 5xx, 429, an
+  HTML error page, a server that hangs until the HTTP client's own timeout fires, and the empty
+  mid-zoom response that is the shape of a silent upstream failure — is exactly what a second
+  server exists to answer. The caller-gone test reads the context rather than the shape of the
+  error on purpose: an `http.Client.Timeout` satisfies `errors.Is(err, context.DeadlineExceeded)`
+  while the caller is still waiting, so classifying on the error would have abandoned failover in
+  exactly the hung-server outage it exists for.
+
+  Ocean rendering needed explicit care. It sets `AllowEmptyResponses` on every server, which turns
+  the empty response into a *success* — correct over open sea, but it would have let a regional
+  server's silent 200-with-no-data failure over land bake a featureless tile. A featureless
+  response now gets a second opinion without being treated as an error: the next candidate is
+  tried, and the empty result is returned only if none does better.
 
   Failovers log at `warn`, so a run that quietly degrades to the public API reads as a broken
   server rather than an unexplained slowdown. Startup additionally warns about a coverage box

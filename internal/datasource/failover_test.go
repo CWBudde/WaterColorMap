@@ -99,6 +99,99 @@ func TestFailoverToNextServer(t *testing.T) {
 	}
 }
 
+// respondEmpty is a 200 carrying no elements — a legitimate open-sea answer, and
+// also the exact shape of a silent Overpass failure over land.
+func respondEmpty(_ int, w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	io.WriteString(w, `{"version":0.6,"generator":"Overpass API","elements":[]}`) //nolint:errcheck // test server
+}
+
+// TestFailoverOnHungServer covers the distinction shouldTryNextServer draws on
+// ctx rather than on the error: a server that never answers trips the client's
+// own timeout, which produces a context.DeadlineExceeded-shaped error while the
+// caller is still waiting. Reading that as "caller gone" abandoned failover in
+// precisely the outage it exists for.
+func TestFailoverOnHungServer(t *testing.T) {
+	hang := make(chan struct{})
+
+	hung := newFailoverUpstream(t, "Hung", func(_ int, _ http.ResponseWriter) {
+		<-hang
+	})
+	// Registered after the upstream so it runs *before* the server's own Close:
+	// cleanups are LIFO, and httptest.Server.Close blocks on the in-flight
+	// handler, which would deadlock against the still-open channel.
+	t.Cleanup(func() { close(hang) })
+
+	fallback := newFailoverUpstream(t, "Public", respondOK)
+
+	hungCfg := serverCfg(hung, hannoverBox)
+	hungCfg.HTTPClient = &http.Client{Timeout: 100 * time.Millisecond}
+
+	mds := NewMultiOverpassDataSource(hungCfg, serverCfg(fallback, nil))
+
+	data, err := fetchMulti(t, mds)
+	if err != nil {
+		t.Fatalf("a hung server must fail over, not abort the fetch: %v", err)
+	}
+	if data == nil {
+		t.Fatal("fetch returned no data and no error")
+	}
+	if got := fallback.calls.Load(); got != 1 {
+		t.Errorf("fallback server saw %d requests, want 1", got)
+	}
+}
+
+// TestFailoverOnEmptyResponseWhenEmptyAllowed guards the interaction with ocean
+// rendering. AllowEmptyResponses turns the empty mid-zoom response into a
+// *success*, so accepting the first result would silently drop empty-response
+// failover exactly where it matters: a regional server failing the
+// 200-with-no-data way over land.
+func TestFailoverOnEmptyResponseWhenEmptyAllowed(t *testing.T) {
+	regional := newFailoverUpstream(t, "Regional", respondEmpty)
+	fallback := newFailoverUpstream(t, "Public", respondOK)
+
+	regionalCfg := serverCfg(regional, hannoverBox)
+	regionalCfg.AllowEmptyResponses = true
+	fallbackCfg := serverCfg(fallback, nil)
+	fallbackCfg.AllowEmptyResponses = true
+
+	mds := NewMultiOverpassDataSource(regionalCfg, fallbackCfg)
+
+	data, err := fetchMulti(t, mds)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if got := fallback.calls.Load(); got != 1 {
+		t.Fatalf("fallback server saw %d requests, want 1", got)
+	}
+	if validateFeatureResponse(data.Features, hannoverTile().Zoom) != nil {
+		t.Error("returned the empty response even though a later server had features")
+	}
+}
+
+// TestEmptyResponseSurvivesWhenEveryServerIsEmpty is the ocean case: nothing is
+// wrong, OSM simply does not map the sea. The tile must still come back so the
+// ocean polygons render — an error here would be a hole in the map.
+func TestEmptyResponseSurvivesWhenEveryServerIsEmpty(t *testing.T) {
+	regional := newFailoverUpstream(t, "Regional", respondEmpty)
+	fallback := newFailoverUpstream(t, "Public", respondEmpty)
+
+	regionalCfg := serverCfg(regional, hannoverBox)
+	regionalCfg.AllowEmptyResponses = true
+	fallbackCfg := serverCfg(fallback, nil)
+	fallbackCfg.AllowEmptyResponses = true
+
+	mds := NewMultiOverpassDataSource(regionalCfg, fallbackCfg)
+
+	data, err := fetchMulti(t, mds)
+	if err != nil {
+		t.Fatalf("an all-empty result is the ocean, not a failure: %v", err)
+	}
+	if data == nil {
+		t.Fatal("fetch returned no data and no error")
+	}
+}
+
 // TestFailoverReportsEveryServerTried keeps the diagnostics useful: an operator
 // needs to know that *both* servers failed, and how.
 func TestFailoverReportsEveryServerTried(t *testing.T) {
@@ -241,28 +334,51 @@ func TestNoServerConfiguredForTile(t *testing.T) {
 }
 
 func TestShouldTryNextServer(t *testing.T) {
+	// A live caller context: nothing here should be treated as "caller gone".
 	tests := []struct {
 		err  error
 		name string
 		want bool
 	}{
 		{nil, "no error", false},
-		{context.Canceled, "context cancelled", false},
-		{context.DeadlineExceeded, "deadline exceeded", false},
-		{fmt.Errorf("fetch: %w", context.Canceled), "wrapped cancellation", false},
 		{ErrResponseTooLarge, "oversized response", false},
 		{fmt.Errorf("[Regional] %w", ErrResponseTooLarge), "wrapped oversized response", false},
 		{ErrEmptyOverpassResponse, "empty response", true},
 		{errors.New("overpass engine error: 504"), "gateway timeout", true},
 		{errors.New("connection refused"), "transport failure", true},
+
+		// The distinction the classification exists for: an http.Client.Timeout
+		// error satisfies errors.Is(err, context.DeadlineExceeded) while the
+		// caller's context is untouched. That is a hung server, which is exactly
+		// what the next server should be asked about.
+		{context.DeadlineExceeded, "per-request timeout, caller still waiting", true},
+		{fmt.Errorf("Get %q: %w", "http://overpass", context.DeadlineExceeded), "wrapped client timeout", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldTryNextServer(tt.err); got != tt.want {
+			if got := shouldTryNextServer(t.Context(), tt.err); got != tt.want {
 				t.Errorf("shouldTryNextServer(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestShouldTryNextServerCallerGone pins the other half: once the *caller's*
+// context is done, no error is worth another server.
+func TestShouldTryNextServerCallerGone(t *testing.T) {
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	for _, err := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		errors.New("connection refused"),
+		ErrEmptyOverpassResponse,
+	} {
+		if shouldTryNextServer(cancelled, err) {
+			t.Errorf("shouldTryNextServer(cancelled ctx, %v) = true, want false", err)
+		}
 	}
 }
 
