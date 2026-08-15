@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/cwbudde/watercolormap/internal/checkpoint"
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/renderer"
@@ -24,6 +25,10 @@ import (
 	"github.com/cwbudde/watercolormap/internal/watercolor"
 	"github.com/cwbudde/watercolormap/internal/worker"
 )
+
+// checkpointAuto is the sentinel `--checkpoint` takes when given without a
+// value: put the checkpoint in the output directory under its default name.
+const checkpointAuto = "auto"
 
 var generateCmd = &cobra.Command{
 	Use:   "generate",
@@ -50,6 +55,14 @@ func init() {
 	generateCmd.Flags().IntP("workers", "w", 0, "Number of parallel workers (default: number of CPUs)")
 	generateCmd.Flags().Bool("progress", true, "Show progress bar during batch generation")
 	generateCmd.Flags().Bool("allow-failures", false, "Continue generation even if some tiles fail (useful for CI/CD with API rate limits)")
+
+	// Checkpointing. Off unless asked for: it writes a file into the output and
+	// changes what a rerun does, which an operator opts into.
+	generateCmd.Flags().String("checkpoint", "",
+		"Record batch progress in this file so an interrupted run resumes where it stopped; "+
+			"give the flag without a value to use <output-dir>/"+checkpoint.FileName)
+	generateCmd.Flags().Lookup("checkpoint").NoOptDefVal = checkpointAuto
+	generateCmd.Flags().Int("checkpoint-interval", checkpoint.DefaultInterval, "Write the checkpoint every N completed tiles")
 
 	// Common flags
 	generateCmd.Flags().Bool("force", false, "Re-render tiles that already exist, for folder and MBTiles output alike (without it, existing tiles are skipped so a run can resume)")
@@ -104,6 +117,8 @@ func init() {
 		{"generate.workers", "workers"},
 		{"generate.progress", "progress"},
 		{"generate.allow_failures", "allow-failures"},
+		{"generate.checkpoint", "checkpoint"},
+		{"generate.checkpoint_interval", "checkpoint-interval"},
 		{"generate.force", "force"},
 		{"generate.tile_size", "tile-size"},
 		{"generate.hidpi", "hidpi"},
@@ -400,7 +415,9 @@ type batchOptions struct {
 	stampStore pipeline.StampStore
 	// freshness is the validated --stale-* selection; the zero value means
 	// "an existing tile is a finished tile", the pre-existing behaviour.
-	freshness       pipeline.FreshnessPolicy
+	freshness pipeline.FreshnessPolicy
+	// checkpoint is nil unless --checkpoint was given.
+	checkpoint      *checkpoint.Tracker
 	bboxStr         string
 	outputDir       string
 	dataSourceName  string
@@ -473,9 +490,16 @@ func runBatchGenerate(opts *batchOptions) error {
 		opts.workers = runtime.NumCPU()
 	}
 
-	// Calculate tiles
-	tiles := tile.TilesInBBox(bbox, opts.zoomMin, opts.zoomMax)
-	logBatchStart(opts, len(tiles))
+	// Count tiles rather than enumerate them: the non-banded path streams the
+	// enumeration and never needs the list.
+	tileCount := tile.TileCount(bbox, opts.zoomMin, opts.zoomMax)
+	logBatchStart(opts, tileCount)
+
+	cp, err := setupCheckpoint(opts, bbox)
+	if err != nil {
+		return err
+	}
+	opts.checkpoint = cp
 
 	if err := configureBatchSources(opts); err != nil {
 		return err
@@ -543,10 +567,10 @@ func runBatchGenerate(opts *batchOptions) error {
 	defer cancel()
 
 	// Run base tiles
-	logger.Info("Generating base tiles", "count", len(tiles))
-	results, summary := runTilePool(ctx, gen, tiles, opts, "")
-	failedCount := logTileFailures(results, "Tile generation failed")
-	logger.Info(summary)
+	logger.Info("Generating base tiles", "count", tileCount)
+	run := runTilePool(ctx, gen, bbox, opts, "")
+	failedCount := run.logFailures("Tile generation failed")
+	logger.Info(run.summary)
 	if err := failureError(failedCount, "base", opts.allowFailures); err != nil {
 		return err
 	}
@@ -750,48 +774,23 @@ func newSignalContext() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-// runTilePool renders the given tiles through a worker pool and returns the
-// results together with the progress summary.
-func runTilePool(ctx context.Context, gen worker.Generator, coords []tile.Coords, opts *batchOptions, suffix string) ([]worker.Result, string) {
+// runTilePool renders every tile of bbox through a worker pool and reports what
+// happened, without holding a task or a result per tile.
+//
+// The banded path is the exception: it schedules by band rather than by
+// enumeration order, so it still takes the materialised tile list. That list is
+// the price of band grouping, not of the pool.
+func runTilePool(ctx context.Context, gen worker.Generator, bbox [4]float64, opts *batchOptions, suffix string) tileRunResult {
 	if opts.bandFetch {
 		bandGen, _ := bandGeneratorFor(gen)
 		if ds, ok := opts.dataSource.(areaDataSource); ok && bandGen != nil {
-			return runBandedTilePool(ctx, gen, bandGen, ds, coords, opts, suffix)
+			coords := tile.TilesInBBox(bbox, opts.zoomMin, opts.zoomMax)
+			results, summary := runBandedTilePool(ctx, gen, bandGen, ds, coords, opts, suffix)
+			return aggregateResults(results, summary)
 		}
 	}
 
-	tasks := make([]worker.Task, 0, len(coords))
-	for _, c := range coords {
-		tasks = append(tasks, worker.Task{
-			Coords: c,
-			Force:  opts.force,
-			Suffix: suffix,
-		})
-	}
-
-	progress := worker.NewProgress(len(tasks), opts.showProgress)
-	pool := worker.New(worker.Config{
-		Workers:    opts.workers,
-		Generator:  gen,
-		OnProgress: progress.Callback(),
-	})
-
-	results := pool.Run(ctx, tasks)
-	progress.Done()
-
-	return results, progress.Summary()
-}
-
-// logTileFailures logs every failed result and returns the failure count.
-func logTileFailures(results []worker.Result, msg string) int {
-	var failedCount int
-	for _, r := range results {
-		if r.Err != nil {
-			failedCount++
-			logger.Error(msg, "coords", r.Task.Coords.String(), "suffix", r.Task.Suffix, "error", r.Err)
-		}
-	}
-	return failedCount
+	return runStreamingTilePool(ctx, gen, bbox, opts, suffix)
 }
 
 // failureError turns a failure count into an error unless failures are allowed.

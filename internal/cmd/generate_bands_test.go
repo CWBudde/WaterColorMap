@@ -99,7 +99,12 @@ func (g *fakeBandGenerator) SliceForTile(band *types.TileData, coords tile.Coord
 type recordingGenerator struct {
 	withData    map[string]bool
 	withoutData map[string]bool
-	mu          sync.Mutex
+	// failFor makes Generate fail for these tiles, which is how the streaming
+	// path's failure accounting and the checkpoint watermark get exercised.
+	failFor map[string]bool
+	// rendered is every tile Generate was called for, in completion order.
+	rendered []tile.Coords
+	mu       sync.Mutex
 }
 
 func newRecordingGenerator() *recordingGenerator {
@@ -110,7 +115,22 @@ func (g *recordingGenerator) Generate(_ context.Context, coords tile.Coords, _ b
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.withoutData[coords.String()] = true
+	g.rendered = append(g.rendered, coords)
+	if g.failFor != nil && g.failFor[coords.String()] {
+		return "", "", errors.New("simulated render failure")
+	}
 	return coords.String(), "", nil
+}
+
+// renderedSet returns the tiles Generate saw, as a set.
+func (g *recordingGenerator) renderedSet() map[tile.Coords]bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make(map[tile.Coords]bool, len(g.rendered))
+	for _, c := range g.rendered {
+		out[c] = true
+	}
+	return out
 }
 
 func (g *recordingGenerator) GenerateWithPrefetched(_ context.Context, coords tile.Coords, _ bool, _ string, _ *types.TileData) (string, string, error) {
