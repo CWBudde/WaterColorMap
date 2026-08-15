@@ -255,7 +255,13 @@ overpass:
 #   # is clamped to 1 (internal/server/ondemand_tiles.go), serialising rendering.
 #   max_concurrent_generations: 8
 #   generation_timeout: "2m"
-#   cache_control: "no-store"
+#   # Every tile carries an ETag, so "no-cache" means the client stores the tile
+#   # and revalidates it: a repeat view costs a 304 rather than the bytes, and a
+#   # purged tile is gone on the very next request. Behind a CDN,
+#   # "public, max-age=300, stale-while-revalidate=86400" is much faster but
+#   # outlives a purge by up to max-age. "no-store" restores the pre-ETag
+#   # behaviour of refetching everything.
+#   cache_control: "no-cache"
 #   max_pending_generations: 0 # 0 = auto; excess requests get 503
 #
 #   # Rendering (same meaning as under generate)

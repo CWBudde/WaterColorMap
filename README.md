@@ -182,6 +182,20 @@ watercolormap serve --cors-origin https://example.com
 The value is also settable as `serve.cors_origin` in `config.yaml`. An empty
 value (the default) sends no `Access-Control-*` headers at all.
 
+#### Caching
+
+Every tile response carries an `ETag` and an `X-Cache` header saying how it was
+answered — `HIT`, `HIT-COALESCED` (another request rendered it while this one
+waited), `MISS` or `BYPASS`. The running totals, including 304s and re-renders
+forced by a `--stale-*` cutoff, are in `/tiles/status` under `cache`.
+
+`--cache-control` defaults to `no-cache`: clients store the tile and revalidate
+it, so a repeat view costs a 304 rather than the bytes, and a tile removed by
+`purge` is gone on the very next request. Behind a CDN,
+`--cache-control 'public, max-age=300, stale-while-revalidate=86400'` is far
+faster, at the price that a purged tile stays in caches for up to `max-age`.
+`--cache-control no-store` restores the old behaviour of refetching everything.
+
 ## Browser Playground (WASM)
 
 There is a minimal browser playground (Leaflet) that renders tiles on demand entirely in the browser — it queries Overpass directly and rasterises in WASM, with no backend. It can be deployed via GitHub Pages.

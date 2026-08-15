@@ -45,7 +45,11 @@ func init() {
 	serveCmd.Flags().Bool("disable-cache", false, "Always regenerate tiles (still writes to disk)")
 	serveCmd.Flags().Int("max-concurrent-generations", runtime.NumCPU(), "Max concurrent tile generations (default: number of CPUs)")
 	serveCmd.Flags().Duration("generation-timeout", 2*time.Minute, "Timeout per tile generation")
-	serveCmd.Flags().String("cache-control", "no-store", "Cache-Control header for served tiles")
+	serveCmd.Flags().String("cache-control", "no-cache",
+		"Cache-Control header for served tiles. The default lets clients store a tile "+
+			"and revalidate it against the ETag, so a repeat view costs a 304 and `purge` "+
+			"still takes effect on the next request. A positive max-age is faster but "+
+			"outlives a purge; see docs/tile-server-architecture.md")
 
 	serveCmd.Flags().Int("tile-size", 256, "Base tile size in pixels (256; @2x requests render 512)")
 	serveCmd.Flags().String("image-format", "png", "Tile image encoding: png or webp (webp is lossless, ~1.2x smaller)")

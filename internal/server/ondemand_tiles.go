@@ -132,6 +132,8 @@ type OnDemandTiles struct {
 	cacheMisses        atomic.Int64
 	cacheStale         atomic.Int64
 	cacheBypasses      atomic.Int64
+	// cacheNotModified counts hits answered with a 304 rather than the bytes.
+	cacheNotModified atomic.Int64
 
 	// The 32-bit counters are kept adjacent so the struct carries no padding
 	// between them.
@@ -180,6 +182,10 @@ type CacheStatus struct {
 	Misses        int64 `json:"misses"`
 	Stale         int64 `json:"stale"`
 	Bypasses      int64 `json:"bypasses"`
+	// NotModified counts responses answered with a 304 because the client
+	// already held the tile. It overlaps the hit counters rather than adding to
+	// them: a revalidated hit is still a hit, just a cheap one.
+	NotModified int64 `json:"not_modified"`
 }
 
 // RenderStatus contains current render operation status.
@@ -232,7 +238,11 @@ func NewOnDemandTiles(ds pipeline.DataSource, cfg OnDemandTilesConfig, logger *s
 		cfg.GenerationTimeout = 2 * time.Minute
 	}
 	if cfg.CacheControl == "" {
-		cfg.CacheControl = "no-store"
+		// "store it, but revalidate every time": the ETag makes a repeat view a
+		// 304 instead of a refetch, while a purged tile is still gone on the
+		// very next request. A positive max-age would be faster and would
+		// outlive the purge, which is the operator's call, not the default.
+		cfg.CacheControl = "no-cache"
 	}
 	if cfg.FetchWorkers <= 0 {
 		cfg.FetchWorkers = 2
@@ -415,6 +425,7 @@ func (t *OnDemandTiles) Status() TileStatus {
 			Misses:        t.cacheMisses.Load(),
 			Stale:         t.cacheStale.Load(),
 			Bypasses:      t.cacheBypasses.Load(),
+			NotModified:   t.cacheNotModified.Load(),
 		},
 	}
 
@@ -680,16 +691,79 @@ func (t *OnDemandTiles) noteGeneration() string {
 	return cacheStatusMiss
 }
 
-// serveTileFile serves a rendered tile with the configured cache policy.
+// serveTileFile serves a rendered tile with the configured cache policy and a
+// validator, so a client that already holds the tile can be answered with a 304
+// instead of the bytes.
 //
-// Content-Type is set explicitly rather than left to http.ServeFile's
-// extension sniffing. Go's builtin table does map .webp, but the mime package
-// also loads /etc/mime.types on Linux, which would make the header this server
-// sends depend on the machine it happens to run on.
+// Content-Type is set explicitly rather than left to net/http's extension
+// sniffing. Go's builtin table does map .webp, but the mime package also loads
+// /etc/mime.types on Linux, which would make the header this server sends
+// depend on the machine it happens to run on.
+//
+// http.ServeContent rather than http.ServeFile: ServeFile stats the file
+// itself, and this path has just stat'ed it to build the validator, so going
+// through ServeContent spends one stat per request instead of two while leaving
+// the precondition and range handling to the stdlib.
 func (t *OnDemandTiles) serveTileFile(w http.ResponseWriter, r *http.Request, fullPath string) {
+	f, err := os.Open(fullPath) // nolint:gosec // fullPath is built from validated tile coordinates
+	if err != nil {
+		t.log().Error("failed to open the tile file", "path", fullPath, "error", err)
+		writeTileError(w, "tile not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close() // nolint:errcheck // read-only
+
+	fi, err := f.Stat()
+	if err != nil {
+		t.log().Error("failed to stat the tile file", "path", fullPath, "error", err)
+		writeTileError(w, "tile not found", http.StatusNotFound)
+		return
+	}
+
 	w.Header().Set("Cache-Control", t.cfg.CacheControl)
 	w.Header().Set("Content-Type", t.imageFormat().ContentType())
-	http.ServeFile(w, r, fullPath)
+	w.Header().Set("ETag", tileETag(fi))
+
+	// The status is captured rather than the request pre-checked so that a 304
+	// from If-Modified-Since is counted too, not just one from If-None-Match.
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	http.ServeContent(rec, r, "", fi.ModTime(), f)
+	if rec.status == http.StatusNotModified {
+		t.cacheNotModified.Add(1)
+	}
+}
+
+// statusRecorder remembers the status a handler wrote. Unwrap is what keeps
+// http.ResponseController working through it -- without it, the write-deadline
+// extension and the SSE flush would silently fall back to "not supported".
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// tileETag identifies a tile file by modification time and size, the shape
+// nginx uses.
+//
+// Not a hash of the content: hashing on every request is exactly the work the
+// cache-hit path exists to avoid. Not the tile's data stamp either -- stamps
+// are optional, absent for tiles rendered before they existed, and reading one
+// costs a lookup this path would rather not make.
+//
+// Strong rather than weak, because the body is the file byte for byte, and a
+// weak validator would disable If-Range.
+//
+// The residual risk is two renders of one tile in the same nanosecond producing
+// identical sizes. Tiles are written by atomic rename after a render measured in
+// seconds, so this is documented rather than engineered around.
+func tileETag(fi os.FileInfo) string {
+	return fmt.Sprintf(`"%x-%x"`, fi.ModTime().UnixNano(), fi.Size())
 }
 
 // cachePhase says which of serveTile's two cache checks is running. The two are
