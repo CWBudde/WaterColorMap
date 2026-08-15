@@ -41,8 +41,10 @@ type OnDemandTilesConfig struct {
 	// Ocean points the ocean pass at the processed OSM water polygons.
 	// The zero value disables it.
 	Ocean renderer.OceanConfig
-	// WebPEffort is nativewebp's compression level (0-6); zero means the
-	// package default. Ignored unless ImageFormat is WebP.
+	// WebPEffort is nativewebp's compression level (0-6), every value
+	// explicit — 0 is the fastest level, not "unset". Ignored unless
+	// ImageFormat is WebP. The serve command defaults it to
+	// tileformat.DefaultWebPEffort.
 	WebPEffort               int
 	BaseTileSize             int
 	Seed                     int64
@@ -831,12 +833,17 @@ func parseTilePath(requestPath string) (tile.Coords, string, tileformat.Format, 
 	}
 	base := path.Base(requestPath)
 
-	format, ok := tileformat.ParseExt(path.Ext(base))
+	ext := path.Ext(base)
+	format, ok := tileformat.ParseExt(ext)
 	if !ok {
 		return tile.Coords{}, "", "", fmt.Errorf("%w: %s", tile.ErrCoordsFormat, base)
 	}
 
-	name := strings.TrimSuffix(base, format.DotExt())
+	// Trim the extension as it was written, not format.DotExt(): ParseExt is
+	// case-insensitive, so "/tiles/z13_x1_y2.WEBP" parses as WebP but does not
+	// end in the normalised ".webp", and trimming that would leave the suffix
+	// on the name for ParseCoords to choke on.
+	name := strings.TrimSuffix(base, ext)
 	suffix := ""
 	if strings.HasSuffix(name, "@2x") {
 		suffix = "@2x"
