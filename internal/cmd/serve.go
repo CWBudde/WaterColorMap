@@ -422,6 +422,10 @@ func createOverpassDataSource(overpassWorkers int, allowEmpty bool, logger *slog
 		cfg.Workers = overpassWorkers
 	}
 	cfg.Cache = cache
+	// Empty is not "no User-Agent" — NewOverpassDataSourceWithConfig fills in
+	// datasource.DefaultUserAgent, which is the point. The key exists so an
+	// operator running a private instance can identify their own traffic.
+	cfg.UserAgent = viper.GetString("overpass.user_agent")
 
 	return datasource.NewOverpassDataSourceWithConfig(cfg).
 		WithEmptyResponsesAllowed(allowEmpty), nil
@@ -451,6 +455,9 @@ func createMultiServerDataSource(
 			Name:                name,
 			AllowEmptyResponses: allowEmpty,
 			Cache:               cache,
+			// Falls back to the global key, then to
+			// datasource.DefaultUserAgent inside the constructor.
+			UserAgent: getStringOrDefault(cfg, "user_agent", viper.GetString("overpass.user_agent")),
 		}
 
 		// Parse coverage area if specified

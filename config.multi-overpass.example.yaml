@@ -20,11 +20,21 @@ log-level: "info"
 # Servers are checked in order; the first matching coverage area is used.
 # Always include a fallback server with no coverage area at the end.
 overpass:
+  # Identifies this client to every server below. Optional; a sensible default
+  # naming the project is built in. Individual servers may override it.
+  #
+  # overpass-api.de rejects Go's stdlib default User-Agent with 406, so sending
+  # a real one is what makes the public fallback below work at all.
+  # user_agent: "MyProject/1.0 (+https://example.org/contact)"
+
   servers:
     # Local Niedersachsen instance (fast, covers Lower Saxony, Germany)
     - name: "Niedersachsen"
       endpoint: "http://localhost:12345/api/interpreter"
       workers: 10 # Higher parallelism for local instance
+      # Per-server override, e.g. to tell your own traffic apart in the
+      # instance's own access log.
+      # user_agent: "MyProject/1.0 (local)"
       coverage:
         min_lat: 51.3 # Southern edge of Niedersachsen
         max_lat: 53.9 # Northern edge (includes coastal areas)

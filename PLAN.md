@@ -197,8 +197,13 @@ and it would make the public API a usable fallback for coverage gaps.
 
 Filed rather than smuggled into the 5.1 work, in rough value order.
 
-- [ ] **[P1]** Set a `User-Agent` in `go-overpass` (see above). Cheapest item in this plan by a
-      wide margin, and it unblocks every routing recommendation that assumes a public fallback.
+- [x] **[P1]** Set a `User-Agent` on the Overpass client (see above). Done in
+      `internal/datasource/useragent.go`, as a `RoundTripper` beside the existing limit and cache
+      transports rather than as a patch to `go-overpass`: the request is built inside the client
+      where the call site cannot reach it, and this layer also covers the per-server clients
+      `MultiOverpassDataSource` builds, with no dependency release needed. Overridable via
+      `overpass.user_agent`, globally or per server. The public API is now a usable fallback,
+      which is what the routing recommendations assumed.
 - [ ] **[P1]** Evaluate WebP output end to end (9.2× measured). `internal/mbtiles/types.go:18`
       already lists `webp` as a format string; nothing produces one. Needs a format flag, TileJSON
       plumbing (`tilejson.go:36` hardcodes `png` as "the only tile format this project produces"),

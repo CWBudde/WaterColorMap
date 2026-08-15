@@ -27,6 +27,9 @@ type OverpassConfig struct {
 	Cache *ResponseCache
 	// Endpoint is the Overpass API URL (default: https://overpass-api.de/api/interpreter)
 	Endpoint string
+	// UserAgent identifies this client to the Overpass server. Empty means
+	// DefaultUserAgent; sending none is not an option the public API accepts.
+	UserAgent string
 	// MaxResponseBytes caps a single Overpass response body. Zero means
 	// "unset" and is defaulted to DefaultMaxResponseBytes; a negative value
 	// is an explicit opt-out that disables the cap.
@@ -148,14 +151,24 @@ func NewOverpassDataSourceWithConfig(cfg OverpassConfig) *OverpassDataSource {
 	if cfg.MaxResponseBytes == 0 {
 		cfg.MaxResponseBytes = DefaultMaxResponseBytes
 	}
+	if cfg.UserAgent == "" {
+		cfg.UserAgent = DefaultUserAgent
+	}
 	// The cache wraps the limiter, not the other way round: the size cap has to
 	// stay in force on the miss path, where the bytes actually arrive from the
 	// network. That ordering means the limiter never runs on a hit, so the cap
 	// is handed to the cache transport as well and applied on both paths.
-	httpClient := withResponseCache(
-		withResponseLimit(cfg.HTTPClient, cfg.MaxResponseBytes),
-		cfg.Cache,
-		cfg.MaxResponseBytes,
+	//
+	// The User-Agent goes outermost, which costs nothing: a cache hit never
+	// reaches the network, and the cache key is the endpoint plus the query
+	// text, so the header cannot perturb it in either direction.
+	httpClient := withUserAgent(
+		withResponseCache(
+			withResponseLimit(cfg.HTTPClient, cfg.MaxResponseBytes),
+			cfg.Cache,
+			cfg.MaxResponseBytes,
+		),
+		cfg.UserAgent,
 	)
 
 	var client overpass.Client
@@ -599,6 +612,10 @@ type ServerConfig struct {
 	Coverage *types.BoundingBox
 	// Endpoint is the Overpass API URL
 	Endpoint string
+	// UserAgent identifies this client to the server. Empty means
+	// DefaultUserAgent. Per-server because a private instance may want to be
+	// told apart from the public fallback in its own logs.
+	UserAgent string
 	// Name is an optional human-readable name for logging (e.g., "Niedersachsen", "Public")
 	Name string
 	// MaxResponseBytes caps a single Overpass response body. Zero means
@@ -651,6 +668,7 @@ func NewMultiOverpassDataSource(configs ...ServerConfig) *MultiOverpassDataSourc
 		// Build OverpassConfig from ServerConfig
 		ovConfig := OverpassConfig{
 			Endpoint:         cfg.Endpoint,
+			UserAgent:        cfg.UserAgent,
 			Workers:          cfg.Workers,
 			RetryConfig:      cfg.RetryConfig,
 			HTTPClient:       cfg.HTTPClient,

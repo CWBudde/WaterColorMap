@@ -30,6 +30,14 @@ log-level: "info" # debug, info, warn, error
 # see config.multi-overpass.example.yaml.
 overpass:
   endpoint: "https://overpass-api.de/api/interpreter"
+  # How this client identifies itself. Leave unset for the built-in default,
+  # which names the project and links to it.
+  #
+  # Not cosmetic: overpass-api.de answers 406 Not Acceptable to Go's stdlib
+  # default `User-Agent: Go-http-client/1.1`, which is what the public API's
+  # long-assumed "rate limiting" actually was. Overpass's usage policy also asks
+  # for a contactable identifier, so put a real one here if you run bulk jobs.
+  # user_agent: "MyProject/1.0 (+https://example.org/contact)"
 
 # On-disk cache for Overpass responses.
 #

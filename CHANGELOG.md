@@ -73,6 +73,21 @@
 
 ### Bug Fixes
 
+- **datasource:** send a real `User-Agent` to Overpass. `overpass-api.de` answers
+  `406 Not Acceptable` to Go's stdlib default `User-Agent: Go-http-client/1.1`, and go-overpass's
+  `httpPost` sets only `Content-Type` — so every request this project made to the public API
+  arrived with the rejected default. That 406 was documented for a long time as rate limiting; it
+  was not, and the identical query from `curl` returns 200 in about half a second. The public API
+  is now a usable fallback for coverage gaps, which is what the multi-server routing has always
+  assumed.
+
+  Implemented as a `userAgentTransport` alongside the existing limit and cache round-trippers
+  rather than as a patch to the dependency: the request is built inside the go-overpass client
+  where the call site cannot reach it, and doing it at this layer also covers the per-server
+  clients `MultiOverpassDataSource` builds. It cannot perturb the response cache either way — the
+  cache key is the endpoint plus the query text, and headers are no part of it. Override with
+  `overpass.user_agent`, globally or per server.
+
 - **watercolor:** anchor hi-DPI rendering to world position. Noise scale, all blur/shade/edge
   sigmas, the adaptive-noise distances and the paper/layer texture period are lengths, and they
   were fixed **device**-pixel constants while the sampling offsets scaled with the tile size. An
