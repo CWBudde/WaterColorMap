@@ -556,3 +556,108 @@ func TestCreateDistanceEdgeMaskIntoMatchesReference(t *testing.T) {
 		}
 	}
 }
+
+// --- edge darkening -------------------------------------------------------------
+
+func referenceApplySoftEdgeMaskInto(base *image.NRGBA, mask *image.Gray, strength float64, dst *image.NRGBA) {
+	if strength < 0 {
+		strength = 0
+	}
+	if strength > 1 {
+		strength = 1
+	}
+
+	bounds := base.Bounds()
+
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			src := base.NRGBAAt(x, y)
+			maskVal := int(mask.GrayAt(x, y).Y)
+
+			maskSquared := maskVal * maskVal
+			invMaskSquared := 65025 - maskSquared
+			effectInt := int(float64(invMaskSquared) * strength)
+
+			h, s, l := rgbToHSL(src.R, src.G, src.B)
+
+			darkening := 65025 - effectInt
+			lNew := uint8((int(l) * darkening) / 65025)
+
+			r, g, b := hslToRGB(h, s, lNew)
+
+			dst.SetNRGBA(x, y, color.NRGBA{R: r, G: g, B: b, A: src.A})
+		}
+	}
+}
+
+func filledNRGBA(bounds image.Rectangle, fill byte) *image.NRGBA {
+	img := image.NewNRGBA(bounds)
+	for i := range img.Pix {
+		img.Pix[i] = fill
+	}
+
+	return img
+}
+
+func TestApplySoftEdgeMaskIntoMatchesReference(t *testing.T) {
+	for _, bounds := range testBounds() {
+		base := randomNRGBAImage(bounds, 23)
+		edge := randomMask(bounds, 24)
+
+		for _, dstBounds := range destinationBounds(bounds) {
+			got := filledNRGBA(dstBounds, 0x3C)
+			want := filledNRGBA(dstBounds, 0x3C)
+
+			ApplySoftEdgeMaskInto(base, edge, testStrength, got)
+			referenceApplySoftEdgeMaskInto(base, edge, testStrength, want)
+
+			if !bytes.Equal(got.Pix, want.Pix) {
+				t.Errorf("src %v dst %v: soft edge mask differs from the reference implementation",
+					bounds, dstBounds)
+			}
+		}
+	}
+}
+
+// The lightness round trip has to run even at full mask (no darkening), because
+// rgbToHSL/hslToRGB is lossy and skipping it would move pixels.
+func TestApplySoftEdgeMaskIntoKeepsTheLossyRoundTrip(t *testing.T) {
+	bounds := image.Rect(0, 0, 64, 64)
+	base := randomNRGBAImage(bounds, 25)
+
+	white := image.NewGray(bounds)
+	for i := range white.Pix {
+		white.Pix[i] = 255
+	}
+
+	got := image.NewNRGBA(bounds)
+	want := image.NewNRGBA(bounds)
+
+	ApplySoftEdgeMaskInto(base, white, 1.0, got)
+	referenceApplySoftEdgeMaskInto(base, white, 1.0, want)
+
+	if !bytes.Equal(got.Pix, want.Pix) {
+		t.Error("a fully white mask no longer round-trips through HSL the way it used to")
+	}
+	if bytes.Equal(got.Pix, base.Pix) {
+		t.Skip("the round trip happens to be lossless for this input; the test proves nothing")
+	}
+}
+
+// A mask smaller than the base used to read zero outside itself, which darkens rather
+// than panicking.
+func TestApplySoftEdgeMaskIntoWithShortMask(t *testing.T) {
+	bounds := image.Rect(0, 0, 64, 64)
+	base := randomNRGBAImage(bounds, 26)
+	short := randomMask(image.Rect(0, 0, 30, 20), 27)
+
+	got := image.NewNRGBA(bounds)
+	want := image.NewNRGBA(bounds)
+
+	ApplySoftEdgeMaskInto(base, short, testStrength, got)
+	referenceApplySoftEdgeMaskInto(base, short, testStrength, want)
+
+	if !bytes.Equal(got.Pix, want.Pix) {
+		t.Error("a mask smaller than the base no longer reads zero outside itself")
+	}
+}

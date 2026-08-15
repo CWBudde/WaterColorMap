@@ -36,12 +36,26 @@ func ApplySoftEdgeMaskInto(base *image.NRGBA, mask *image.Gray, strength float64
 		strength = 1
 	}
 
-	bounds := base.Bounds()
+	r := writeRect(base.Bounds(), dst.Bounds())
+	w := r.Dx()
 
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			src := base.NRGBAAt(x, y)
-			maskVal := int(mask.GrayAt(x, y).Y)
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		srcOff := base.PixOffset(r.Min.X, y)
+		srcRow := base.Pix[srcOff : srcOff+4*w]
+		dstOff := dst.PixOffset(r.Min.X, y)
+		dstRow := dst.Pix[dstOff : dstOff+4*w]
+
+		// A mask narrower than the base read zero outside itself, which is what GrayAt
+		// returns and what a nil row falls back to.
+		maskRow := grayRow(mask, r.Min.X, y, w)
+
+		for i := 0; i < w; i++ {
+			maskVal := 0
+			if maskRow != nil {
+				maskVal = int(maskRow[i])
+			} else {
+				maskVal = int(mask.GrayAt(r.Min.X+i, y).Y)
+			}
 
 			// Quadratic falloff: creates softer, more natural transition
 			// Effect amount: 0 at white (center), strength at black (edges)
@@ -51,7 +65,8 @@ func ApplySoftEdgeMaskInto(base *image.NRGBA, mask *image.Gray, strength float64
 			effectInt := int(float64(invMaskSquared) * strength) // 0..65025
 
 			// Convert RGB to HSL (integer-only)
-			h, s, l := rgbToHSL(src.R, src.G, src.B)
+			p := 4 * i
+			h, s, l := rgbToHSL(srcRow[p], srcRow[p+1], srcRow[p+2])
 
 			// Darken by reducing lightness
 			// l_new = l * (1 - effect) = l * (65025 - effectInt) / 65025
@@ -59,14 +74,12 @@ func ApplySoftEdgeMaskInto(base *image.NRGBA, mask *image.Gray, strength float64
 			lNew := uint8((int(l) * darkening) / 65025)
 
 			// Convert back to RGB (integer-only)
-			r, g, b := hslToRGB(h, s, lNew)
+			// The HSL round trip is not lossless, so it runs even where the darkening
+			// factor is 1 - skipping it would change pixels.
+			red, green, blue := hslToRGB(h, s, lNew)
 
-			dst.SetNRGBA(x, y, color.NRGBA{
-				R: r,
-				G: g,
-				B: b,
-				A: src.A, // preserve original alpha
-			})
+			alpha := srcRow[p+3] // preserve original alpha
+			dstRow[p], dstRow[p+1], dstRow[p+2], dstRow[p+3] = red, green, blue, alpha
 		}
 	}
 }
