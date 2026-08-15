@@ -37,10 +37,14 @@ The direct path exists because a box approximation cannot represent sigma below
 ~0.8 at all — the narrowest non-trivial box is already sigma 0.82 — which is
 where most of this renderer's sigmas live.
 
-Both passes share one kernel shape (a weighted sum at fixed offsets from a base
-pointer), so one AVX2 implementation in `internal/mask/blurkernel/asm/amd64`
-serves both, dispatched on `cpu.X86.HasAVX2`, with a portable Go fallback for
-other architectures, `-tags purego`, and js/wasm.
+The direct path's two directions — the horizontal (row) and vertical (column)
+passes of the separable convolution — share one kernel shape: a weighted sum at
+fixed offsets from a base pointer. `ConvRows` gets that shape by materialising a
+replicated-border copy of each row first, so a single AVX2 implementation in
+`internal/mask/blurkernel/asm/amd64` (`ConvColsRowAVX2`) serves both directions,
+dispatched on `cpu.X86.HasAVX2`, with a portable Go fallback for other
+architectures, `-tags purego`, and js/wasm. The box path has no assembly
+implementation and does not use this kernel.
 
 ## Measured
 
