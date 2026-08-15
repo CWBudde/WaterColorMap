@@ -738,9 +738,10 @@ cold cache 5.60 s (0.8 tiles/s), warm cache 1.71 s (2.8 tiles/s) — a **3.3×
 speedup**, which is about what a 71%-fetch workload predicts once the fetch goes
 to zero.
 
-**On the determinism of that result.** The cached run's tiles are _not_ byte-identical
-to the uncached run's — but neither are two uncached runs to each other. Same
-tile, same data, mean per-channel deviation across the three comparisons:
+**On the determinism of that result — since fixed.** When this was measured, the
+cached run's tiles were _not_ byte-identical to the uncached run's — but neither
+were two uncached runs to each other. Same tile, same data, mean per-channel
+deviation across the three comparisons:
 
 | comparison           | mean  | max | channels differing |
 | -------------------- | ----- | --- | ------------------ |
@@ -748,14 +749,17 @@ tile, same data, mean per-channel deviation across the three comparisons:
 | cached vs cached     | 0.016 | 31  | 0.01%              |
 | uncached vs cached   | 0.017 | 36  | 0.01%              |
 
-The cache adds no variation beyond what the pipeline already has. The source is
-`ExtractFeaturesFromOverpassResult` ranging over `map[int64]*…` unsorted
-(`internal/datasource/overpass_extract.go:32,49`), so draw order flips on a
-handful of antialiased edges. This is exactly why the cache stores **raw JSON**
-rather than the extracted `FeatureCollection`: caching post-extraction would have
-frozen one arbitrary ordering and turned a timing change into a behaviour change.
-The ordering bug is tracked separately in PLAN.md § 5.1a; fixing it will move the
-pipeline goldens.
+The near-equality of the three rows was the finding: the cache added no variation
+beyond what the pipeline already had. The source was
+`ExtractFeaturesFromOverpassResult` ranging over `map[int64]*…` unsorted, so draw
+order flipped on a handful of antialiased edges. That extraction now walks both
+element maps in **ascending OSM ID order** and the same tile renders
+byte-identically twice.
+
+The cache still stores **raw JSON** rather than the extracted `FeatureCollection`,
+now for its own reasons rather than this one: no second serialization format to
+keep in sync with the decoder, and no stored collection that could outlive a
+change to the extraction rules.
 
 ### Source freshness is nearly free, and currently buys nothing
 

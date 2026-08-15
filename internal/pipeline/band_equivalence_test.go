@@ -19,12 +19,12 @@ import (
 // fetch bounds, must be **byte-identical** to the same tile rendered from its
 // own per-tile fetch.
 //
-// It can assert byte equality rather than a tolerance because
-// worldSyntheticDataSource returns fixed lon/lat geometry built once, with no
-// map iteration anywhere — so the known run-to-run feature-ordering
-// nondeterminism in ExtractFeaturesFromOverpassResult (PLAN.md § 5.1a) simply
-// does not arise. If this ever has to become a tolerance, that is a real
-// coupling between band data and rendering, not noise.
+// It can assert byte equality rather than a tolerance because rendering is
+// deterministic given the same features in the same order: worldSyntheticDataSource
+// returns fixed lon/lat geometry built once, and the Overpass path that this
+// stands in for now walks its element maps in OSM ID order rather than map
+// order. If this ever has to become a tolerance, that is a real coupling between
+// band data and rendering, not noise.
 //
 // Note what the two paths actually differ in: the per-tile render receives the
 // *whole* synthetic feature set, while the band render receives only the subset

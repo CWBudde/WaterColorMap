@@ -3,6 +3,8 @@ package datasource
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/cwbudde/go-overpass"
 	"github.com/paulmach/orb"
@@ -22,6 +24,16 @@ func UnmarshalOverpassJSON(data []byte) (*overpass.Result, error) {
 
 // ExtractFeaturesFromOverpassResult converts an Overpass result to WaterColorMap's FeatureCollection.
 // It mirrors the logic used by OverpassDataSource.
+//
+// Both element loops walk their map in ascending OSM ID order rather than in map
+// order. Feature order is draw order: ToGeoJSON writes the slice in sequence and
+// Mapnik paints it in sequence, so an unordered walk let overlapping geometry
+// swap places between runs and the same tile did not render byte-identically
+// twice. The observed cost was small — mean 0.014/255 per channel, max 36, on
+// 0.01% of channels, a handful of pixels where draw order flipped on an
+// antialiased edge — but it put an exactness ceiling on any PNG-level
+// regression test. Sorting by ID is arbitrary as a painting order; what matters
+// is only that it is the same one every time.
 func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCollection {
 	var features types.FeatureCollection
 	if result == nil {
@@ -31,7 +43,9 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 	memberWayIDs := collectMultipolygonMemberWayIDs(result.Relations)
 
 	// Process ways (skip those that are multipolygon members)
-	for _, way := range result.Ways {
+	for _, id := range slices.Sorted(maps.Keys(result.Ways)) {
+		way := result.Ways[id]
+
 		// Skip ways that are members of multipolygon relations
 		if memberWayIDs[way.ID] {
 			continue
@@ -46,7 +60,9 @@ func ExtractFeaturesFromOverpassResult(result *overpass.Result) types.FeatureCol
 	}
 
 	// Process relations (mainly for multipolygon water bodies and parks)
-	for _, rel := range result.Relations {
+	for _, id := range slices.Sorted(maps.Keys(result.Relations)) {
+		rel := result.Relations[id]
+
 		var feature *types.Feature
 
 		// Handle multipolygon relations specially

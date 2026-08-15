@@ -87,18 +87,18 @@ type CacheConfig struct {
 // hit and a miss feed the go-overpass decoder exactly the same input and there
 // is no second serialization format to keep in sync with the first.
 //
-// # What the cache does and does not guarantee
+// # What the cache guarantees
 //
-// It guarantees byte-identical Overpass *input*. It does not guarantee
-// byte-identical PNGs, because feature order is already nondeterministic
-// upstream of the cache: ExtractFeaturesFromOverpassResult ranges over the
-// map[int64]*Way / map[int64]*Relation of an overpass.Result without sorting,
-// so two decodes of the same bytes can emit features in different orders. The
-// cache neither causes nor worsens that — caching the raw JSON is precisely the
-// choice that leaves the existing behaviour alone, whereas caching an extracted
-// types.FeatureCollection would have frozen one arbitrary order into every
-// future render. Fixing the ordering is a separate change; it will move the
-// pipeline goldens.
+// It guarantees byte-identical Overpass *input*. Byte-identical output follows
+// from that only because ExtractFeaturesFromOverpassResult now walks an
+// overpass.Result's element maps in OSM ID order; while it ranged them
+// unsorted, two decodes of the same bytes could emit features in different draw
+// orders and the cache could not have closed that gap.
+//
+// Caching the raw JSON rather than an extracted types.FeatureCollection remains
+// the right choice for its own reason: it keeps the cache a pure timing change,
+// with no second serialization format to keep in sync with the decoder, and no
+// risk of a stored collection outliving a change to the extraction rules.
 //
 // All read-path failures are non-fatal. A cache that cannot be read is a cache
 // miss, never a failed render.

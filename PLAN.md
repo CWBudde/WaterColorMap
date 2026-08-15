@@ -269,16 +269,24 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       scale could answer sixteen tiles from a server holding data for one corner. Band routing
       requires **containment** and splits otherwise.
 
-- [ ] **[P3]** Sort features by OSM ID in `ExtractFeaturesFromOverpassResult` — it ranges over
-      `map[int64]*…` unsorted (`overpass_extract.go:32,49`), so feature order varies run to run and
-      **the same tile does not render byte-identically twice**. Measured on a z12 Hanover tile:
-      mean deviation 0.014/255, max 36, on 0.01% of channels — a handful of pixels where draw order
-      flips on an antialiased edge. Small, but it means PNG-level regression testing can never be
-      exact. The response cache neither causes nor worsens it: two cached runs differ by the same
-      0.016 as two uncached runs, which is precisely why the cache stores raw JSON rather than the
-      extracted collection — caching post-extraction would have frozen one arbitrary order and
-      changed behaviour instead of only timing. Fixing it will move the pipeline goldens, so do it
-      deliberately.
+- [x] **[P3]** Sort features by OSM ID in `ExtractFeaturesFromOverpassResult`. Both element
+      loops now walk `slices.Sorted(maps.Keys(…))` rather than the raw `map[int64]*…`, so **the
+      same tile renders byte-identically twice**. What the old behaviour cost: mean deviation
+      0.014/255, max 36, on 0.01% of channels of a z12 Hanover tile — a handful of pixels where
+      draw order flipped on an antialiased edge. Small in the image, decisive for testing, since
+      it put a tolerance floor under every PNG-level regression test.
+
+      Ascending OSM ID is arbitrary _as a painting order_; only its stability matters, which is
+      why `TestExtractFeatureOrderIsByOSMID` names the choice rather than leaving a later
+      refactor to swap it silently. The response cache was never implicated — two cached runs
+      differed by the same 0.016 as two uncached ones — and it goes on storing raw JSON rather
+      than the extracted collection, now for its own reasons: one serialization format to keep
+      in sync with the decoder, and no stored collection that could outlive a change to the
+      extraction rules.
+
+      The synthetic pipeline goldens are unaffected (`syntheticDataSource` involves no map
+      iteration). The two Hannover cases move and need `just update-goldens-hannover` from a
+      machine with network.
 - [ ] **[P3]** A tile purge command, and a source-data version stamp on rendered tiles. Without
       one, skip-existing treats any existing PNG as valid forever and mtime is the only staleness
       proxy — which is what keeps 5.7 open.
