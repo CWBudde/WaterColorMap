@@ -786,3 +786,116 @@ func TestNewAllowsSameFormatReopen(t *testing.T) {
 		}
 	}
 }
+
+// newUndeclaredTileset builds a tileset holding tiles but with no `format` row
+// at all — the shape of a legacy or foreign database, which this project has
+// never written itself.
+func newUndeclaredTileset(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "tiles.mbtiles")
+	w, err := New(path, Metadata{Name: "test", Format: "png"})
+	if err != nil {
+		t.Fatalf("create tileset: %v", err)
+	}
+	if err := w.WriteTile(13, 4317, 2692, []byte("png bytes")); err != nil {
+		t.Fatalf("write tile: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open for doctoring: %v", err)
+	}
+	defer db.Close() //nolint:errcheck // test
+	if _, err := db.Exec("DELETE FROM metadata WHERE name = 'format'"); err != nil {
+		t.Fatalf("drop format row: %v", err)
+	}
+	return path
+}
+
+// TestNewRejectsWebPOverUndeclaredTiles: a missing `format` row must not be a
+// free pass into relabelling. insertMetadata rewrites the metadata table, so
+// accepting a webp run here would stamp `format=webp` onto tiles it did not
+// write, and HasTile — which is keyed on z/x/y alone — would then skip every
+// one of them as already done. That is the permanent-hole failure the guard
+// exists to prevent, reached through the undeclared case instead of the
+// mismatched one.
+func TestNewRejectsWebPOverUndeclaredTiles(t *testing.T) {
+	path := newUndeclaredTileset(t)
+
+	_, err := New(path, Metadata{Name: "test", Format: "webp"})
+	if err == nil {
+		t.Fatal("reopening an undeclared non-empty tileset as webp should be refused")
+	}
+	if !errors.Is(err, ErrFormatMismatch) {
+		t.Errorf("expected ErrFormatMismatch, got: %v", err)
+	}
+
+	// The file must be untouched: no format stamped on, tile still present.
+	r, err := OpenReader(path)
+	if err != nil {
+		t.Fatalf("reopen for reading: %v", err)
+	}
+	defer r.Close() //nolint:errcheck // test
+	meta, err := r.Metadata()
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if meta.Format != "" {
+		t.Errorf("format = %q, want empty — the refused open still relabelled the file", meta.Format)
+	}
+	if _, err := r.ReadTile(13, 4317, 2692); err != nil {
+		t.Errorf("the existing tile should still be readable: %v", err)
+	}
+}
+
+// TestNewAllowsPNGOverUndeclaredTiles is the other half: undeclared tiles are
+// assumed to be PNG, which is what every file predating WebP support held, so
+// a PNG run has to be able to resume into one rather than being locked out.
+func TestNewAllowsPNGOverUndeclaredTiles(t *testing.T) {
+	path := newUndeclaredTileset(t)
+
+	w, err := New(path, Metadata{Name: "test", Format: "png"})
+	if err != nil {
+		t.Fatalf("a png run should be able to resume an undeclared tileset: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+// TestNewAllowsFormatChangeOnUndeclaredEmptyTileset: with no tiles there is
+// still nothing to be inconsistent with, declaration or not.
+func TestNewAllowsFormatChangeOnUndeclaredEmptyTileset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tiles.mbtiles")
+
+	w, err := New(path, Metadata{Name: "test", Format: "png"})
+	if err != nil {
+		t.Fatalf("create tileset: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open for doctoring: %v", err)
+	}
+	if _, err := db.Exec("DELETE FROM metadata WHERE name = 'format'"); err != nil {
+		t.Fatalf("drop format row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close doctoring handle: %v", err)
+	}
+
+	w2, err := New(path, Metadata{Name: "test", Format: "webp"})
+	if err != nil {
+		t.Fatalf("an empty undeclared tileset should accept any format: %v", err)
+	}
+	if err := w2.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
