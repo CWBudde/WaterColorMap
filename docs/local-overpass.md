@@ -1,29 +1,30 @@
 # Local Overpass for fast testing
 
 Every integration test and every `generate` run fetches OSM data from an Overpass
-API. Against the public `overpass-api.de` that is slow and rate-limited, and it
-answers `406 Not Acceptable` outright, which makes the whole integration suite
-unrunnable.
+API. Against the public `overpass-api.de` that is slow and rate-limited, so a
+local instance is still worth setting up.
 
-> **The 406 is not rate limiting** — that was the assumption for a long time and
-> it is wrong. `overpass-api.de` rejects Go's stdlib default
-> `User-Agent: Go-http-client/1.1`, and `go-overpass`'s `httpPost`
-> (`query.go:55-94`) sets only `Content-Type`, never a UA. The identical query
-> from `curl` returns 200 in ~0.5 s; proxying the client's requests with an
-> honest UA added and nothing else changed makes them succeed on the first try.
-> Fixing it is one line in the dependency (see PLAN.md § 5.1a), after which the
-> public API becomes a usable fallback for tiles outside a local instance's
-> coverage. The local instance is still far faster, so everything below stands.
+> **The 406 is fixed.** For a long time the public API answered
+> `406 Not Acceptable`, and that was assumed to be rate limiting. It was not:
+> `overpass-api.de` rejects Go's stdlib default `User-Agent: Go-http-client/1.1`,
+> and `go-overpass`'s `httpPost` (`query.go:55-94`) sets only `Content-Type`,
+> never a UA. The identical query from `curl` returns 200 in ~0.5 s.
+>
+> Every Overpass client this project builds now sends
+> `datasource.DefaultUserAgent` (`internal/datasource/useragent.go`), so the
+> public API is a usable fallback for tiles outside a local instance's coverage.
+> Override it with `overpass.user_agent`, globally or per server. The local
+> instance is still far faster, so everything below stands.
 
 A local Overpass instance covering Niedersachsen — the region all the Hannover
 test fixtures live in — turns that around completely:
 
-|                               | public API                   | local instance |
-| ----------------------------- | ---------------------------- | -------------- |
-| one tile fetch                | seconds to minutes, or `406` | ~2 s           |
-| full `just test-integration`  | not completable              | ~30 s          |
-| 3×3 smoke block, base + `@2x` | rate-limited                 | ~60 s          |
-| rate limits                   | yes                          | none           |
+|                               | public API         | local instance |
+| ----------------------------- | ------------------ | -------------- |
+| one tile fetch                | seconds to minutes | ~2 s           |
+| full `just test-integration`  | very slow          | ~30 s          |
+| 3×3 smoke block, base + `@2x` | rate-limited       | ~60 s          |
+| rate limits                   | yes                | none           |
 
 ## Setup
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/viper"
 
+	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/types"
 )
 
@@ -74,6 +75,74 @@ func TestNewTileDataSourceHonoursConfiguredServer(t *testing.T) {
 
 			if hits == 0 {
 				t.Error("the configured server received no request — the config was ignored")
+			}
+		})
+	}
+}
+
+// TestNewTileDataSourceSendsUserAgent guards the config wiring, not the
+// transport (which internal/datasource tests directly). Without a User-Agent
+// the public overpass-api.de answers 406, so this is the difference between a
+// working public fallback and a mystery failure.
+func TestNewTileDataSourceSendsUserAgent(t *testing.T) {
+	const custom = "Configured/9.9 (+https://example.invalid)"
+
+	tests := []struct {
+		config func(endpoint string)
+		name   string
+		want   string
+	}{
+		{func(endpoint string) {
+			viper.Set("overpass.endpoint", endpoint)
+		}, "single server, default agent", datasource.DefaultUserAgent},
+		{func(endpoint string) {
+			viper.Set("overpass.endpoint", endpoint)
+			viper.Set("overpass.user_agent", custom)
+		}, "single server, configured agent", custom},
+		{func(endpoint string) {
+			viper.Set("overpass.servers", []map[string]interface{}{
+				{"name": "test", "endpoint": endpoint, "workers": 1},
+			})
+		}, "multi server, default agent", datasource.DefaultUserAgent},
+		{func(endpoint string) {
+			viper.Set("overpass.servers", []map[string]interface{}{
+				{"name": "test", "endpoint": endpoint, "workers": 1, "user_agent": custom},
+			})
+		}, "multi server, per-server agent", custom},
+		{func(endpoint string) {
+			viper.Set("overpass.user_agent", custom)
+			viper.Set("overpass.servers", []map[string]interface{}{
+				{"name": "test", "endpoint": endpoint, "workers": 1},
+			})
+		}, "multi server inherits the global agent", custom},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var agent string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				agent = r.Header.Get("User-Agent")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"version":0.6,"elements":[]}`))
+			}))
+			defer srv.Close()
+
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			tt.config(srv.URL)
+
+			ds, err := newTileDataSource("overpass", false)
+			if err != nil {
+				t.Fatalf("newTileDataSource: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			// Fails on the empty feature set; only the header matters here.
+			_, _ = ds.FetchTileData(ctx, types.TileCoordinate{Zoom: 13, X: 4317, Y: 2692})
+
+			if agent != tt.want {
+				t.Errorf("User-Agent = %q, want %q", agent, tt.want)
 			}
 		})
 	}
