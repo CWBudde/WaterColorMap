@@ -188,11 +188,11 @@ overpass:
 #   # folder_structure: flat = z{z}_x{x}_y{y}.{ext}, nested = {z}/{x}/{y}.{ext}
 #   folder_structure: "flat"
 #
-#   # Freshness. Every rendered tile is stamped with the source-data version it
-#   # came from (Overpass osm3s.timestamp_osm_base), when it was rendered, which
-#   # endpoint answered and which build produced it. The stamps live with the
-#   # tiles: a tile_stamp table in the .mbtiles file, or stamps.db in the tile
-#   # folder.
+#   # Freshness. Every tile generate renders is stamped with the source-data
+#   # version it came from (Overpass osm3s.timestamp_osm_base), when it was
+#   # rendered, which endpoint answered and which build produced it. The stamps
+#   # live with the tiles: a tile_stamp table in the .mbtiles file, or stamps.db
+#   # in the tile folder. Tiles that serve renders on demand carry no stamp.
 #   #
 #   # These three turn skip-existing from "does this tile exist" into "is this
 #   # tile still good". All are opt-in: with none set, an existing tile is

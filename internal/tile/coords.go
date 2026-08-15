@@ -240,26 +240,42 @@ func clampToWorld(p orb.Point) orb.Point {
 	return orb.Point{lon, lat}
 }
 
+// BBoxTileBounds is the inclusive x/y range a bounding box covers at one zoom
+// level.
+type BBoxTileBounds struct {
+	MinX uint32
+	MaxX uint32
+	MinY uint32
+	MaxY uint32
+}
+
+// Contains reports whether a tile column and row lie inside the range.
+func (b BBoxTileBounds) Contains(x, y uint32) bool {
+	return x >= b.MinX && x <= b.MaxX && y >= b.MinY && y <= b.MaxY
+}
+
 // tileIndexRange returns the inclusive x/y tile index range covering two corner
 // points at one zoom, ordered and clamped to the 2^z grid.
 //
 // The clamp is what makes a whole-world bbox usable. maptile.At maps lon=+180 to
 // x=2^z — one column past the last real tile — and lat=-85.05 likewise to
 // y=2^z, so `--bbox -180,-85,180,85` enumerated z0_x1_y0 and z1_x2_y0: tiles
-// that Coords.Validate rejects and that no upstream can answer. Both callers
-// below go through here so the count and the list cannot disagree.
-func tileIndexRange(minPoint, maxPoint orb.Point, z int) (minX, maxX, minY, maxY uint32) {
+// that Coords.Validate rejects and that no upstream can answer. Everything that
+// answers a question about a bbox goes through here — enumeration, counting and
+// the membership test alike — so the three cannot disagree.
+func tileIndexRange(minPoint, maxPoint orb.Point, z int) BBoxTileBounds {
 	zoom := maptile.Zoom(z)
 	minTile := maptile.At(clampToWorld(minPoint), zoom)
 	maxTile := maptile.At(clampToWorld(maxPoint), zoom)
 
-	// Ensure min/max are correctly ordered (Y is inverted in TMS)
-	minX, maxX = minTile.X, maxTile.X
+	// Ensure min/max are correctly ordered (Y grows southwards, so the
+	// northern corner yields the smaller row).
+	minX, maxX := minTile.X, maxTile.X
 	if minX > maxX {
 		minX, maxX = maxX, minX
 	}
 
-	minY, maxY = minTile.Y, maxTile.Y
+	minY, maxY := minTile.Y, maxTile.Y
 	if minY > maxY {
 		minY, maxY = maxY, minY
 	}
@@ -280,28 +296,36 @@ func tileIndexRange(minPoint, maxPoint orb.Point, z int) (minX, maxX, minY, maxY
 		minY = last
 	}
 
-	return minX, maxX, minY, maxY
+	return BBoxTileBounds{MinX: minX, MaxX: maxX, MinY: minY, MaxY: maxY}
+}
+
+// BBoxTileBoundsAt returns the inclusive tile range a bounding box covers at one
+// zoom level.
+//
+// It exists so that "is this tile inside the box" can be answered without
+// enumerating the box. A caller that already holds the tiles it cares about —
+// `purge` holds the ones that exist — would otherwise pay 4^z for a question
+// about a handful of tiles, and at z22 that is not a slow answer but no answer
+// at all. Because it shares tileIndexRange with TilesInBBox, the membership test
+// accepts exactly the tiles enumeration would have produced.
+func BBoxTileBoundsAt(bbox [4]float64, z int) BBoxTileBounds {
+	return tileIndexRange(orb.Point{bbox[0], bbox[1]}, orb.Point{bbox[2], bbox[3]}, z)
 }
 
 // TilesInBBox returns all tile coordinates within a bounding box across a zoom range.
 // bbox: [minLon, minLat, maxLon, maxLat] in WGS84
 // Calculates correct tile coordinates at each zoom level independently.
 func TilesInBBox(bbox [4]float64, zoomMin, zoomMax int) []Coords {
-	minLon, minLat, maxLon, maxLat := bbox[0], bbox[1], bbox[2], bbox[3]
-
 	// Pre-allocate with estimated capacity
 	estimatedCount := TileCount(bbox, zoomMin, zoomMax)
 	tiles := make([]Coords, 0, estimatedCount)
 
-	minPoint := orb.Point{minLon, minLat}
-	maxPoint := orb.Point{maxLon, maxLat}
-
 	for z := zoomMin; z <= zoomMax; z++ {
-		minX, maxX, minY, maxY := tileIndexRange(minPoint, maxPoint, z)
+		b := BBoxTileBoundsAt(bbox, z)
 
 		// Generate all tiles at this zoom level
-		for x := minX; x <= maxX; x++ {
-			for y := minY; y <= maxY; y++ {
+		for x := b.MinX; x <= b.MaxX; x++ {
+			for y := b.MinY; y <= b.MaxY; y++ {
 				tiles = append(tiles, NewCoords(uint32(z), x, y))
 			}
 		}
@@ -313,16 +337,12 @@ func TilesInBBox(bbox [4]float64, zoomMin, zoomMax int) []Coords {
 // TileCount returns the number of tiles in a bounding box across a zoom range.
 // This is useful for progress estimation without allocating the full tile list.
 func TileCount(bbox [4]float64, zoomMin, zoomMax int) int {
-	minLon, minLat, maxLon, maxLat := bbox[0], bbox[1], bbox[2], bbox[3]
-	minPoint := orb.Point{minLon, minLat}
-	maxPoint := orb.Point{maxLon, maxLat}
-
 	count := 0
 	for z := zoomMin; z <= zoomMax; z++ {
-		minX, maxX, minY, maxY := tileIndexRange(minPoint, maxPoint, z)
+		b := BBoxTileBoundsAt(bbox, z)
 
-		xCount := int(maxX - minX + 1)
-		yCount := int(maxY - minY + 1)
+		xCount := int(b.MaxX - b.MinX + 1)
+		yCount := int(b.MaxY - b.MinY + 1)
 		count += xCount * yCount
 	}
 

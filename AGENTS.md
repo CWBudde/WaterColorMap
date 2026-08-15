@@ -85,6 +85,11 @@ outstanding.
   thresholds, Mapnik scale tiers). Read before changing any zoom window.
 - [docs/MULTI-SERVER-OVERPASS.md](docs/MULTI-SERVER-OVERPASS.md) — multi-endpoint
   Overpass configuration.
+- [docs/tile-stamps-and-purge.md](docs/tile-stamps-and-purge.md) — the per-tile
+  source-data stamp and the `purge` command: what a stamp records, where it
+  lives, and why `generate` and `purge` resolve uncertainty in opposite
+  directions. Read before changing `internal/tilestamp` or the `--stale-*`
+  flags.
 - [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md) — how the data
   side scales from one city to a country and what it would cost to go global:
   the regional-Overpass approach, why vector tile input was rejected, measured

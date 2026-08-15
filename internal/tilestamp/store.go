@@ -17,6 +17,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -39,14 +40,17 @@ const FolderDBName = "stamps.db"
 // tsLayout is how timestamps are stored: UTC, fixed width, nanosecond
 // precision.
 //
-// Fixed width is the point. The store compares timestamps in SQL (`WHERE
-// osm_base_ts < ?`), which is a string comparison, so the textual order has to
-// be the chronological one. Plain RFC3339 does not guarantee that — a value
-// with a fractional part sorts before the same second without one ('.' < 'Z'),
-// and a non-UTC offset compares against a different instant than it names.
-// Formatting every value the same width in UTC makes lexicographic and
-// chronological order the same thing. The result is still valid RFC3339, so
-// anything reading these rows outside this package can parse them normally.
+// Fixed width is the point: every row written by this package sorts
+// chronologically as text, so `ORDER BY` and an eyeball on the table agree with
+// each other. Plain RFC3339 does not guarantee that — a value with a fractional
+// part sorts before the same second without one ('.' < 'Z'), and a non-UTC
+// offset compares against a different instant than it names. That is also why
+// the filters do not compare timestamps in SQL: rows written by hand or by
+// another tool need not follow this layout, and a string comparison over those
+// answers about spelling rather than about time. See Filter.matches.
+//
+// The result is still valid RFC3339, so anything reading these rows outside
+// this package can parse them normally.
 const tsLayout = "2006-01-02T15:04:05.000000000Z"
 
 // Stamp records the provenance of one rendered tile.
@@ -82,7 +86,9 @@ type Filter struct {
 	// no recorded OSMBase never matches: "unknown" is not "old", and this
 	// filter drives deletion.
 	DataBefore time.Time
-	// RenderedBefore matches stamps rendered strictly before this instant.
+	// RenderedBefore matches stamps rendered strictly before this instant. A
+	// stamp whose rendered_at cannot be parsed never matches, for the same
+	// reason DataBefore ignores a missing one.
 	RenderedBefore time.Time
 	// Suffix, when non-nil, matches that suffix exactly — including the empty
 	// string, which is why this is a pointer rather than a plain string.
@@ -96,6 +102,17 @@ type Filter struct {
 	RendererRevNot string
 }
 
+// ErrNotFound reports that there is no stamp store to read: no stamps.db beside
+// the tiles, or an MBTiles file without a tile_stamp table. It is what the
+// read-only openers return instead of creating one, and callers turn it into
+// "this tileset has no stamps" rather than into a failure.
+var ErrNotFound = errors.New("no tile stamp store")
+
+// errReadOnly is returned by the write methods of a store opened with
+// OpenReadOnly. Writing through one is a programming mistake, not a runtime
+// condition, so it is stated plainly rather than left to SQLite.
+var errReadOnly = errors.New("store opened read-only")
+
 // Store is the stamp table, whichever file it lives in.
 type Store struct {
 	db        *sql.DB
@@ -103,6 +120,7 @@ type Store struct {
 	batch     []Stamp
 	batchSize int
 	mu        sync.Mutex
+	readOnly  bool
 }
 
 // OpenMBTiles opens the stamp table inside an existing (or new) MBTiles file.
@@ -153,6 +171,65 @@ func Open(path string) (*Store, error) {
 	}, nil
 }
 
+// OpenFolderReadOnly opens an existing stamps.db in a tile directory without
+// creating or changing anything. See OpenReadOnly.
+func OpenFolderReadOnly(dir string) (*Store, error) {
+	return OpenReadOnly(filepath.Join(dir, FolderDBName))
+}
+
+// OpenMBTilesReadOnly opens the stamp table of an existing MBTiles file without
+// creating or changing anything. See OpenReadOnly.
+func OpenMBTilesReadOnly(path string) (*Store, error) {
+	return OpenReadOnly(path)
+}
+
+// OpenReadOnly opens an existing stamp store for reading only.
+//
+// It exists for the callers that only ask questions — a `purge` dry run is the
+// one that matters. Open would answer the same questions, but on the way it
+// creates the file, sets journal_mode and creates the schema, so a run whose
+// entire promise is "this changes nothing" would write to a legacy tileset and
+// fail outright on read-only storage. This opens the file with SQLite's mode=ro,
+// sets no pragmas and creates no schema; when there is nothing to open it
+// reports ErrNotFound, which is the honest answer to "which of these tiles are
+// stale" for a tileset that has no stamps.
+func OpenReadOnly(path string) (*Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%q: %w", path, ErrNotFound)
+		}
+		return nil, fmt.Errorf("failed to open stamp database %q: %w", path, err)
+	}
+
+	// mode=ro is a SQLite URI parameter, honoured because the driver opens
+	// every DSN with SQLITE_OPEN_URI. It is what makes this safe on a file the
+	// process may not write.
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stamp database %q: %w", path, err)
+	}
+
+	// An MBTiles file always exists before its stamp table does, so the file
+	// being there says nothing about there being stamps in it.
+	var name string
+	err = db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='tile_stamp'").Scan(&name)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, errors.Join(fmt.Errorf("%q: %w", path, ErrNotFound), db.Close())
+	case err != nil:
+		return nil, errors.Join(
+			fmt.Errorf("failed to inspect stamp database %q: %w", path, err), db.Close())
+	}
+
+	return &Store{
+		db:        db,
+		path:      path,
+		batchSize: DefaultBatchSize,
+		readOnly:  true,
+	}, nil
+}
+
 // createSchema creates the stamp table.
 //
 // The rows are XYZ, deliberately unlike the MBTiles `tiles` table next to them,
@@ -191,6 +268,10 @@ func createSchema(db *sql.DB) error {
 func (s *Store) Put(stamp Stamp) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.readOnly {
+		return fmt.Errorf("stamp store %q is open read-only: %w", s.path, errReadOnly)
+	}
 
 	// Replace an unflushed stamp for the same tile rather than queueing a
 	// second one, so the buffer cannot grow with re-renders of one tile and
@@ -242,6 +323,10 @@ func (s *Store) Delete(z, x, y int, suffix string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.readOnly {
+		return fmt.Errorf("stamp store %q is open read-only: %w", s.path, errReadOnly)
+	}
+
 	// Drop any buffered stamp first, or the flush would resurrect it.
 	want := Stamp{Z: z, X: x, Y: y, Suffix: suffix}
 	for i := range s.batch {
@@ -288,6 +373,11 @@ func (s *Store) Query(f Filter) ([]Stamp, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan stamp: %w", err)
 		}
+		// The timestamp selectors are applied here rather than in SQL; see
+		// Filter.matches.
+		if !f.matches(stamp) {
+			continue
+		}
 		out = append(out, stamp)
 	}
 	if err := rows.Err(); err != nil {
@@ -296,22 +386,36 @@ func (s *Store) Query(f Filter) ([]Stamp, error) {
 	return out, nil
 }
 
-// sql renders the filter as a WHERE clause and its arguments.
+// matches applies the timestamp selectors to an already-scanned stamp.
+//
+// They are not part of the WHERE clause because SQL would compare the stored
+// text, and text order is only chronological order for values written in
+// tsLayout. A row carrying a valid RFC3339 value with an offset would then be
+// ordered against the wrong instant, and a malformed one such as "2025-bad"
+// would sort below any cutoff and be selected — for deletion — even though
+// scanStamp reads it as "unknown". Comparing the parsed values keeps the
+// documented rule intact: an unreadable or absent timestamp is unknown, and
+// unknown is never evidence of being old.
+func (f Filter) matches(s Stamp) bool {
+	if !f.DataBefore.IsZero() {
+		if s.OSMBase.IsZero() || !s.OSMBase.Before(f.DataBefore) {
+			return false
+		}
+	}
+	if !f.RenderedBefore.IsZero() {
+		if s.RenderedAt.IsZero() || !s.RenderedAt.Before(f.RenderedBefore) {
+			return false
+		}
+	}
+	return true
+}
+
+// sql renders the filter as a WHERE clause and its arguments. The timestamp
+// selectors are missing from it on purpose — see Filter.matches.
 func (f Filter) sql() (string, []any) {
 	var conds []string
 	var args []any
 
-	if !f.DataBefore.IsZero() {
-		// NULL and '' are "no source timestamp recorded". They must not match:
-		// this filter selects tiles to delete or re-render, and an unknown
-		// version is not evidence of an old one.
-		conds = append(conds, "(osm_base_ts IS NOT NULL AND osm_base_ts <> '' AND osm_base_ts < ?)")
-		args = append(args, formatTime(f.DataBefore))
-	}
-	if !f.RenderedBefore.IsZero() {
-		conds = append(conds, "rendered_at < ?")
-		args = append(args, formatTime(f.RenderedBefore))
-	}
 	if f.RendererRevNot != "" {
 		// COALESCE so that a row with no recorded revision counts as different
 		// from the running binary — which it is; nothing recorded it.

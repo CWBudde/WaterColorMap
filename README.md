@@ -219,7 +219,10 @@ tiles/
 `stamps.db` records, for each tile, the Overpass source-data version it was
 rendered from, when it was rendered, which endpoint answered and which build
 produced it. `generate --stale-*` and `purge --data-before` read it. An MBTiles
-tileset keeps the same information in a `tile_stamp` table inside the file.
+tileset keeps the same information in a `tile_stamp` table inside the file, and
+`convert` carries the stamps of a folder over into the MBTiles file it writes.
+Tiles that `serve` renders on demand carry no stamp, so the staleness selectors
+do not see them.
 
 HiDPI (`@2x`) tiles are produced **on demand** by `watercolormap serve`: request
 `z13_x4297_y2754@2x.png` and it renders one. `--hidpi` on `watercolormap generate`

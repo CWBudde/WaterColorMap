@@ -773,12 +773,20 @@ The Niedersachsen container keeps itself current from Geofabrik minutely diffs
 ([docs/local-overpass.md](local-overpass.md)). So the _data_ is fresh within
 minutes at essentially zero operational cost.
 
-**Every rendered tile now carries a source-data version.** `generate` writes a
-stamp per tile into `internal/tilestamp`: the Overpass `osm3s.timestamp_osm_base`
-of the response it rendered from, when it was rendered, which endpoint answered,
-and which build of this binary produced it. The store is a sidecar living with
-the tiles — an extra `tile_stamp` table inside the `.mbtiles` file, or
-`stamps.db` beside `tilejson.json` in a tile folder.
+**Every tile rendered by `generate` now carries a source-data version.**
+`generate` writes a stamp per tile into `internal/tilestamp`: the Overpass
+`osm3s.timestamp_osm_base` of the response it rendered from, when it was
+rendered, which endpoint answered, and which build of this binary produced it.
+The store is a sidecar living with the tiles — an extra `tile_stamp` table
+inside the `.mbtiles` file, or `stamps.db` beside `tilejson.json` in a tile
+folder. `convert` carries the stamps of a tile folder over into the MBTiles file
+it produces, so converting a tileset does not lose its provenance.
+
+`serve` is the exception, deliberately for now: its on-demand generator
+(`internal/server/ondemand_tiles.go`) is constructed without a stamp store, so a
+tile a request caused to be rendered has no stamp. Purge's staleness selectors
+therefore never select such a tile, and `generate --stale-*` treats it as unknown
+and re-renders it. Wiring a shared store into the server is open work.
 
 The timestamp is read from the response body rather than taken from the clock,
 which matters as soon as the response cache is on: a cache hit reports the age
