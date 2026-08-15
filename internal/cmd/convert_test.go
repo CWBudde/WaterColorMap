@@ -52,6 +52,22 @@ func TestScanTilesDirectoryDetectsFormat(t *testing.T) {
 			wantCount:  1,
 		},
 		{
+			// The nested layout is what --folder-structure=nested writes, and
+			// the scan used to miss it entirely.
+			name:       "nested layout",
+			files:      []string{"13/1/2.png", "13/1/2@2x.png", "14/3/4.png"},
+			wantFormat: tileformat.PNG,
+			wantCount:  3,
+		},
+		{
+			// Only {z}/{x}/{y} counts. A number-named file at another depth is
+			// not a tile of this tileset, whatever it is.
+			name:       "nested layout ignores other depths",
+			files:      []string{"13/1/2.png", "5.png", "a/b/c/6.png"},
+			wantFormat: tileformat.PNG,
+			wantCount:  1,
+		},
+		{
 			name:       "empty directory defaults to png",
 			files:      nil,
 			wantFormat: tileformat.PNG,
@@ -63,7 +79,11 @@ func TestScanTilesDirectoryDetectsFormat(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			for _, name := range tt.files {
-				if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+				path := filepath.Join(dir, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("mkdir for %s: %v", name, err)
+				}
+				if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 					t.Fatalf("write %s: %v", name, err)
 				}
 			}
