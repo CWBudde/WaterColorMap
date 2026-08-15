@@ -435,10 +435,32 @@
         maxZoom: 18,
       });
 
+      // The server renders exactly one format and 404s the other extension, so
+      // a hardcoded ".png" here shows an empty map whenever it is serving WebP.
+      // TileJSON is the server's own statement of what it answers: take the
+      // extension from there, and fall back to .png only if it is unreachable.
+      let tileExt = ".png";
+
+      const tileExtReady = fetch(
+        `${window.location.origin}/tiles/tilejson.json`,
+      )
+        .then((response) => (response.ok ? response.json() : null))
+        .then((doc) => {
+          const template = doc && doc.tiles && doc.tiles[0];
+          if (!template) return;
+          // Match the extension on the template itself rather than trusting
+          // `format`, since the URLs are what actually get requested.
+          const match = /\.[a-z0-9]+$/i.exec(template.split(/[?#]/)[0]);
+          if (match) tileExt = match[0];
+        })
+        .catch(() => {
+          /* keep the .png fallback */
+        });
+
       tiles.getTileUrl = function ({ x, y, z }) {
         const dpr = window.devicePixelRatio || 1;
         const suffix = dpr >= 2 ? "@2x" : "";
-        return `${window.location.origin}/tiles/z${z}_x${x}_y${y}${suffix}.png`;
+        return `${window.location.origin}/tiles/z${z}_x${x}_y${y}${suffix}${tileExt}`;
       };
 
       // Cancel pending requests for the OLD zoom level when zoom changes
@@ -448,7 +470,10 @@
         tiles._abortPendingForZoom(oldZoom);
       });
 
-      tiles.addTo(map);
+      // Add the layer only once the extension is settled: adding it first
+      // would fire the whole opening screenful at the fallback .png and, on a
+      // WebP server, turn every one of those into a 404.
+      tileExtReady.then(() => tiles.addTo(map));
 
       // Set initial hash if not present
       if (!window.location.hash) {

@@ -224,12 +224,16 @@ lossless, and it holds at every zoom.
 `--webp-effort` (0–6) trades size against time; the default of 4 is where the
 curve flattens. Some things worth knowing:
 
-- A tileset is one format. `serve` answers only the extension it is configured
-  for and returns 404 for the other — it never transcodes, and never serves one
-  format's bytes under the other's name.
+- A tileset is one format. `serve` answers only the extension it holds and
+  returns 404 for the other — it never transcodes, and never serves one
+  format's bytes under the other's name. That applies to both backends: for
+  on-demand folder serving the format is the configured one, and for MBTiles it
+  is whatever the file's own metadata declares.
 - Reopening an existing MBTiles file with a different `--image-format` is
   refused, because the resume check keys on coordinates alone and would
-  otherwise skip every tile already there while relabelling the file.
+  otherwise skip every tile already there while relabelling the file. A
+  non-empty file that declares no format is assumed to hold PNG, so a PNG run
+  resumes it and a WebP run is refused rather than relabelling it.
 - Existing PNG tiles are untouched. A WebP run writes different filenames, so it
   neither overwrites nor skips them.
 
