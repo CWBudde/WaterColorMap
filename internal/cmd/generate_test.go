@@ -126,6 +126,26 @@ func TestParseBBox(t *testing.T) {
 			input:   "",
 			wantErr: true,
 		},
+		{
+			name:    "entirely east of the world",
+			input:   "181,-1,182,1",
+			wantErr: true,
+		},
+		{
+			name:    "entirely west of the world",
+			input:   "-181,-10,-180.5,10",
+			wantErr: true,
+		},
+		{
+			name:    "latitude beyond the pole",
+			input:   "9.7,-91,9.9,52.4",
+			wantErr: true,
+		},
+		{
+			name:  "whole world",
+			input: "-180,-85,180,85",
+			want:  [4]float64{-180, -85, 180, 85},
+		},
 	}
 
 	for _, tt := range tests {
