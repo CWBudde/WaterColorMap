@@ -18,6 +18,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/renderer"
 	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/tileformat"
 	"github.com/cwbudde/watercolormap/internal/tilejson"
 	"github.com/cwbudde/watercolormap/internal/watercolor"
 	"github.com/cwbudde/watercolormap/internal/worker"
@@ -50,12 +51,14 @@ func init() {
 	generateCmd.Flags().Bool("force", false, "Re-render tiles that already exist, for folder and MBTiles output alike (without it, existing tiles are skipped so a run can resume)")
 	generateCmd.Flags().Int("tile-size", 256, "Tile size in pixels (typically 256 or 512 for Hi-DPI)")
 	generateCmd.Flags().Bool("hidpi", false, "Also generate a 2x (@2x) tile alongside the base tile")
-	generateCmd.Flags().String("png-compression", "default", "PNG compression (default, speed, best, none)")
+	generateCmd.Flags().String("image-format", "png", "Tile image encoding: png or webp (webp is lossless, ~1.2x smaller)")
+	generateCmd.Flags().String("png-compression", "default", "PNG compression (default, speed, best, none); ignored for --image-format=webp")
+	generateCmd.Flags().Int("webp-effort", 0, "WebP compression effort 0-6 (0 = fastest, default 4); ignored for --image-format=png")
 	generateCmd.Flags().Int64("seed", 1337, "Deterministic seed for noise/texture alignment")
 	generateCmd.Flags().Bool("keep-layers", false, "Keep intermediate rendered layer PNGs for debugging")
 
 	// Output format flags
-	generateCmd.Flags().String("format", "folder", "Output format: folder or mbtiles")
+	generateCmd.Flags().String("format", "folder", "Output container: folder or mbtiles (see --image-format for the tile image encoding)")
 	generateCmd.Flags().String("output-file", "", "Output file path for MBTiles format (e.g., tiles.mbtiles)")
 	generateCmd.Flags().String("folder-structure", "flat", "Folder structure for folder format: flat (z{z}_x{x}_y{y}.png) or nested ({z}/{x}/{y}.png)")
 
@@ -88,7 +91,9 @@ func init() {
 		{"generate.force", "force"},
 		{"generate.tile_size", "tile-size"},
 		{"generate.hidpi", "hidpi"},
+		{"generate.image_format", "image-format"},
 		{"generate.png_compression", "png-compression"},
+		{"generate.webp_effort", "webp-effort"},
 		{"generate.seed", "seed"},
 		{"generate.keep_layers", "keep-layers"},
 		{"generate.format", "format"},
@@ -125,6 +130,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	tileSize := viper.GetInt("generate.tile_size")
 	hidpi := viper.GetBool("generate.hidpi")
 	pngCompression := viper.GetString("generate.png_compression")
+	webpEffort := viper.GetInt("generate.webp_effort")
 	seed := viper.GetInt64("generate.seed")
 	keepLayers := viper.GetBool("generate.keep_layers")
 	format := viper.GetString("generate.format")
@@ -138,6 +144,13 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	// Validate format
 	if format != "folder" && format != "mbtiles" {
 		return fmt.Errorf("invalid format %q: must be 'folder' or 'mbtiles'", format)
+	}
+
+	// Resolve the image format here rather than deep in the pipeline, so a typo
+	// fails before anything is opened for writing.
+	imageFormat, err := tileformat.Parse(viper.GetString("generate.image_format"))
+	if err != nil {
+		return err
 	}
 
 	// Validate folder structure
@@ -170,6 +183,8 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 			outputDir:       outputDir,
 			dataSourceName:  dataSourceName,
 			pngCompression:  pngCompression,
+			imageFormat:     imageFormat,
+			webpEffort:      webpEffort,
 			format:          format,
 			outputFile:      outputFile,
 			folderStructure: folderStructure,
@@ -193,6 +208,8 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		dataSourceName:  dataSourceName,
 		pngCompression:  pngCompression,
 		folderStructure: folderStructure,
+		imageFormat:     imageFormat,
+		webpEffort:      webpEffort,
 		seed:            seed,
 		zoom:            zoom,
 		x:               x,
@@ -213,7 +230,9 @@ type singleOptions struct {
 	dataSourceName  string
 	pngCompression  string
 	folderStructure string
+	imageFormat     tileformat.Format
 	seed            int64
+	webpEffort      int
 	zoom            int
 	x               int
 	y               int
@@ -262,6 +281,8 @@ func runSingleGenerate(opts *singleOptions) error {
 
 	gen, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize, opts.seed, opts.keepLayers, logger, pipeline.GeneratorOptions{
 		PNGCompression:  opts.pngCompression,
+		ImageFormat:     opts.imageFormat,
+		WebPEffort:      opts.webpEffort,
 		FolderStructure: opts.folderStructure,
 		Watercolor:      wcOverrides,
 		Ocean:           ocean,
@@ -284,6 +305,8 @@ func runSingleGenerate(opts *singleOptions) error {
 	if opts.hidpi {
 		gen2x, err := pipeline.NewGenerator(ds, stylesDir, texturesDir, opts.outputDir, opts.tileSize*2, opts.seed, opts.keepLayers, logger, pipeline.GeneratorOptions{
 			PNGCompression:  opts.pngCompression,
+			ImageFormat:     opts.imageFormat,
+			WebPEffort:      opts.webpEffort,
 			FolderStructure: opts.folderStructure,
 			Watercolor:      wcOverrides,
 			Ocean:           ocean,
@@ -315,6 +338,7 @@ type batchOptions struct {
 	format          string
 	outputFile      string
 	folderStructure string
+	imageFormat     tileformat.Format
 	// ocean is resolved in runBatchGenerate, not from a flag: it comes from the
 	// `ocean:` config block and is shared by the base and HiDPI generators.
 	ocean renderer.OceanConfig
@@ -324,6 +348,7 @@ type batchOptions struct {
 	zoomMin       int
 	zoomMax       int
 	workers       int
+	webpEffort    int
 	tileSize      int
 	showProgress  bool
 	force         bool
@@ -479,7 +504,7 @@ func logBatchStart(opts *batchOptions, tileCount int) {
 func batchMetadata(opts *batchOptions, bbox [4]float64) mbtiles.Metadata {
 	return mbtiles.Metadata{
 		Name:    tilejson.DefaultName,
-		Format:  tilejson.DefaultFormat,
+		Format:  opts.imageFormat.String(),
 		MinZoom: mbtiles.Zoom(opts.zoomMin),
 		MaxZoom: mbtiles.Zoom(opts.zoomMax),
 		// bbox is already [minLon, minLat, maxLon, maxLat], the TileJSON
@@ -508,7 +533,7 @@ func writeFolderTileJSON(opts *batchOptions, bbox [4]float64) error {
 
 	doc := tilejson.FromMBTilesMetadata(
 		batchMetadata(opts, bbox),
-		tilejson.FolderTileTemplate(opts.folderStructure),
+		tilejson.FolderTileTemplate(opts.folderStructure, opts.imageFormat.String()),
 	)
 
 	path, err := tilejson.WriteFile(opts.outputDir, doc)
@@ -592,6 +617,8 @@ func newBatchGenerator(opts *batchOptions, ds pipeline.DataSource, tileSize int,
 		logger,
 		pipeline.GeneratorOptions{
 			PNGCompression:  opts.pngCompression,
+			ImageFormat:     opts.imageFormat,
+			WebPEffort:      opts.webpEffort,
 			TileWriter:      tileWriter,
 			FolderStructure: opts.folderStructure,
 			Watercolor:      wcOverrides,

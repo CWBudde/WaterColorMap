@@ -20,6 +20,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/mask"
 	"github.com/cwbudde/watercolormap/internal/raster"
 	"github.com/cwbudde/watercolormap/internal/texture"
+	"github.com/cwbudde/watercolormap/internal/tileformat"
 	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/cwbudde/watercolormap/internal/watercolor"
 )
@@ -30,10 +31,14 @@ const defaultSeed int64 = 1
 
 // GenerateTileRequest represents a tile generation request from JS
 type GenerateTileRequest struct {
-	Zoom  int  `json:"zoom"`
-	X     int  `json:"x"`
-	Y     int  `json:"y"`
-	HiDPI bool `json:"hidpi"`
+	Zoom int `json:"zoom"`
+	X    int `json:"x"`
+	Y    int `json:"y"`
+	// Format is the tile image encoding the backend is configured for, so the
+	// filename this builds actually matches what `serve` answers. Empty means
+	// png, which is what every caller meant before the field existed.
+	Format string `json:"format"`
+	HiDPI  bool   `json:"hidpi"`
 }
 
 type GenerateTileResponse struct {
@@ -106,12 +111,19 @@ func generateTile(this js.Value, args []js.Value) interface{} {
 		suffix = "@2x"
 	}
 
+	// An unparseable format falls back to png rather than failing: this is a
+	// filename builder, and the backend is the authority on what it serves.
+	format, err := tileformat.Parse(req.Format)
+	if err != nil {
+		format = tileformat.PNG
+	}
+
 	key := fmt.Sprintf("z%d_x%d_y%d%s", req.Zoom, req.X, req.Y, suffix)
 	// syscall/js.ValueOf cannot convert arbitrary Go values.
 	// Use map[string]any (JS-convertible) rather than map[string]string.
 	return map[string]any{
 		"key":      key,
-		"filename": key + ".png",
+		"filename": key + format.DotExt(),
 	}
 }
 

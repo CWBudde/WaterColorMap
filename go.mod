@@ -3,9 +3,11 @@ module github.com/cwbudde/watercolormap
 go 1.25.0
 
 require (
+	github.com/HugoSmits86/nativewebp v1.3.0
 	github.com/aquilax/go-perlin v1.1.0
 	github.com/cwbudde/go-overpass v0.0.0-20260418190031-ddf15fac5067
 	github.com/disintegration/gift v1.2.1
+	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/omniscale/go-mapnik/v2 v2.0.1
 	github.com/paulmach/orb v0.12.0
 	github.com/spf13/cobra v1.10.2
@@ -21,7 +23,6 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

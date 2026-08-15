@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
+	"github.com/cwbudde/watercolormap/internal/tileformat"
 )
 
 // MBTilesHandler serves tiles from an MBTiles database.
@@ -13,6 +14,10 @@ type MBTilesHandler struct {
 	reader       *mbtiles.Reader
 	logger       *slog.Logger
 	cacheControl string
+	// contentType is resolved once at construction from the tileset's own
+	// metadata, rather than per request or from a flag: the file is the only
+	// authority on what its bytes are.
+	contentType string
 }
 
 // MBTilesConfig configures the MBTiles handler.
@@ -28,10 +33,31 @@ func NewMBTilesHandler(cfg MBTilesConfig, logger *slog.Logger) (*MBTilesHandler,
 		return nil, fmt.Errorf("failed to open MBTiles: %w", err)
 	}
 
+	// Callers may pass a nil logger; the handler's own log() handles that
+	// everywhere else, and construction has to do the same.
+	log := logger
+	if log == nil {
+		log = slog.Default()
+	}
+
+	// An unreadable or unrecognised format is not fatal: pre-existing files
+	// predate the metadata being trustworthy, and PNG is what they all were.
+	contentType := tileformat.PNG.ContentType()
+	if meta, metaErr := reader.Metadata(); metaErr != nil {
+		log.Warn("could not read MBTiles metadata; serving tiles as PNG",
+			"path", cfg.MBTilesPath, "err", metaErr)
+	} else if format, parseErr := tileformat.Parse(meta.Format); parseErr != nil {
+		log.Warn("MBTiles tileset declares an unrecognised format; serving tiles as PNG",
+			"path", cfg.MBTilesPath, "format", meta.Format)
+	} else {
+		contentType = format.ContentType()
+	}
+
 	return &MBTilesHandler{
 		reader:       reader,
 		logger:       logger,
 		cacheControl: cfg.CacheControl,
+		contentType:  contentType,
 	}, nil
 }
 
@@ -46,7 +72,7 @@ func (h *MBTilesHandler) Handler() http.HandlerFunc {
 
 // serveTile serves a single tile from the MBTiles database.
 func (h *MBTilesHandler) serveTile(w http.ResponseWriter, r *http.Request) {
-	coords, suffix, err := parseTilePath(r.URL.Path)
+	coords, suffix, _, err := parseTilePath(r.URL.Path)
 	if err != nil {
 		writeTilePathError(w, r, h.log(), err)
 		return
@@ -56,8 +82,12 @@ func (h *MBTilesHandler) serveTile(w http.ResponseWriter, r *http.Request) {
 	// Separate MBTiles files should be used for different tile sizes
 	_ = suffix
 
-	// Read tile from MBTiles before committing to a PNG response, so the
-	// error path is not served with an image/png content type.
+	// The requested extension is ignored too. A tileset holds exactly one
+	// format, recorded in its metadata, and that is what gets served whichever
+	// extension the client asked for.
+
+	// Read tile from MBTiles before committing to an image response, so the
+	// error path is not served with an image content type.
 	data, err := h.reader.ReadTile(int(coords.Z), int(coords.X), int(coords.Y))
 	if err != nil {
 		h.log().Error("Failed to read tile", "coords", coords.String(), "error", err)
@@ -66,9 +96,9 @@ func (h *MBTilesHandler) serveTile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Cache-Control", h.cacheControl)
-	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Type", h.contentType)
 
-	// Write PNG data
+	// Write the tile bytes verbatim
 	if _, err := w.Write(data); err != nil {
 		h.log().Error("Failed to write response", "error", err)
 	}

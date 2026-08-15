@@ -15,6 +15,7 @@ import (
 	"fmt"
 
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
+	"github.com/cwbudde/watercolormap/internal/tileformat"
 )
 
 // SpecVersion is the value of the mandatory "tilejson" field.
@@ -32,7 +33,10 @@ const (
 	// watercolor-inspired in the spirit of Stamen's watercolor map.
 	DefaultAttribution = "© OpenStreetMap contributors · Watercolor-inspired rendering"
 
-	// DefaultFormat is the only tile format this project produces.
+	// DefaultFormat is the tile format assumed when a caller names none. It is
+	// no longer the only format the project produces — see internal/tileformat
+	// — but it stays the default so an unset config key means what it always
+	// did.
 	DefaultFormat = "png"
 
 	// DefaultMinZoom and DefaultMaxZoom are used when the zoom range is not
@@ -155,6 +159,16 @@ func FromMBTilesMetadata(meta mbtiles.Metadata, tiles ...string) TileJSON {
 // FromMBTilesFile reads the metadata table of an MBTiles file and converts it
 // into a TileJSON document. The database is closed again before returning.
 func FromMBTilesFile(path string, tiles ...string) (TileJSON, error) {
+	return FromMBTilesFileTemplate(path, func(string) []string { return tiles })
+}
+
+// FromMBTilesFileTemplate is FromMBTilesFile for callers whose tile URL
+// template depends on the format the file actually holds.
+//
+// `serve` needs this: it must advertise `.webp` for a WebP tileset and `.png`
+// for a PNG one, and only the file knows which it is. Deriving the extension
+// from a flag instead would advertise URLs the handler does not answer.
+func FromMBTilesFileTemplate(path string, tiles func(format string) []string) (TileJSON, error) {
 	reader, err := mbtiles.OpenReader(path)
 	if err != nil {
 		return TileJSON{}, fmt.Errorf("open mbtiles: %w", err)
@@ -166,17 +180,25 @@ func FromMBTilesFile(path string, tiles ...string) (TileJSON, error) {
 		return TileJSON{}, fmt.Errorf("read mbtiles metadata: %w", err)
 	}
 
-	return FromMBTilesMetadata(meta, tiles...), nil
+	return FromMBTilesMetadata(meta, tiles(meta.Format)...), nil
 }
 
 // FolderTileTemplate returns the tile URL template matching the layout written
-// by `generate --format=folder --folder-structure=<structure>`. It is relative
-// to the directory holding tilejson.json.
-func FolderTileTemplate(structure string) string {
-	if structure == "nested" {
-		return "{z}/{x}/{y}.png"
+// by `generate --format=folder --folder-structure=<structure>`, for tiles
+// encoded as format. It is relative to the directory holding tilejson.json.
+//
+// An empty or unrecognised format yields the PNG template, which is what every
+// caller produced before formats were selectable.
+func FolderTileTemplate(structure, format string) string {
+	ext := DefaultFormat
+	if f, err := tileformat.Parse(format); err == nil {
+		ext = f.Ext()
 	}
-	return "z{z}_x{x}_y{y}.png"
+
+	if structure == "nested" {
+		return "{z}/{x}/{y}." + ext
+	}
+	return "z{z}_x{x}_y{y}." + ext
 }
 
 func orDefault(value, fallback string) string {

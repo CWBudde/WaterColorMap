@@ -137,16 +137,26 @@ func TestJSONShape(t *testing.T) {
 }
 
 func TestFolderTileTemplate(t *testing.T) {
-	tests := map[string]string{
-		"flat":    "z{z}_x{x}_y{y}.png",
-		"nested":  "{z}/{x}/{y}.png",
-		"":        "z{z}_x{x}_y{y}.png",
-		"unknown": "z{z}_x{x}_y{y}.png",
+	tests := []struct {
+		structure string
+		format    string
+		want      string
+	}{
+		{"flat", "png", "z{z}_x{x}_y{y}.png"},
+		{"nested", "png", "{z}/{x}/{y}.png"},
+		{"", "png", "z{z}_x{x}_y{y}.png"},
+		{"unknown", "png", "z{z}_x{x}_y{y}.png"},
+		{"flat", "webp", "z{z}_x{x}_y{y}.webp"},
+		{"nested", "webp", "{z}/{x}/{y}.webp"},
+		// An unset or unrecognised format keeps the PNG template, which is
+		// what every caller produced before formats were selectable.
+		{"flat", "", "z{z}_x{x}_y{y}.png"},
+		{"nested", "jpeg", "{z}/{x}/{y}.png"},
 	}
 
-	for structure, want := range tests {
-		if got := tilejson.FolderTileTemplate(structure); got != want {
-			t.Errorf("FolderTileTemplate(%q) = %q, want %q", structure, got, want)
+	for _, tt := range tests {
+		if got := tilejson.FolderTileTemplate(tt.structure, tt.format); got != tt.want {
+			t.Errorf("FolderTileTemplate(%q, %q) = %q, want %q", tt.structure, tt.format, got, tt.want)
 		}
 	}
 }
@@ -154,7 +164,7 @@ func TestFolderTileTemplate(t *testing.T) {
 func TestWriteFile(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "tiles")
 
-	doc := tilejson.New(tilejson.Options{Tiles: []string{tilejson.FolderTileTemplate("nested")}})
+	doc := tilejson.New(tilejson.Options{Tiles: []string{tilejson.FolderTileTemplate("nested", "png")}})
 	path, err := tilejson.WriteFile(dir, doc)
 	if err != nil {
 		t.Fatalf("WriteFile: %v", err)

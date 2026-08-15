@@ -328,7 +328,12 @@ it is not going to be optimised away — it has to be planned around.
 Practical consequence: **do not model a global tileset as "mostly ocean, mostly
 free".** Ocean tiles are, if anything, slightly above average.
 
-### Measured: WebP q80 is a 9.2× reduction
+### Measured: WebP q80 is a 9.2× reduction — but the shipped encoder is lossless
+
+> **Read § "Two policy levers" before quoting this table.** The 9.24× below is
+> **lossy** q80. The encoder that actually shipped is lossless and measures
+> **1.21×** on the same content. Both numbers are real; they are answers to
+> different questions.
 
 Method: 20 tiles spanning z5-z17, encoded with `github.com/chai2010/webp` v1.4.0,
 lossy, quality 80, and cross-checked byte-identical against Pillow 10.3.0 at the
@@ -477,17 +482,49 @@ Dropping it from the bulk tier is **4× the storage and 2× the compute from a
 single policy line** — Germany z0-14 goes from 151.5 GB and 24.6 days to 37.9 GB
 and 12.3 days. Retina clients would get `@2x` from T3 on demand instead.
 
-**2. Adopt WebP.** 9.24× measured (above). Global z0-12 at 1× goes from 2.6 TB to
-**~289 GB**; Germany z0-14 from 37.9 GB to ~4.1 GB. `internal/mbtiles/types.go:18`
-already lists `webp` among the valid format strings, so the container format is
-not in the way — but nothing encodes it, nothing serves it, and no content
-negotiation exists. It is a real piece of work, just a well-understood one, and
-the measured empty-tile ratio of 0.056 means it also fixes the "no cheap empty
-tiles" problem that PNG cannot.
+**2. Adopt WebP.** 🟡 **Shipped, but lossless — so the number is 1.21×, not 9.24×.**
 
-Applied together, a global z0-12 tier is ~289 GB instead of 10.4 TB. It is still
-4.7 years of compute. Which is the point: **storage is a solved problem and
-compute is not**, and no amount of choosing N changes that.
+`--image-format webp` now encodes and serves WebP end to end. The encoder is
+`HugoSmits86/nativewebp`: pure Go, no cgo, which keeps `GOOS=js` and the
+cross-platform release matrix building with no build tags. The cost of that
+choice is that it is **VP8L only, i.e. lossless**, and the 9.24× above is a
+_lossy_ q80 figure.
+
+Re-measured on the same 689 base tiles in `tiles/`, lossless:
+
+| statistic                   | value       |
+| --------------------------- | ----------- |
+| mean PNG                    | 122,326 B   |
+| mean WebP (lossless)        | 101,181 B   |
+| ratio                       | 0.827       |
+| **reduction**               | **1.21×**   |
+| tiles where WebP was larger | 0 of 689    |
+| per-zoom ratio range        | 0.819–0.858 |
+
+The gap between 9.24× and 1.21× is the same fact that produced "no cheap empty
+tiles": the texture and noise fill every pixel, so there is nothing for a
+lossless codec to collapse. A lossless codec can only exploit the _correlation_
+in that field, not discard it. (Worth knowing for anyone writing a test around
+this: on pure per-pixel uniform noise, lossless WebP is actually **larger** than
+PNG. Real tiles are smoother than that, which is why the real direction holds.)
+
+So the storage arithmetic is much weaker than planned: global z0-12 at 1× goes
+from 2.6 TB to ~2.15 TB, not to 289 GB; Germany z0-14 from 37.9 GB to ~31.4 GB.
+Encoding is also ~4× slower than PNG (52 ms vs 14 ms per 256px tile), which is
+under 10% of a ~576 ms render but is a cost rather than the ~50% saving
+nativewebp's own README advertises for ordinary images.
+
+**The lossy lever is still available and still worth 9.24×.** The encoder is now
+an interface (`internal/tileformat.Encoder`), so a cgo lossy backend is one
+additional implementation rather than another pass over the whole codebase. What
+it would cost is cgo in the js/wasm and `CGO_ENABLED=0` paths, and a decision
+about round-trip damage (~4/255 mean per channel at q80). That decision has not
+been made; this is the point at which to make it deliberately.
+
+Applied together, a global z0-12 tier is ~2.15 TB instead of 10.4 TB — of which
+the `@2x` lever supplies almost all of the saving. It is still 4.7 years of
+compute. Which is the point: **storage is a solved problem and compute is not**,
+and no amount of choosing N changes that.
 
 ## 4. Data update pipeline
 
@@ -815,7 +852,8 @@ Follow-ups this work surfaced, roughly in priority order:
    with `du -sh` and a wall time.
 4. **Decide the `@2x` policy** (§ 3) — on-demand-only is 4× storage and 2× compute
    from one line.
-5. **WebP encoding + serving** (§ 3) — 9.2× measured; the only thing that makes an
+5. **WebP encoding + serving** (§ 3) — done, but lossless: 1.21× measured, not the
+   9.2× a lossy encoder would give. The only thing that makes an
    empty tile cheap.
 6. **Natural Earth for z0-5** (§ 2, § 3's T1) — copy the ocean pattern.
 7. **Tile data-version stamp and a purge command** (§ 4) — prerequisites for any

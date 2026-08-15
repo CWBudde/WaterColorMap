@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
+	"github.com/cwbudde/watercolormap/internal/tileformat"
 )
 
 var convertCmd = &cobra.Command{
@@ -78,7 +79,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	)
 
 	// Scan tiles directory
-	tiles, minZoom, maxZoom, err := scanTilesDirectory(inputDir)
+	tiles, minZoom, maxZoom, imageFormat, err := scanTilesDirectory(inputDir)
 	if err != nil {
 		return fmt.Errorf("failed to scan tiles directory: %w", err)
 	}
@@ -87,7 +88,8 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no tiles found in %s", inputDir)
 	}
 
-	logger.Info("Found tiles", "count", len(tiles), "min_zoom", minZoom, "max_zoom", maxZoom)
+	logger.Info("Found tiles", "count", len(tiles), "min_zoom", minZoom, "max_zoom", maxZoom,
+		"image_format", imageFormat)
 
 	// Parse bounds if provided
 	var bounds [4]float64
@@ -109,7 +111,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	// Create MBTiles metadata
 	metadata := mbtiles.Metadata{
 		Name:        name,
-		Format:      "png",
+		Format:      imageFormat.String(),
 		MinZoom:     mbtiles.Zoom(minZoom),
 		MaxZoom:     mbtiles.Zoom(maxZoom),
 		Bounds:      bounds,
@@ -130,15 +132,15 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	// Convert tiles
 	logger.Info("Converting tiles...")
 	for i, tileInfo := range tiles {
-		// Read PNG file
-		pngData, err := os.ReadFile(tileInfo.path)
+		// Read the tile bytes; convert copies them verbatim and never transcodes.
+		tileData, err := os.ReadFile(tileInfo.path)
 		if err != nil {
 			logger.Error("Failed to read tile", "path", tileInfo.path, "error", err)
 			continue
 		}
 
 		// Write to MBTiles
-		if err := writer.WriteTile(tileInfo.z, tileInfo.x, tileInfo.y, pngData); err != nil {
+		if err := writer.WriteTile(tileInfo.z, tileInfo.x, tileInfo.y, tileData); err != nil {
 			logger.Error("Failed to write tile", "coords", fmt.Sprintf("%d/%d/%d", tileInfo.z, tileInfo.x, tileInfo.y), "error", err)
 			continue
 		}
@@ -180,12 +182,20 @@ type tileInfo struct {
 	y    int
 }
 
-// scanTilesDirectory scans a directory for tile files and returns tile info.
-func scanTilesDirectory(dir string) ([]tileInfo, int, int, error) {
-	// Pattern: z{zoom}_x{x}_y{y}.png or z{zoom}_x{x}_y{y}@2x.png
-	pattern := regexp.MustCompile(`^z(\d+)_x(\d+)_y(\d+)(?:@2x)?\.png$`)
+// scanTilesDirectory scans a directory for tile files and returns tile info
+// along with the image format they are all in.
+//
+// The format is detected rather than configured: the folder is the authority on
+// what its bytes are, and a wrong flag would produce an MBTiles file whose
+// metadata lies about its own contents — served with the wrong Content-Type and
+// with nothing to notice it. A folder holding both formats is refused for the
+// same reason: one MBTiles file records exactly one format.
+func scanTilesDirectory(dir string) ([]tileInfo, int, int, tileformat.Format, error) {
+	// Pattern: z{zoom}_x{x}_y{y}.{ext} or z{zoom}_x{x}_y{y}@2x.{ext}
+	pattern := regexp.MustCompile(`^z(\d+)_x(\d+)_y(\d+)(?:@2x)?\.(png|webp)$`)
 
 	var tiles []tileInfo
+	counts := map[tileformat.Format]int{}
 	minZoom := 999
 	maxZoom := 0
 
@@ -213,6 +223,14 @@ func scanTilesDirectory(dir string) ([]tileInfo, int, int, error) {
 			return nil
 		}
 
+		// The regexp only admits extensions tileformat knows, so this cannot
+		// fail; the check keeps the switch total.
+		format, ok := tileformat.ParseExt(matches[4])
+		if !ok {
+			return nil
+		}
+		counts[format]++
+
 		tiles = append(tiles, tileInfo{
 			z:    z,
 			x:    x,
@@ -231,14 +249,25 @@ func scanTilesDirectory(dir string) ([]tileInfo, int, int, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, "", err
 	}
 
 	// Handle case where no tiles were found
 	if len(tiles) == 0 {
-		minZoom = 0
-		maxZoom = 0
+		return tiles, 0, 0, tileformat.PNG, nil
 	}
 
-	return tiles, minZoom, maxZoom, nil
+	if len(counts) > 1 {
+		return nil, 0, 0, "", fmt.Errorf(
+			"directory holds tiles in more than one image format (%d png, %d webp); "+
+				"one MBTiles file records exactly one format, so convert them separately",
+			counts[tileformat.PNG], counts[tileformat.WebP])
+	}
+
+	format := tileformat.PNG
+	for f := range counts {
+		format = f
+	}
+
+	return tiles, minZoom, maxZoom, format, nil
 }
