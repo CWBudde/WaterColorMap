@@ -261,9 +261,16 @@ test-integration-local: require-local-overpass
     WATERCOLORMAP_INTEGRATION=1 WATERCOLORMAP_OVERPASS_ENDPOINT="{{local_overpass}}" \
         go test -ldflags "{{mapnik_ldflags}}" ./... -v
 
-# Smoke test against the local Overpass instance
+# Smoke test against the local Overpass instance.
+#
+# The endpoint has to be exported, not just checked. config.yaml is gitignored,
+# so on a fresh checkout there is no `overpass.servers` routing at all and both
+# the nine generate runs and the server would fall back to the public API —
+# taking its rate limits while claiming to be the local smoke test. The
+# prerequisite proves localhost answers; this makes the recipe actually use it.
 smoke-local zoom="13" x="4317" y="2692" addr="127.0.0.1:8080": require-local-overpass
-    just smoke {{zoom}} {{x}} {{y}} {{addr}}
+    WATERCOLORMAP_OVERPASS_ENDPOINT="{{local_overpass}}" \
+        just smoke {{zoom}} {{x}} {{y}} {{addr}}
 
 # Update golden stage images (synthetic, deterministic)
 update-goldens:
