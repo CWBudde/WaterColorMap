@@ -63,6 +63,15 @@ func init() {
 	// is configured, each server carries its own worker count.
 	generateCmd.Flags().Int("overpass-workers", 4, "Number of parallel Overpass API requests (2-4 recommended for public API)")
 
+	// Band fetching. Off by default: it changes the shape and size of the
+	// queries sent upstream, which an operator running against a shared or
+	// rate-limited Overpass has to opt into. See docs/data-scaling-strategy.md.
+	generateCmd.Flags().Bool("band-fetch", false, "Fetch Overpass data once per block of tiles instead of once per tile")
+	generateCmd.Flags().Int("band-level", 2, "Band size as zoom levels above the tile: 1 = 2x2, 2 = 4x4, 3 = 8x8")
+	generateCmd.Flags().Int("band-min-zoom", 10, "Do not band tiles below this zoom (a single low-zoom tile is already huge)")
+	generateCmd.Flags().Int("band-fetch-ahead", 1, "How many bands may be fetched ahead of rendering")
+	generateCmd.Flags().Int("band-timeout", 180, "Server-side Overpass timeout in seconds for a band query")
+
 	bindFlags := []struct {
 		key  string
 		flag string
@@ -86,6 +95,11 @@ func init() {
 		{"generate.output_file", "output-file"},
 		{"generate.folder_structure", "folder-structure"},
 		{"generate.overpass_workers", "overpass-workers"},
+		{"generate.band_fetch", "band-fetch"},
+		{"generate.band_level", "band-level"},
+		{"generate.band_min_zoom", "band-min-zoom"},
+		{"generate.band_fetch_ahead", "band-fetch-ahead"},
+		{"generate.band_timeout", "band-timeout"},
 	}
 
 	for _, bf := range bindFlags {
@@ -143,6 +157,12 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	allowFailures := viper.GetBool("generate.allow_failures")
 
+	bandFetch := viper.GetBool("generate.band_fetch")
+	band, err := bandOptionsFromConfig()
+	if err != nil {
+		return err
+	}
+
 	// Determine mode: batch (bbox provided) or single tile
 	if bbox != "" {
 		return runBatchGenerate(&batchOptions{
@@ -163,6 +183,8 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 			hidpi:           hidpi,
 			keepLayers:      keepLayers,
 			allowFailures:   allowFailures,
+			bandFetch:       bandFetch,
+			band:            band,
 		})
 	}
 
@@ -282,6 +304,10 @@ func runSingleGenerate(opts *singleOptions) error {
 // batchOptions collects every setting for a batch generation run. It exists to
 // keep runBatchGenerate and its helpers from passing a dozen loose parameters.
 type batchOptions struct {
+	// dataSource is set by runBatchGenerate once the source is built, so
+	// runTilePool can ask whether it supports area fetching without threading
+	// it through every call site.
+	dataSource      pipeline.DataSource
 	bboxStr         string
 	outputDir       string
 	dataSourceName  string
@@ -291,7 +317,9 @@ type batchOptions struct {
 	folderStructure string
 	// ocean is resolved in runBatchGenerate, not from a flag: it comes from the
 	// `ocean:` config block and is shared by the base and HiDPI generators.
-	ocean         renderer.OceanConfig
+	ocean renderer.OceanConfig
+	// band holds the validated band-fetching knobs; only read when bandFetch.
+	band          bandOptions
 	seed          int64
 	zoomMin       int
 	zoomMax       int
@@ -299,6 +327,7 @@ type batchOptions struct {
 	tileSize      int
 	showProgress  bool
 	force         bool
+	bandFetch     bool
 	hidpi         bool
 	keepLayers    bool
 	allowFailures bool
@@ -332,6 +361,11 @@ func runBatchGenerate(opts *batchOptions) error {
 
 	ds, err := newTileDataSource(opts.dataSourceName, ocean.Enabled())
 	if err != nil {
+		return err
+	}
+	opts.dataSource = ds
+
+	if err := checkBandFetchUsable(opts, ds); err != nil {
 		return err
 	}
 
@@ -584,6 +618,13 @@ func newSignalContext() (context.Context, context.CancelFunc) {
 // runTilePool renders the given tiles through a worker pool and returns the
 // results together with the progress summary.
 func runTilePool(ctx context.Context, gen worker.Generator, coords []tile.Coords, opts *batchOptions, suffix string) ([]worker.Result, string) {
+	if opts.bandFetch {
+		bandGen, _ := bandGeneratorFor(gen)
+		if ds, ok := opts.dataSource.(areaDataSource); ok && bandGen != nil {
+			return runBandedTilePool(ctx, gen, bandGen, ds, coords, opts, suffix)
+		}
+	}
+
 	tasks := make([]worker.Task, 0, len(coords))
 	for _, c := range coords {
 		tasks = append(tasks, worker.Task{

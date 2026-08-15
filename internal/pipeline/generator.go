@@ -373,6 +373,74 @@ func (g *Generator) TileSize() int {
 	return g.tileSize
 }
 
+// BandFetchBounds returns the bounding box that covers every given tile's own
+// fetch bounds.
+//
+// Deliberately the union of CalculateFetchBounds and not the ancestor tile
+// expanded by the same fraction: ExpandByFraction pads by a fraction of the
+// box's own extent, so an ancestor's padding is several times too wide, and in
+// latitude Mercator makes it wrong rather than merely generous. The union keeps
+// CalculateFetchBounds the single expression for how much padding a tile needs,
+// which is the same reason renderLayersWithData calls it instead of recomputing.
+//
+// Because every member's fetch box is inside the result, and Overpass returns
+// unclipped geometry for anything intersecting the query box, the band response
+// is a superset of every member's per-tile response.
+func (g *Generator) BandFetchBounds(coords []tile.Coords) (types.BoundingBox, error) {
+	if len(coords) == 0 {
+		return types.BoundingBox{}, fmt.Errorf("cannot compute band bounds for an empty tile set")
+	}
+
+	bounds := g.CalculateFetchBounds(coords[0])
+	for _, c := range coords[1:] {
+		bounds = bounds.Union(g.CalculateFetchBounds(c))
+	}
+	return bounds, nil
+}
+
+// SliceForTile narrows a band's data down to what a single tile would have
+// fetched on its own. band is never modified.
+//
+// This is not an optimisation, it is what makes band fetching
+// behaviour-preserving; see types.FeatureCollection.FilterByBounds for why
+// handing a tile the whole band would change more than performance.
+//
+// The slices share the band's underlying geometry — orb geometries are values
+// behind an interface — so this costs only the Feature headers, not a copy of
+// every coordinate.
+func (g *Generator) SliceForTile(band *types.TileData, coords tile.Coords) *types.TileData {
+	if band == nil {
+		return nil
+	}
+
+	bounds := g.CalculateFetchBounds(coords)
+	return &types.TileData{
+		Coordinate: types.TileCoordinate{
+			Zoom: int(coords.Z),
+			X:    int(coords.X),
+			Y:    int(coords.Y),
+		},
+		Bounds:    bounds,
+		Features:  band.Features.FilterByBounds(bounds),
+		FetchedAt: band.FetchedAt,
+		Source:    band.Source,
+	}
+}
+
+// GenerateWithPrefetched renders a tile from data already in hand.
+//
+// A thin delegate, so internal/worker can hand a task its data without
+// importing pipeline.DebugContext.
+func (g *Generator) GenerateWithPrefetched(
+	ctx context.Context,
+	coords tile.Coords,
+	force bool,
+	filenameSuffix string,
+	data *types.TileData,
+) (string, string, error) {
+	return g.GenerateWithData(ctx, coords, force, filenameSuffix, nil, data)
+}
+
 // renderLayersWithData handles setup, data fetching (if needed), and rendering of all map layers.
 // If prefetchedData is provided, it will be used instead of fetching from the datasource.
 func (g *Generator) renderLayersWithData(

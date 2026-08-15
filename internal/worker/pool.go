@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // Generator is the interface for tile generation.
@@ -15,8 +16,22 @@ type Generator interface {
 	Generate(ctx context.Context, coords tile.Coords, force bool, suffix string) (path string, layersDir string, err error)
 }
 
+// DataGenerator is the optional half of Generator: one that can render from
+// data the caller already has.
+//
+// Band fetching needs it — one Overpass query feeds a whole block of tiles —
+// but a generator that does not implement it, or a task with no data attached,
+// takes exactly the path it always did.
+type DataGenerator interface {
+	GenerateWithPrefetched(ctx context.Context, coords tile.Coords, force bool, suffix string, data *types.TileData) (path string, layersDir string, err error)
+}
+
 // Task represents a single tile generation task.
 type Task struct {
+	// Data, when non-nil, is the tile's OSM features, already fetched. The
+	// worker then renders without touching the datasource. Nil means "fetch
+	// it yourself", which is what every task was before band fetching.
+	Data   *types.TileData
 	Suffix string
 	Coords tile.Coords
 	Force  bool
@@ -69,19 +84,38 @@ func (p *Pool) Run(ctx context.Context, tasks []Task) []Result {
 		return nil
 	}
 
-	// Create channels
-	taskCh := make(chan Task, len(tasks))
-	resultCh := make(chan Result, len(tasks))
-
-	// Feed tasks. taskCh is buffered to len(tasks), so no send blocks and no
-	// task is dropped: every task reaches a worker, which emits either a real
-	// result or one carrying ctx.Err() (Canceled or DeadlineExceeded).
+	// taskCh is buffered to len(tasks), so no send blocks and no task is
+	// dropped: every task reaches a worker, which emits either a real result
+	// or one carrying ctx.Err() (Canceled or DeadlineExceeded).
 	// len(results) == len(tasks) always, which is the invariant callers count
 	// failures against.
+	taskCh := make(chan Task, len(tasks))
 	for _, task := range tasks {
 		taskCh <- task
 	}
 	close(taskCh)
+
+	return p.RunStream(ctx, taskCh, len(tasks))
+}
+
+// RunStream is Run over a channel the caller feeds, for producers that do not
+// have the whole task list up front.
+//
+// Band fetching is the reason: its tasks only exist once a band has been
+// fetched and sliced, and materialising them all first would hold every band's
+// geometry alive at once. total is passed explicitly because a streamed run
+// cannot count its tasks in advance, and progress reporting needs a
+// denominator.
+//
+// The caller must close tasks. One result is emitted per task received, so the
+// len(results) == len(tasks) invariant holds exactly as it does for Run.
+func (p *Pool) RunStream(ctx context.Context, tasks <-chan Task, total int) []Result {
+	if tasks == nil {
+		return nil
+	}
+
+	taskCh := tasks
+	resultCh := make(chan Result, p.workers)
 
 	// Track progress
 	var (
@@ -101,7 +135,7 @@ func (p *Pool) Run(ctx context.Context, tasks []Task) []Result {
 	}
 
 	// Collect results in a separate goroutine
-	results := make([]Result, 0, len(tasks))
+	results := make([]Result, 0, total)
 	done := make(chan struct{})
 
 	go func() {
@@ -118,7 +152,7 @@ func (p *Pool) Run(ctx context.Context, tasks []Task) []Result {
 			mu.Unlock()
 
 			if p.onProgress != nil {
-				p.onProgress(c, len(tasks), f)
+				p.onProgress(c, total, f)
 			}
 		}
 		close(done)
@@ -132,6 +166,18 @@ func (p *Pool) Run(ctx context.Context, tasks []Task) []Result {
 	<-done
 
 	return results
+}
+
+// generate renders one task, using its prefetched data when there is any and
+// the generator can take it. Every other combination falls through to the
+// original path, so nothing changes for a task that carries no data.
+func (p *Pool) generate(ctx context.Context, task Task) (string, string, error) {
+	if task.Data != nil {
+		if dg, ok := p.generator.(DataGenerator); ok {
+			return dg.GenerateWithPrefetched(ctx, task.Coords, task.Force, task.Suffix, task.Data)
+		}
+	}
+	return p.generator.Generate(ctx, task.Coords, task.Force, task.Suffix)
 }
 
 // worker processes tasks from the task channel and sends results to the result channel.
@@ -149,7 +195,7 @@ func (p *Pool) worker(ctx context.Context, tasks <-chan Task, results chan<- Res
 		}
 
 		start := time.Now()
-		path, _, err := p.generator.Generate(ctx, task.Coords, task.Force, task.Suffix)
+		path, _, err := p.generate(ctx, task)
 		elapsed := time.Since(start)
 
 		results <- Result{

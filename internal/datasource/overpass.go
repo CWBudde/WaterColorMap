@@ -2,6 +2,7 @@ package datasource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -37,6 +38,11 @@ type OverpassConfig struct {
 // PublicEndpoint is the public Overpass API, used whenever no endpoint is
 // configured and WATERCOLORMAP_OVERPASS_ENDPOINT is unset.
 const PublicEndpoint = "https://overpass-api.de/api/interpreter"
+
+// DefaultQueryTimeoutSec is the server-side Overpass timeout for a per-tile
+// query. It is a parameter rather than a literal only so band fetches can ask
+// for longer; changing this value would move every golden query.
+const DefaultQueryTimeoutSec = 60
 
 // EndpointEnvVar overrides the endpoint used when a caller passes none.
 //
@@ -226,8 +232,46 @@ func (ds *OverpassDataSource) FetchTileData(ctx context.Context, tile types.Tile
 // This is useful for "metatile" rendering where we need data slightly outside
 // the tile bounds (e.g. to support post-processing blurs without seams).
 func (ds *OverpassDataSource) FetchTileDataWithBounds(ctx context.Context, tile types.TileCoordinate, bounds types.BoundingBox) (*types.TileData, error) {
+	data, err := ds.FetchAreaData(ctx, tile.Zoom, bounds, AreaFetchOptions{})
+	if err != nil {
+		return nil, err
+	}
+	data.Coordinate = tile
+	return data, nil
+}
+
+// AreaFetchOptions tunes an area fetch. The zero value reproduces per-tile
+// behaviour exactly, which is what keeps FetchTileDataWithBounds's query text,
+// cache keys and error messages unchanged.
+type AreaFetchOptions struct {
+	// TimeoutSec overrides the server-side Overpass timeout. Zero means
+	// DefaultQueryTimeoutSec.
+	TimeoutSec int
+	// SkipEmptyValidation suppresses the zero-feature check. Band fetches set
+	// it because that check is a per-tile policy: a band that is non-empty
+	// overall would otherwise mask a genuinely empty member tile, and an empty
+	// band would fail sixteen tiles at once. The caller re-checks each tile's
+	// slice instead.
+	SkipEmptyValidation bool
+}
+
+// FetchAreaData fetches OSM features for an arbitrary bounding box at a given
+// zoom.
+//
+// The zoom selects the query rules; the bounds decide the extent. Splitting
+// those two apart is the whole of what band fetching needs, because every tile
+// in a same-zoom band produces identical query text apart from the bbox.
+//
+// The returned TileData has no Coordinate: an area is not a tile.
+// FetchTileDataWithBounds fills one in for its caller.
+func (ds *OverpassDataSource) FetchAreaData(
+	ctx context.Context,
+	zoom int,
+	bounds types.BoundingBox,
+	opts AreaFetchOptions,
+) (*types.TileData, error) {
 	// Build Overpass QL query with zoom-based filtering
-	query := ds.buildTileQuery(bounds, tile.Zoom)
+	query := ds.buildAreaQuery(bounds, zoom, opts.TimeoutSec)
 
 	// Execute the query under the caller's context, so a cancelled or
 	// timed-out request actually aborts the in-flight Overpass fetch instead
@@ -243,22 +287,23 @@ func (ds *OverpassDataSource) FetchTileDataWithBounds(ctx context.Context, tile 
 	// Validate that we got expected data based on zoom level.
 	// At zoom 5-13, we should always have roads/highways in any tile over land.
 	// An empty response likely indicates Overpass timeout or incomplete data.
-	if err := validateFeatureResponse(features, tile.Zoom); err != nil {
-		if !ds.allowEmptyResponses {
-			return nil, err
+	if !opts.SkipEmptyValidation {
+		if err := validateFeatureResponse(features, zoom); err != nil {
+			if !ds.allowEmptyResponses {
+				return nil, err
+			}
+			// Ocean rendering is configured, so an empty tile is most likely open
+			// sea and must still render. See WithEmptyResponsesAllowed.
+			slog.Warn("Overpass returned no features; continuing because ocean rendering is configured",
+				"zoom", zoom, "bounds", bounds.String(), "err", err)
 		}
-		// Ocean rendering is configured, so an empty tile is most likely open
-		// sea and must still render. See WithEmptyResponsesAllowed.
-		slog.Warn("Overpass returned no features; continuing because ocean rendering is configured",
-			"zoom", tile.Zoom, "x", tile.X, "y", tile.Y, "err", err)
 	}
 
 	tileData := &types.TileData{
-		Coordinate: tile,
-		Bounds:     bounds,
-		Features:   features,
-		FetchedAt:  time.Now(),
-		Source:     "overpass-api",
+		Bounds:    bounds,
+		Features:  features,
+		FetchedAt: time.Now(),
+		Source:    "overpass-api",
 	}
 
 	// Only store raw response if explicitly requested (for debugging/tests)
@@ -286,6 +331,18 @@ func (ds *OverpassDataSource) FetchTileDataWithBounds(ctx context.Context, tile 
 // - "geom(bbox)" clips geometry to bbox (BROKEN - causes malformed geometry)
 // - "qt" (quiet) omits metadata (version, changeset, timestamp, user, uid)
 func (ds *OverpassDataSource) buildTileQuery(bounds types.BoundingBox, zoom int) string {
+	return ds.buildAreaQuery(bounds, zoom, DefaultQueryTimeoutSec)
+}
+
+// buildAreaQuery is buildTileQuery with the server-side timeout as a
+// parameter. A band covers many tiles' worth of data, so it needs longer than
+// the per-tile default; keeping the default a parameter with the original
+// value means per-tile query text -- and therefore every cache key and every
+// golden -- is unchanged.
+func (ds *OverpassDataSource) buildAreaQuery(bounds types.BoundingBox, zoom, timeoutSec int) string {
+	if timeoutSec <= 0 {
+		timeoutSec = DefaultQueryTimeoutSec
+	}
 	// Build query with all feature types we need.
 	// IMPORTANT: We use per-element bbox filters (south,west,north,east) instead of
 	// the global [bbox:] setting. When using per-element bbox filters with "out geom",
@@ -310,7 +367,7 @@ func (ds *OverpassDataSource) buildTileQuery(bounds types.BoundingBox, zoom int)
 	}
 
 	// Build final query
-	query := "[out:json][timeout:60];\n(\n"
+	query := fmt.Sprintf("[out:json][timeout:%d];\n(\n", timeoutSec)
 	for _, part := range queryParts {
 		query += "  " + part + "\n"
 	}
@@ -647,6 +704,50 @@ func (mds *MultiOverpassDataSource) FetchTileDataWithBounds(ctx context.Context,
 
 	// No server matched (shouldn't happen if you have a nil-coverage fallback)
 	return nil, fmt.Errorf("no overpass server configured for tile %s", tile)
+}
+
+// ErrAreaSpansServers reports that no single configured server covers a whole
+// area, so it cannot be fetched as one query.
+//
+// The band scheduler treats this as "split this band" rather than as a
+// failure: the sub-bands are smaller and may each fall inside one server's
+// coverage, and at the bottom the per-tile path routes exactly as it always
+// did.
+var ErrAreaSpansServers = fmt.Errorf("no single overpass server covers the requested area")
+
+// FetchAreaData routes an area query to the first server whose coverage fully
+// contains it.
+//
+// Containment, not intersection. Per-tile routing takes any server whose
+// coverage merely overlaps the tile, and at tile scale a wrong choice costs one
+// tile. A band box is up to sixteen tiles wide, so an overlap test could hand
+// the whole band to a regional server that holds data for a corner of it and
+// nothing else — sixteen tiles silently rendered from the wrong source. Rather
+// than accept that, an area that spans servers is refused and split.
+func (mds *MultiOverpassDataSource) FetchAreaData(
+	ctx context.Context,
+	zoom int,
+	bounds types.BoundingBox,
+	opts AreaFetchOptions,
+) (*types.TileData, error) {
+	errs := make([]error, 0, len(mds.servers))
+
+	for _, srv := range mds.servers {
+		if srv.coverage != nil && !srv.coverage.Contains(bounds) {
+			continue
+		}
+
+		data, err := srv.datasource.FetchAreaData(ctx, zoom, bounds, opts)
+		if err == nil {
+			return data, nil
+		}
+		errs = append(errs, fmt.Errorf("[%s] %w", srv.name, err))
+	}
+
+	if len(errs) == 0 {
+		return nil, fmt.Errorf("%w: %s", ErrAreaSpansServers, bounds.String())
+	}
+	return nil, errors.Join(errs...)
 }
 
 // intersects checks if two bounding boxes overlap.

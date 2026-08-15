@@ -209,10 +209,34 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       coverage box is unreachable unless listed first.
 - [ ] **[P2]** Make `@2x` on-demand-only rather than a second full render pass
       (`runHiDPIBatch`). 4× storage and 2× compute from one policy decision.
-- [ ] **[P2]** Fetch per metatile band instead of per tile. `out geom` returns unclipped geometry,
-      so a motorway crossing 64 tiles is transferred 64 times; Germany's 237,424 z14 queries would
-      become ~3.7k. **Must stop at z15** — the building rules are not monotone across z16
-      (`overpass.go:477` drops `landuse=*` while adding `building`), so parent reuse is invalid there.
+- [x] **[P2]** Fetch per metatile band instead of per tile — `--band-fetch`, **off by default**.
+      `out geom` returns unclipped geometry, so a motorway crossing a block is transferred once
+      per tile; one query per block transfers it once. At the default 4×4, Germany's 237,424 z14
+      queries become ~15k.
+
+      **Two corrections to what this item said.** First, "must stop at z15" does not apply:
+      `buildTileQuery` picks its rules from the zoom alone, so every tile in a *same-zoom* band
+      emits identical query text apart from the bbox. The `landuse` → `building` switch at z16
+      invalidates reusing a **parent's** data for its children across zooms, which is a different
+      technique and not this one. (The line reference was also stale — those rules are at
+      `overpass.go:486-505`.) Second, 8×8 is not a safe band size: one padded z13 tile measured
+      ~3 MB, so a 64-tile block lands past the 64 MiB response cap. 4×4 is the default, and the
+      real guard is adaptive rather than a zoom ceiling — any band failure splits into quadrants
+      and retries, bottoming out at ordinary per-tile fetches, so a failing tile still fails as
+      itself with the error it always had.
+
+      A band's data is **sliced to each tile's own fetch bounds** before rendering. That is not an
+      optimisation: the renderer skips a zero-feature layer entirely, and handing a tile its
+      neighbours' features would flip absent layers into present-but-blank ones. The emptiness
+      check stays per tile too — an empty slice at z8–13 falls back to a real per-tile fetch
+      rather than approximating the policy. `TestBandFetchRendersIdenticalTiles` pins the result:
+      byte-identical output, on data that genuinely differs (9 features in the band, 6 in the
+      slice).
+
+      One hazard found and closed: multi-server routing matches on *intersection*, which at band
+      scale could answer sixteen tiles from a server holding data for one corner. Band routing
+      requires **containment** and splits otherwise.
+
 - [ ] **[P3]** Sort features by OSM ID in `ExtractFeaturesFromOverpassResult` — it ranges over
       `map[int64]*…` unsorted (`overpass_extract.go:32,49`), so feature order varies run to run and
       **the same tile does not render byte-identically twice**. Measured on a z12 Hanover tile:
