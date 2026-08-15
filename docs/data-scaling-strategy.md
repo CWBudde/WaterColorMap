@@ -532,6 +532,65 @@ not where the time is for a _bulk run against a live Overpass_, which is the
 scenario this document is about. Both statements are true at once; the roadmap
 should be read as "what to do after the fetch is fixed", not as "what to do first".
 
+### Band fetching exists on this branch
+
+`--band-fetch`, **off by default**. One Overpass query per square block of
+same-zoom tiles instead of one per tile, which is the second of the two levers
+against the 79% (the first being the cache below).
+
+The arithmetic: `out geom` returns unclipped geometry, so a motorway crossing a
+4×4 block is transferred sixteen times by per-tile fetching. At the default
+level of 2, Germany's 237,424 z14 queries become roughly 15,000.
+
+**Why 4×4 and not the 8×8 the plan item assumed.** A band's response scales with
+_area_, and the measurement above gives the constant: one padded z13 tile
+returned 3,189,067 bytes. Sixty-four of those is 100-200 MB — past
+`DefaultMaxResponseBytes` (64 MiB) and past any sensible server-side timeout.
+4×4 is roughly 12 MB, which fits with room to spare.
+
+**Why there is no zoom ceiling.** § 5.1a said band fetching "must stop at z15",
+because the building rules are not monotone across z16. That constraint is real
+but belongs to a different technique: it invalidates reusing a _parent's_ data
+for its _children_, across zooms. Band fetching groups tiles of the **same**
+zoom, and `buildTileQuery` selects its rules from the zoom alone, so every tile
+in a band emits identical query text apart from the bbox literal. The real guard
+is adaptive: any band failure — oversized response, timeout, or an area that no
+single configured server covers — splits the band into quadrants and retries
+them independently, bottoming out at ordinary per-tile fetches. A tile that
+genuinely cannot be fetched therefore still fails as itself, with the error it
+always had, rather than taking fifteen neighbours down with it.
+
+**Why the data is sliced per tile before rendering.** This is the part that makes
+it behaviour-preserving rather than merely cheaper. The renderer skips a layer
+entirely when it has zero features, producing an _absent_ layer rather than a
+blank one, and those take different paths through painting. Handing a tile its
+neighbours' features would flip absent into present-but-blank. Filtering each
+tile's slice to its own fetch bounds restores that exactly, and cannot lose
+anything: Overpass matches on geometry intersection, which implies bbox
+intersection, so the filter is a superset of what a per-tile query would have
+returned. The slices share the band's underlying geometry, so this costs feature
+headers rather than a copy.
+
+The emptiness check stays per tile for the same reason — it is a per-tile policy,
+and a band that is non-empty overall would mask a genuinely empty member while an
+empty band would fail every member at once. An empty slice inside z8–13 falls
+back to a real per-tile fetch.
+
+`internal/pipeline/band_equivalence_test.go` pins the outcome: a band-fetched
+tile renders **byte-identically** to a per-tile one. Not within a tolerance —
+identically — on data that genuinely differs (9 features in the band, 6 in the
+slice).
+
+One hazard found while building it, and closed: `MultiOverpassDataSource` routes
+on bbox _intersection_, so a band box could be answered by a regional server
+holding data for one corner of it and nothing else — sixteen tiles silently from
+the wrong source. Band routing requires **containment** and splits otherwise.
+
+**Off by default** for the same reason the cache is: it changes what the upstream
+sees. The query shape and size change, and an operator running against a shared
+or rate-limited instance has to opt into that. Output does not change, which is
+what the equivalence test is for.
+
 ### The Overpass response cache exists on this branch
 
 `internal/datasource/cache.go` and `internal/datasource/cache_transport.go`, with a

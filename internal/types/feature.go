@@ -54,9 +54,16 @@ type TileData struct {
 	Coordinate     TileCoordinate
 }
 
-// Count returns the total number of features
+// Count returns the total number of features.
+//
+// Rivers used to be missing from this sum, which made every count that used it
+// quietly wrong for tiles whose only features are waterways. Both existing
+// callers are diagnostics (a log line and a summary map), so the fix only makes
+// those honest -- but validateFeatureResponse counts by hand rather than
+// calling this, and that divergence is what hid the omission.
 func (fc FeatureCollection) Count() int {
-	return len(fc.Water) + len(fc.Parks) + len(fc.Roads) + len(fc.Railroads) + len(fc.Buildings) + len(fc.Urban) + len(fc.Civic) + len(fc.Land)
+	return len(fc.Water) + len(fc.Rivers) + len(fc.Parks) + len(fc.Roads) +
+		len(fc.Railroads) + len(fc.Buildings) + len(fc.Urban) + len(fc.Civic) + len(fc.Land)
 }
 
 // FeatureCounts returns a map of feature counts by type

@@ -399,3 +399,15 @@ func (s *worldSyntheticDataSource) FetchTileData(_ context.Context, coord types.
 		FetchedAt:  time.Now(),
 	}, nil
 }
+
+// FetchAreaData lets the world-synthetic source stand in for a band fetch: it
+// already answers with fixed geometry regardless of what is asked, which is
+// exactly what an area query does.
+func (s *worldSyntheticDataSource) FetchAreaData(_ context.Context, _ int, bounds types.BoundingBox) (*types.TileData, error) {
+	return &types.TileData{
+		Bounds:    bounds,
+		Features:  s.features,
+		Source:    "world-synthetic",
+		FetchedAt: time.Now(),
+	}, nil
+}

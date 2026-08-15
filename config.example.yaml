@@ -99,6 +99,33 @@ overpass:
 #   seed: 1337 # deterministic noise/texture alignment
 #   keep_layers: false # keep intermediate layer PNGs for debugging
 #
+#   # Band fetching: one Overpass query per block of tiles instead of one per
+#   # tile. `out geom` returns unclipped geometry, so a motorway crossing a 4x4
+#   # block is transferred 16 times by per-tile fetching; one query transfers it
+#   # once. The fetch is ~71% of per-tile wall clock, so this is where a bulk
+#   # run's time actually is.
+#   #
+#   # Off by default, deliberately: it changes the shape and size of the queries
+#   # sent upstream, which anyone running against a shared or rate-limited
+#   # Overpass has to opt into. Output is unaffected -- a band-fetched tile
+#   # renders byte-identically to a per-tile one, which is pinned by
+#   # TestBandFetchRendersIdenticalTiles.
+#   band_fetch: false
+#   # Band size in zoom levels above the tile: 1 = 2x2, 2 = 4x4, 3 = 8x8.
+#   # 4x4 is the default because a band's response scales with area: one padded
+#   # z13 tile measured ~3 MB, so an 8x8 block would land past the 64 MiB
+#   # response cap and past any sensible server-side timeout.
+#   band_level: 2
+#   # Below this zoom, fetch per tile. A single low-zoom tile already covers a
+#   # huge area, so banding buys little and risks a lot.
+#   band_min_zoom: 10
+#   # How many bands may be fetched ahead of rendering. This is what bounds how
+#   # much band geometry is held in memory at once.
+#   band_fetch_ahead: 1
+#   # Server-side Overpass timeout for a band query, in seconds. Per-tile
+#   # queries keep their own 60s and are byte-identical to what they always were.
+#   band_timeout: 180
+#
 #   # Output
 #   format: "folder" # folder or mbtiles
 #   output_file: "" # required for format: mbtiles

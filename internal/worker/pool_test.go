@@ -3,11 +3,13 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/types"
 )
 
 // mockGenerator simulates tile generation for testing
@@ -343,5 +345,174 @@ func TestPool_WithSuffix(t *testing.T) {
 	// Path should include the suffix
 	if results[0].Path != "/tmp/z13_x4297_y2754@2x.png" {
 		t.Errorf("Expected path with @2x suffix, got %s", results[0].Path)
+	}
+}
+
+// dataMockGenerator records which path each tile took: the prefetched-data one
+// or the ordinary fetch-it-yourself one.
+type dataMockGenerator struct {
+	withData     []string
+	withoutData  []string
+	mu           sync.Mutex
+	failWithData bool
+}
+
+func (m *dataMockGenerator) Generate(_ context.Context, coords tile.Coords, _ bool, suffix string) (string, string, error) {
+	m.mu.Lock()
+	m.withoutData = append(m.withoutData, coords.String())
+	m.mu.Unlock()
+	return "/tmp/" + coords.String() + suffix + ".png", "", nil
+}
+
+func (m *dataMockGenerator) GenerateWithPrefetched(_ context.Context, coords tile.Coords, _ bool, suffix string, data *types.TileData) (string, string, error) {
+	if data == nil {
+		return "", "", errors.New("GenerateWithPrefetched called with nil data")
+	}
+	m.mu.Lock()
+	m.withData = append(m.withData, coords.String())
+	m.mu.Unlock()
+	if m.failWithData {
+		return "", "", errors.New("simulated failure")
+	}
+	return "/tmp/" + coords.String() + suffix + ".png", "", nil
+}
+
+func (m *dataMockGenerator) seen() (with, without []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.withData...), append([]string(nil), m.withoutData...)
+}
+
+// TestPoolRoutesPrefetchedData: a task carrying data must skip the datasource,
+// and one without must take exactly the path it always did.
+func TestPoolRoutesPrefetchedData(t *testing.T) {
+	gen := &dataMockGenerator{}
+	pool := New(Config{Workers: 2, Generator: gen})
+
+	tasks := []Task{
+		{Coords: tile.Coords{Z: 13, X: 1, Y: 1}, Data: &types.TileData{}},
+		{Coords: tile.Coords{Z: 13, X: 2, Y: 2}},
+		{Coords: tile.Coords{Z: 13, X: 3, Y: 3}, Data: &types.TileData{}},
+	}
+
+	results := pool.Run(context.Background(), tasks)
+	if len(results) != len(tasks) {
+		t.Fatalf("got %d results, want %d", len(results), len(tasks))
+	}
+	for _, r := range results {
+		if r.Err != nil {
+			t.Errorf("tile %s failed: %v", r.Task.Coords.String(), r.Err)
+		}
+	}
+
+	with, without := gen.seen()
+	if len(with) != 2 {
+		t.Errorf("%d tiles took the prefetched path, want 2 (%v)", len(with), with)
+	}
+	if len(without) != 1 {
+		t.Errorf("%d tiles took the fetching path, want 1 (%v)", len(without), without)
+	}
+}
+
+// TestPoolFallsBackWhenGeneratorCannotTakeData: a generator that does not
+// implement DataGenerator must still render, not fail. This is what keeps every
+// existing test fake working.
+func TestPoolFallsBackWhenGeneratorCannotTakeData(t *testing.T) {
+	gen := &mockGenerator{}
+	pool := New(Config{Workers: 1, Generator: gen})
+
+	results := pool.Run(context.Background(), []Task{
+		{Coords: tile.Coords{Z: 13, X: 1, Y: 1}, Data: &types.TileData{}},
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("a plain generator should ignore the data and render: %v", results[0].Err)
+	}
+	if gen.callCount.Load() != 1 {
+		t.Errorf("generator called %d times, want 1", gen.callCount.Load())
+	}
+}
+
+// TestRunStreamEmitsOneResultPerTask is the invariant callers count failures
+// against, carried over from Run to the streaming path.
+func TestRunStreamEmitsOneResultPerTask(t *testing.T) {
+	gen := &mockGenerator{}
+	pool := New(Config{Workers: 3, Generator: gen})
+
+	const total = 25
+	taskCh := make(chan Task)
+	go func() {
+		defer close(taskCh)
+		for i := 0; i < total; i++ {
+			taskCh <- Task{Coords: tile.Coords{Z: 13, X: uint32(i), Y: 1}}
+		}
+	}()
+
+	results := pool.RunStream(context.Background(), taskCh, total)
+	if len(results) != total {
+		t.Fatalf("got %d results, want %d", len(results), total)
+	}
+
+	seen := map[string]int{}
+	for _, r := range results {
+		seen[r.Task.Coords.String()]++
+	}
+	if len(seen) != total {
+		t.Errorf("results cover %d distinct tiles, want %d", len(seen), total)
+	}
+}
+
+// TestRunStreamReportsProgressAgainstTotal: a streamed run cannot count its
+// tasks in advance, so the denominator has to come from the caller.
+func TestRunStreamReportsProgressAgainstTotal(t *testing.T) {
+	gen := &mockGenerator{}
+	pool := New(Config{Workers: 2, Generator: gen})
+
+	const total = 8
+	var lastTotal atomic.Int32
+	pool.onProgress = func(_, tot, _ int) { lastTotal.Store(int32(tot)) }
+
+	taskCh := make(chan Task, total)
+	for i := 0; i < total; i++ {
+		taskCh <- Task{Coords: tile.Coords{Z: 13, X: uint32(i), Y: 1}}
+	}
+	close(taskCh)
+
+	pool.RunStream(context.Background(), taskCh, total)
+
+	if got := lastTotal.Load(); got != total {
+		t.Errorf("progress reported a total of %d, want %d", got, total)
+	}
+}
+
+// TestRunStreamHonoursCancellation: every task still produces a result, so a
+// cancelled run reports failures rather than losing tiles silently.
+func TestRunStreamHonoursCancellation(t *testing.T) {
+	gen := &mockGenerator{delay: 50 * time.Millisecond}
+	pool := New(Config{Workers: 1, Generator: gen})
+
+	const total = 10
+	taskCh := make(chan Task, total)
+	for i := 0; i < total; i++ {
+		taskCh <- Task{Coords: tile.Coords{Z: 13, X: uint32(i), Y: 1}}
+	}
+	close(taskCh)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	results := pool.RunStream(ctx, taskCh, total)
+	if len(results) != total {
+		t.Fatalf("got %d results, want %d — a cancelled run must not lose tasks", len(results), total)
+	}
+}
+
+func TestRunStreamNilChannel(t *testing.T) {
+	pool := New(Config{Workers: 1, Generator: &mockGenerator{}})
+	if got := pool.RunStream(context.Background(), nil, 0); got != nil {
+		t.Errorf("RunStream(nil) = %v, want nil", got)
 	}
 }

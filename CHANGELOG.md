@@ -20,6 +20,36 @@
   answer simply omits it — and every failure mode degrades to rendering rather than skipping,
   since a wrong skip leaves a permanent hole while a wrong render only costs time.
 
+- **generate:** add `--band-fetch`, which issues one Overpass query per square block of same-zoom
+  tiles instead of one per tile. **Off by default.** `out geom` returns unclipped geometry, so a
+  motorway crossing a 4×4 block is transferred sixteen times by per-tile fetching; one query
+  transfers it once. Since the fetch is ~71% of per-tile wall clock, this is where a bulk run's
+  time actually goes — Germany's 237,424 z14 queries become roughly 15,000 at the default band
+  size.
+
+  **Output does not change.** A band's data is sliced back to each tile's own fetch bounds before
+  rendering, which is not an optimisation but the thing that makes it behaviour-preserving: the
+  renderer skips a zero-feature layer entirely, so handing a tile its neighbours' features would
+  flip absent layers into present-but-blank ones. The emptiness check that catches silent Overpass
+  failures stays per tile too, falling back to a real per-tile fetch when a slice comes out empty
+  inside z8–13. `TestBandFetchRendersIdenticalTiles` asserts byte-identical output — not a
+  tolerance — on data that genuinely differs.
+
+  Two corrections to the plan item this closes. It called for stopping at z15, because the
+  building rules are not monotone across z16; that constraint applies to reusing a _parent's_ data
+  across zooms, not to grouping tiles of the same zoom, whose queries differ only in the bbox. And
+  it assumed 8×8 blocks, which at the measured ~3 MB per padded z13 tile would exceed the 64 MiB
+  response cap; the default is 4×4, and the real guard is adaptive — any band failure splits into
+  quadrants and retries, bottoming out at ordinary per-tile fetches, so a failing tile still fails
+  as itself rather than taking fifteen neighbours with it.
+
+  One hazard found and closed on the way: multi-server routing matches coverage by intersection,
+  which at band scale could answer sixteen tiles from a server holding data for one corner of the
+  block. Band routing requires containment and splits otherwise.
+
+  Also fixes `types.FeatureCollection.Count()`, which omitted `Rivers` — so a tile whose only
+  features were waterways counted as empty.
+
 ### Documentation
 
 - **scaling:** add `docs/data-scaling-strategy.md`, closing PLAN.md § 5.1. Measured rather than
