@@ -21,6 +21,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/renderer"
 	"github.com/cwbudde/watercolormap/internal/safe"
 	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/tileformat"
 	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/cwbudde/watercolormap/internal/watercolor"
 )
@@ -34,9 +35,15 @@ type OnDemandTilesConfig struct {
 	TexturesDir    string
 	PNGCompression string
 	CacheControl   string
+	// ImageFormat is the one format this server renders and serves. The zero
+	// value is PNG. A request for any other extension is a 404 — see serveTile.
+	ImageFormat tileformat.Format
 	// Ocean points the ocean pass at the processed OSM water polygons.
 	// The zero value disables it.
-	Ocean                    renderer.OceanConfig
+	Ocean renderer.OceanConfig
+	// WebPEffort is nativewebp's compression level (0-6); zero means the
+	// package default. Ignored unless ImageFormat is WebP.
+	WebPEffort               int
 	BaseTileSize             int
 	Seed                     int64
 	MaxConcurrentGenerations int
@@ -452,13 +459,24 @@ func (t *OnDemandTiles) Handler() http.Handler {
 // answers preflights, so the toggle there cannot be overridden from inside
 // the handler.
 func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
-	coords, suffix, err := parseTilePath(r.URL.Path)
+	coords, suffix, format, err := parseTilePath(r.URL.Path)
 	if err != nil {
 		writeTilePathError(w, r, t.log(), err)
 		return
 	}
 
-	filename := coords.String() + suffix + ".png"
+	// This server renders exactly one format. Serving WebP bytes at a .png URL
+	// would be a lie that outlives the request in every cache downstream, and
+	// rendering both formats doubles fetch, render and disk for a choice the
+	// operator already made. So a mismatch is simply not found.
+	if format != t.imageFormat() {
+		t.log().Debug("rejected tile request for a format this server does not produce",
+			"path", r.URL.Path, "requested", format, "configured", t.imageFormat())
+		writeTileError(w, "tile not found", http.StatusNotFound)
+		return
+	}
+
+	filename := coords.FileName(suffix, format.Ext())
 	fullPath := filepath.Join(t.cfg.TilesDir, filename)
 
 	if t.serveCachedTile(w, r, fullPath) {
@@ -567,8 +585,14 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveTileFile serves a rendered tile with the configured cache policy.
+//
+// Content-Type is set explicitly rather than left to http.ServeFile's
+// extension sniffing. Go's builtin table does map .webp, but the mime package
+// also loads /etc/mime.types on Linux, which would make the header this server
+// sends depend on the machine it happens to run on.
 func (t *OnDemandTiles) serveTileFile(w http.ResponseWriter, r *http.Request, fullPath string) {
 	w.Header().Set("Cache-Control", t.cfg.CacheControl)
+	w.Header().Set("Content-Type", t.imageFormat().ContentType())
 	http.ServeFile(w, r, fullPath)
 }
 
@@ -698,6 +722,14 @@ func writeTileError(w http.ResponseWriter, msg string, code int) {
 	http.Error(w, msg, code)
 }
 
+// imageFormat is the configured format, with the zero value meaning PNG.
+func (t *OnDemandTiles) imageFormat() tileformat.Format {
+	if t.cfg.ImageFormat == "" {
+		return tileformat.PNG
+	}
+	return t.cfg.ImageFormat
+}
+
 func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) {
 	if v, ok := t.gens.Load(tileSize); ok {
 		// The map only ever holds generators; the check keeps a corrupt entry
@@ -718,6 +750,8 @@ func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) 
 		t.logger,
 		pipeline.GeneratorOptions{
 			PNGCompression: t.cfg.PNGCompression,
+			ImageFormat:    t.imageFormat(),
+			WebPEffort:     t.cfg.WebPEffort,
 			Watercolor:     t.cfg.Watercolor,
 			Ocean:          t.cfg.Ocean,
 		},
@@ -785,20 +819,24 @@ func (t *OnDemandTiles) log() *slog.Logger {
 	return slog.Default()
 }
 
-// parseTilePath extracts tile coordinates and the optional "@2x" suffix from a
-// request path. It returns tile.ErrCoordsFormat for anything that is not a tile
-// URL at all, and tile.ErrCoordsOutOfRange for a well-formed but impossible
-// tile — callers map those to 404 and 400 respectively.
-func parseTilePath(requestPath string) (tile.Coords, string, error) {
-	// Expect: /tiles/z13_x4317_y2692.png or /tiles/z13_x4317_y2692@2x.png
+// parseTilePath extracts tile coordinates, the optional "@2x" suffix and the
+// requested image format from a request path. It returns tile.ErrCoordsFormat
+// for anything that is not a tile URL at all — including an extension this
+// project does not produce — and tile.ErrCoordsOutOfRange for a well-formed but
+// impossible tile. Callers map those to 404 and 400 respectively.
+func parseTilePath(requestPath string) (tile.Coords, string, tileformat.Format, error) {
+	// Expect: /tiles/z13_x4317_y2692.png, @2x, and the .webp equivalents.
 	if !strings.HasPrefix(requestPath, "/tiles/") {
-		return tile.Coords{}, "", fmt.Errorf("%w: %s", tile.ErrCoordsFormat, requestPath)
+		return tile.Coords{}, "", "", fmt.Errorf("%w: %s", tile.ErrCoordsFormat, requestPath)
 	}
 	base := path.Base(requestPath)
-	if !strings.HasSuffix(base, ".png") {
-		return tile.Coords{}, "", fmt.Errorf("%w: %s", tile.ErrCoordsFormat, base)
+
+	format, ok := tileformat.ParseExt(path.Ext(base))
+	if !ok {
+		return tile.Coords{}, "", "", fmt.Errorf("%w: %s", tile.ErrCoordsFormat, base)
 	}
-	name := strings.TrimSuffix(base, ".png")
+
+	name := strings.TrimSuffix(base, format.DotExt())
 	suffix := ""
 	if strings.HasSuffix(name, "@2x") {
 		suffix = "@2x"
@@ -807,9 +845,9 @@ func parseTilePath(requestPath string) (tile.Coords, string, error) {
 
 	coords, err := tile.ParseCoords(name)
 	if err != nil {
-		return tile.Coords{}, "", err
+		return tile.Coords{}, "", "", err
 	}
-	return coords, suffix, nil
+	return coords, suffix, format, nil
 }
 
 // writeTilePathError maps a parseTilePath error to a response. An impossible

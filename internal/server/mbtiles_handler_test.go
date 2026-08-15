@@ -99,3 +99,70 @@ func TestMBTilesHandler_ServeTile(t *testing.T) {
 		}
 	})
 }
+
+// newTestMBTilesFormat writes a single-tile MBTiles database declaring the
+// given format. The payload is opaque: the handler copies tile bytes verbatim
+// and never decodes them.
+func newTestMBTilesFormat(t *testing.T, format string) string {
+	t.Helper()
+
+	dbPath := filepath.Join(t.TempDir(), "test.mbtiles")
+	w, err := mbtiles.New(dbPath, mbtiles.Metadata{
+		Name:    "Test",
+		Format:  format,
+		MinZoom: mbtiles.Zoom(0),
+		MaxZoom: mbtiles.Zoom(14),
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MBTiles writer: %v", err)
+	}
+	if err := w.WriteTile(13, 4317, 2692, []byte("tile bytes")); err != nil {
+		t.Fatalf("Failed to write tile: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Failed to close MBTiles writer: %v", err)
+	}
+	return dbPath
+}
+
+// TestMBTilesHandlerContentTypeFollowsTheFile: the tileset's own metadata is
+// the only authority on what its bytes are. Deriving the header from a flag
+// would let a WebP file be served as image/png, which every cache downstream
+// would then remember.
+func TestMBTilesHandlerContentTypeFollowsTheFile(t *testing.T) {
+	tests := []struct {
+		name   string
+		format string
+		want   string
+	}{
+		{"png tileset", "png", "image/png"},
+		{"webp tileset", "webp", "image/webp"},
+		// Files written before the format was trustworthy were all PNG, so an
+		// unreadable declaration must not become an error.
+		{"unknown format falls back to png", "jpeg", "image/png"},
+		{"empty format falls back to png", "", "image/png"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := newTestMBTilesFormat(t, tt.format)
+
+			h, err := NewMBTilesHandler(MBTilesConfig{MBTilesPath: dbPath}, nil)
+			if err != nil {
+				t.Fatalf("NewMBTilesHandler: %v", err)
+			}
+			defer h.Close() //nolint:errcheck // test
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/tiles/z13_x4317_y2692.png", nil)
+			h.Handler()(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != tt.want {
+				t.Errorf("Content-Type = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

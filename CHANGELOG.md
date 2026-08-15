@@ -58,11 +58,38 @@
   Also fixes `types.FeatureCollection.Count()`, which omitted `Rivers` — so a tile whose only
   features were waterways counted as empty.
 
+- **tileformat:** add WebP tile output, on `generate` and `serve` alike, via `--image-format webp`.
+  New leaf package `internal/tileformat` owns format identity and encoding; PNG stays the default
+  at every layer, including the zero value of every options struct, so nothing changes for a run
+  that does not ask for WebP.
+
+  **The measured saving is 1.21×, not the 9.24× `docs/data-scaling-strategy.md` quotes.** That
+  figure is _lossy_ q80; the encoder here is `HugoSmits86/nativewebp`, which is VP8L — lossless —
+  and pure Go. Re-measured over the same 689 rendered tiles: mean 122,326 B → 101,181 B, ratio
+  0.827, consistent from z5 to z17, and larger than the PNG on none of them. The gap is the same
+  fact that produced "no cheap empty tiles": the texture and noise fill every pixel, so a lossless
+  codec has nothing to collapse. Encoding is ~4× slower than PNG (52 ms vs 14 ms per 256px tile),
+  which is under 10% of a ~576 ms render. The doc has been corrected in place.
+
+  Lossless was chosen for what it does not cost: no cgo, so `GOOS=js` and the cross-platform
+  release matrix keep building with no build tags and no vendored C, and there is no round-trip
+  damage to argue about. `Encoder` is an interface, so a lossy backend is one more implementation
+  if that trade is ever worth making.
+
+  Two correctness guards came with it. `mbtiles.New` now refuses to reopen a non-empty tileset
+  under a different format: it rewrites the metadata table on open, so it would otherwise relabel
+  a PNG tileset as WebP while `HasTile` — keyed on coordinates alone — skipped every existing tile
+  as done. And `serve` answers only its configured extension, 404ing the other rather than serving
+  one format's bytes under the other's name, which every cache downstream would then remember.
+
+  `convert` detects the format from the folder instead of taking a flag, and refuses a folder
+  holding both, since one MBTiles file records exactly one format.
+
 ### Documentation
 
 - **scaling:** add `docs/data-scaling-strategy.md`, closing PLAN.md § 5.1. Measured rather than
   assumed: the Overpass fetch is ~71% of per-tile wall clock; WebP q80 is a 9.2× reduction over
-  PNG; and there are no cheap empty tiles — a Sahara tile with zero OSM features still costs
+  PNG (the encoder that later shipped is lossless and measures 1.21×); and there are no cheap empty tiles — a Sahara tile with zero OSM features still costs
   108 KB. Records why vector tile input is rejected (MVT's pre-clipping reintroduces the exact
   artifact `out geom(bbox)` clipping was abandoned for) and what the three tiers of a global
   rollout would actually cost.

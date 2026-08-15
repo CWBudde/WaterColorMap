@@ -20,6 +20,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/renderer"
 	"github.com/cwbudde/watercolormap/internal/texture"
 	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/tileformat"
 	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/cwbudde/watercolormap/internal/watercolor"
 )
@@ -85,17 +86,27 @@ type GeneratorOptions struct {
 	Watercolor *watercolor.Overrides
 
 	// PNGCompression controls PNG encoding. Supported values:
-	// "default", "speed", "best", "none".
+	// "default", "speed", "best", "none". Ignored unless ImageFormat is PNG.
 	PNGCompression string
 
 	// FolderStructure controls file naming for folder format. Supported values:
-	// "flat" (z{z}_x{x}_y{y}.png), "nested" ({z}/{x}/{y}.png).
+	// "flat" (z{z}_x{x}_y{y}.{ext}), "nested" ({z}/{x}/{y}.{ext}).
 	FolderStructure string
+
+	// ImageFormat selects the tile image encoding. The zero value is PNG, so
+	// every existing construction site keeps its behaviour. It is resolved into
+	// a tileformat.Encoder in NewGenerator, which is where an unusable format
+	// fails — at startup, not at tile 5000.
+	ImageFormat tileformat.Format
 
 	// Ocean points the ocean pass at the processed OSM water polygons.
 	// The zero value disables it, and the pipeline then behaves exactly as it
 	// did before ocean rendering existed.
 	Ocean renderer.OceanConfig
+
+	// WebPEffort is nativewebp's compression level (0-6). Zero means the
+	// package default. Ignored unless ImageFormat is WebP.
+	WebPEffort int
 }
 
 // TileWriter writes tile data to a storage backend.
@@ -124,10 +135,13 @@ type dataSourceWithBounds interface {
 
 // Generator wires datasource, rendering, watercolor, and compositing into a single step.
 type Generator struct {
-	ds         DataSource
-	textures   map[geojson.LayerType]image.Image
-	logger     *slog.Logger
-	tuner      *watercolor.Tuner
+	ds       DataSource
+	textures map[geojson.LayerType]image.Image
+	logger   *slog.Logger
+	tuner    *watercolor.Tuner
+	// enc is resolved once in NewGenerator and is never nil afterwards, so
+	// the per-tile path carries no format branching at all.
+	enc        tileformat.Encoder
 	stylesDir  string
 	outputDir  string
 	options    GeneratorOptions
@@ -147,6 +161,15 @@ func NewGenerator(ds DataSource, stylesDir, texturesDir, outputDir string, tileS
 		return nil, err
 	}
 
+	enc, err := tileformat.NewEncoder(tileformat.EncoderOptions{
+		Format:         opts.ImageFormat,
+		PNGCompression: opts.PNGCompression,
+		WebPEffort:     opts.WebPEffort,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("invalid tile image format: %w", err)
+	}
+
 	// Validate and precompute here, not per tile: an invalid config should stop
 	// the run before the first Overpass request, and tinting a texture is an
 	// allocation we do exactly once.
@@ -160,6 +183,7 @@ func NewGenerator(ds DataSource, stylesDir, texturesDir, outputDir string, tileS
 		stylesDir:  stylesDir,
 		outputDir:  outputDir,
 		textures:   textures,
+		enc:        enc,
 		tileSize:   tileSize,
 		seed:       seed,
 		keepLayers: keepLayers,
@@ -191,8 +215,7 @@ func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, fo
 
 	// Both derived from one place, so TileExists cannot come to disagree with
 	// the check below about which file this tile is.
-	finalPath := g.tilePath(coords, suffix)
-	tileDir := filepath.Dir(finalPath)
+	finalPath, tileDir := g.TilePath(coords, suffix)
 
 	if !force && g.tileExists(coords, finalPath) {
 		g.log().Info("Tile already exists; skipping", "coords", coords.String(), "path", finalPath)
@@ -372,21 +395,8 @@ func (g *Generator) TileSize() int {
 // whenever it cannot tell, so acting on it can never skip a tile that Generate
 // would have rendered.
 func (g *Generator) TileExists(coords tile.Coords, filenameSuffix string) bool {
-	return g.tileExists(coords, g.tilePath(coords, strings.TrimSpace(filenameSuffix)))
-}
-
-// tilePath returns where this generator writes the given tile. suffix is "" or
-// "@2x".
-func (g *Generator) tilePath(coords tile.Coords, suffix string) string {
-	if g.options.FolderStructure == "nested" {
-		// Nested structure: {z}/{x}/{y}.png
-		return filepath.Join(g.outputDir,
-			fmt.Sprintf("%d", coords.Z),
-			fmt.Sprintf("%d", coords.X),
-			fmt.Sprintf("%d%s.png", coords.Y, suffix))
-	}
-	// Flat structure (default): z{z}_x{x}_y{y}.png
-	return filepath.Join(g.outputDir, fmt.Sprintf("%s%s.png", coords.String(), suffix))
+	finalPath, _ := g.TilePath(coords, strings.TrimSpace(filenameSuffix))
+	return g.tileExists(coords, finalPath)
 }
 
 // BandFetchBounds returns the bounding box that covers every given tile's own
@@ -455,6 +465,32 @@ func (g *Generator) GenerateWithPrefetched(
 	data *types.TileData,
 ) (string, string, error) {
 	return g.GenerateWithData(ctx, coords, force, filenameSuffix, nil, data)
+}
+
+// Format returns the image format this generator writes.
+func (g *Generator) Format() tileformat.Format {
+	return g.enc.Format()
+}
+
+// TilePath returns where this generator writes the given tile, and the
+// directory that has to exist for it. suffix is "" or "@2x".
+//
+// Exported because the tile server needs to name the very file the generator is
+// about to write. Having both derive the name from one function is what keeps a
+// format or layout change from producing a file the reader never looks for.
+func (g *Generator) TilePath(coords tile.Coords, suffix string) (finalPath, tileDir string) {
+	ext := g.enc.Format().Ext()
+
+	if g.options.FolderStructure == "nested" {
+		// Nested structure: {z}/{x}/{y}.{ext}
+		tileDir = filepath.Join(g.outputDir,
+			fmt.Sprintf("%d", coords.Z),
+			fmt.Sprintf("%d", coords.X))
+		return filepath.Join(tileDir, fmt.Sprintf("%d%s.%s", coords.Y, suffix, ext)), tileDir
+	}
+
+	// Flat structure (default): z{z}_x{x}_y{y}{suffix}.{ext}
+	return filepath.Join(g.outputDir, coords.FileName(suffix, ext)), g.outputDir
 }
 
 // renderLayersWithData handles setup, data fetching (if needed), and rendering of all map layers.
@@ -982,26 +1018,11 @@ func (g *Generator) compositeAndWrite(
 	}
 	dc.Capture("21_combined_final", "Final tile (after crop)", final, 21)
 
-	// Configure PNG encoder
-	enc := png.Encoder{CompressionLevel: png.DefaultCompression}
-	switch strings.ToLower(strings.TrimSpace(g.options.PNGCompression)) {
-	case "", "default":
-		enc.CompressionLevel = png.DefaultCompression
-	case "speed", "fast", "best-speed":
-		enc.CompressionLevel = png.BestSpeed
-	case "best", "best-compression":
-		enc.CompressionLevel = png.BestCompression
-	case "none", "no", "nocompression", "no-compression":
-		enc.CompressionLevel = png.NoCompression
-	default:
-		enc.CompressionLevel = png.DefaultCompression
-	}
-
 	// Use TileWriter if provided, otherwise write to disk
 	if g.options.TileWriter != nil {
 		// Encode to bytes buffer
 		var buf bytes.Buffer
-		if err := enc.Encode(&buf, final); err != nil {
+		if err := g.enc.Encode(&buf, final); err != nil {
 			return "", "", fmt.Errorf("failed to encode tile: %w", err)
 		}
 
@@ -1016,21 +1037,21 @@ func (g *Generator) compositeAndWrite(
 
 	// Traditional file output
 	g.log().Info("Writing final tile", "coords", coords.String(), "path", finalPath)
-	if err := encodePNGAtomic(&enc, finalPath, final); err != nil {
+	if err := encodeTileAtomic(g.enc, finalPath, final); err != nil {
 		return "", "", err
 	}
 
 	return finalPath, layerDirReturn, nil
 }
 
-// encodePNGAtomic encodes img to a temporary file next to path and renames it
+// encodeTileAtomic encodes img to a temporary file next to path and renames it
 // into place.
 //
 // Writing straight to the final path meant an interrupted or timed-out encode
-// left a truncated PNG behind, which the tile cache then served as a permanently
-// broken image. The rename is atomic within the directory, so a tile file either
-// does not exist or is complete.
-func encodePNGAtomic(enc *png.Encoder, path string, img image.Image) error {
+// left a truncated image behind, which the tile cache then served as a
+// permanently broken tile. The rename is atomic within the directory, so a tile
+// file either does not exist or is complete.
+func encodeTileAtomic(enc tileformat.Encoder, path string, img image.Image) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
 	if err != nil {
 		return fmt.Errorf("failed to create tile file: %w", err)

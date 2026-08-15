@@ -79,6 +79,12 @@ func New(path string, metadata Metadata) (*Writer, error) {
 		return nil, errors.Join(fmt.Errorf("failed to create schema: %w", err), db.Close())
 	}
 
+	// Before insertMetadata, which empties and rewrites the metadata table and
+	// would otherwise relabel an existing tileset on the way past.
+	if err := checkFormatMatchesExistingTiles(db, metadata.Format); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+
 	// Insert metadata
 	if err := insertMetadata(db, metadata); err != nil {
 		return nil, errors.Join(fmt.Errorf("failed to insert metadata: %w", err), db.Close())
@@ -99,6 +105,58 @@ func New(path string, metadata Metadata) (*Writer, error) {
 		metadata:  metadata,
 		gzipTiles: strings.EqualFold(metadata.Format, FormatPBF),
 	}, nil
+}
+
+// ErrFormatMismatch reports an attempt to write tiles into a tileset that
+// already holds tiles in a different format.
+var ErrFormatMismatch = errors.New("mbtiles: tileset already contains tiles in a different format")
+
+// checkFormatMatchesExistingTiles refuses to reopen a non-empty tileset under a
+// different tile format.
+//
+// This guards a genuinely nasty interaction. New runs insertMetadata, which
+// DELETEs the metadata table and rewrites it, so reopening a PNG tileset as
+// WebP would silently relabel the file `format=webp`. HasTile is keyed on z/x/y
+// alone and knows nothing about formats, so the resume check would then skip
+// every existing PNG tile as "already done". The result is a database full of
+// PNGs whose metadata says WebP, served with the wrong Content-Type, with no
+// error anywhere — the "a false skip leaves a permanent hole" failure mode in
+// its worst form.
+//
+// An empty tileset may change format freely: there is nothing to be
+// inconsistent with. --force deliberately does not bypass this, because force
+// means "render these tiles again", not "reinterpret the bytes already in the
+// file".
+func checkFormatMatchesExistingTiles(db *sql.DB, format string) error {
+	if format == "" {
+		return nil
+	}
+
+	var existing string
+	err := db.QueryRow("SELECT value FROM metadata WHERE name = 'format'").Scan(&existing)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil // fresh file, or one that never recorded a format
+	case err != nil:
+		return fmt.Errorf("failed to read existing tileset format: %w", err)
+	}
+
+	if existing == "" || strings.EqualFold(existing, format) {
+		return nil
+	}
+
+	var hasTiles bool
+	if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM tiles LIMIT 1)").Scan(&hasTiles); err != nil {
+		return fmt.Errorf("failed to check for existing tiles: %w", err)
+	}
+	if !hasTiles {
+		return nil
+	}
+
+	return fmt.Errorf("%w: it holds %s tiles, and this run writes %s. "+
+		"Write to a different file, or delete this one and start over "+
+		"(--force re-renders tiles, it does not convert them)",
+		ErrFormatMismatch, existing, format)
 }
 
 // createSchema creates the MBTiles database schema.

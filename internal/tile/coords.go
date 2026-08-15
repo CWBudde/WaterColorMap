@@ -24,7 +24,18 @@ func (c Coords) String() string {
 
 // Path returns the file path for this tile
 func (c Coords) Path(extension string) string {
-	return fmt.Sprintf("%s.%s", c.String(), extension)
+	return c.FileName("", extension)
+}
+
+// FileName returns the flat-layout file name for this tile:
+// "z{z}_x{x}_y{y}{suffix}.{extension}", where suffix is "" or "@2x".
+//
+// The suffix sits between the coordinates and the extension, which is why Path
+// could not simply be reused once the extension stopped always being "png".
+// Both the pipeline (writing) and the tile server (reading, and building
+// on-demand paths) go through here, so the two cannot drift.
+func (c Coords) FileName(suffix, extension string) string {
+	return fmt.Sprintf("%s%s.%s", c.String(), suffix, extension)
 }
 
 // Tile returns the maptile.Tile for this coordinate

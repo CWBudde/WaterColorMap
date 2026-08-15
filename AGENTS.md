@@ -29,6 +29,7 @@ Module: `github.com/cwbudde/watercolormap` (Go 1.25, cgo — Mapnik 3.1+ require
 | `internal/worker`               | Batch worker pool and progress reporting                               |
 | `internal/tile`, `internal/geo` | Tile coords and Web-Mercator math (`geo` is a leaf package)            |
 | `internal/mbtiles`              | MBTiles reader/writer                                                  |
+| `internal/tileformat`           | Tile image format identity (ext, MIME) and encoders (PNG, WebP)        |
 | `internal/safe`                 | Panic recovery helpers for background work                             |
 | `assets/`                       | Mapnik layer styles and watercolor textures                            |
 

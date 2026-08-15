@@ -103,7 +103,21 @@ overpass:
 #   force: false # regenerate even if the tile already exists
 #   tile_size: 256 # 512 for Hi-DPI base tiles
 #   hidpi: false # additionally render @2x tiles
-#   png_compression: "default" # default, speed, best, none
+#   # Tile image encoding: png or webp.
+#   #
+#   # WebP here is *lossless* (VP8L, pure Go, no cgo). Measured over the 689
+#   # rendered tiles in tiles/: 1.21x smaller than PNG, consistent across every
+#   # zoom, and never larger on any tile. It is not the 9.24x quoted in
+#   # docs/data-scaling-strategy.md -- that figure is lossy q80, and these tiles
+#   # are the worst case for a lossless codec because the texture and noise fill
+#   # every pixel. Encoding is also ~4x slower than PNG (about 52 ms on a 256px
+#   # tile, against a ~576 ms render).
+#   image_format: "png"
+#   png_compression: "default" # default, speed, best, none; ignored for webp
+#   # WebP encoder effort, 0-6. Higher is smaller and slower, with little left
+#   # to gain above 4: effort 0 gives 1.16x at 29 ms, 4 gives 1.20x at 52 ms,
+#   # 6 gives 1.21x at 56 ms. 0 means "use the default", which is 4.
+#   webp_effort: 0
 #   seed: 1337 # deterministic noise/texture alignment
 #   keep_layers: false # keep intermediate layer PNGs for debugging
 #
@@ -135,9 +149,9 @@ overpass:
 #   band_timeout: 180
 #
 #   # Output
-#   format: "folder" # folder or mbtiles
+#   format: "folder" # output container: folder or mbtiles (see image_format)
 #   output_file: "" # required for format: mbtiles
-#   # folder_structure: flat = z{z}_x{x}_y{y}.png, nested = {z}/{x}/{y}.png
+#   # folder_structure: flat = z{z}_x{x}_y{y}.{ext}, nested = {z}/{x}/{y}.{ext}
 #   folder_structure: "flat"
 
 # --- serve -----------------------------------------------------------------
@@ -160,7 +174,12 @@ overpass:
 #
 #   # Rendering (same meaning as under generate)
 #   tile_size: 256
+#   # The server renders and serves exactly one format. A request for the other
+#   # extension is a 404 -- it never transcodes, and never serves one format's
+#   # bytes under the other's name.
+#   image_format: "png"
 #   png_compression: "default"
+#   webp_effort: 0
 #   seed: 1337
 #   keep_layers: false
 #

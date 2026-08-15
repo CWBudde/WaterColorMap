@@ -162,7 +162,9 @@ Three things the work measured that change decisions elsewhere in this plan:
   6 runs, cross-checked against a pass-through proxy). 5.11's optimisation roadmap targets the
   ~18% render slice. That does not make 5.11 wrong, but the source side is where a bulk run's
   time actually goes — hence the response cache below.
-- **WebP q80 is a 9.2× reduction** (124 KB → 13.4 KB mean over 20 tiles, z5–z17; damage ~4/255
+- **WebP q80 is a 9.2× reduction** — but see 5.1a: the encoder that shipped is _lossless_
+  (pure Go, no cgo) and measures **1.21×** on the same tiles. The lossy lever remains open.
+  Original measurement: (124 KB → 13.4 KB mean over 20 tiles, z5–z17; damage ~4/255
   mean per channel, and the tiles are label-free by policy so there is no text to smear).
   This is a larger storage lever than any choice of zoom ceiling.
 - **There are no cheap empty tiles in PNG, confirmed outside the city**: a Sahara tile with
@@ -205,10 +207,27 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       `MultiOverpassDataSource` builds, with no dependency release needed. Overridable via
       `overpass.user_agent`, globally or per server. The public API is now a usable fallback,
       which is what the routing recommendations assumed.
-- [ ] **[P1]** Evaluate WebP output end to end (9.2× measured). `internal/mbtiles/types.go:18`
-      already lists `webp` as a format string; nothing produces one. Needs a format flag, TileJSON
-      plumbing (`tilejson.go:36` hardcodes `png` as "the only tile format this project produces"),
-      and a decision on whether to keep PNG as an option.
+- [x] **[P1]** WebP output end to end — `--image-format webp` on `generate` and `serve`, with
+      `internal/tileformat` owning format identity and encoding, and PNG kept as the default
+      everywhere.
+
+      **The 9.2× did not survive contact with the encoder.** That figure is _lossy_ q80; the
+      encoder chosen here is pure-Go `nativewebp`, which is VP8L, i.e. lossless. Re-measured over
+      the same 689 tiles: **1.21×** (122,326 B → 101,181 B), consistent z5–z17, never larger on
+      any tile, and ~4× slower to encode. The gap is the same fact as "no cheap empty tiles" —
+      the texture and noise fill every pixel, so there is nothing for a lossless codec to
+      collapse. `docs/data-scaling-strategy.md` § 3 is corrected in place rather than left to
+      mislead.
+
+      Lossless bought the absence of cgo: `GOOS=js` and the release matrix build with no build
+      tags. **The lossy lever is still open and still worth ~9×** — `Encoder` is an interface, so
+      it is one more implementation plus a decision about round-trip damage.
+
+      Two guards came with it, both of the "false skip leaves a permanent hole" family: `mbtiles`
+      refuses to reopen a non-empty tileset under a different format (it rewrites metadata on
+      open, and `HasTile` is format-blind), and `serve` 404s the extension it is not configured
+      for rather than serving one format's bytes under the other's name.
+
 - [ ] **[P2]** Overpass failover. Routing takes the first coverage match and returns its error
       verbatim (`internal/datasource/overpass.go:609-627`), so one flaky container fails every tile
       in its box without ever trying the nil-coverage fallback. Also order-dependent: a nested

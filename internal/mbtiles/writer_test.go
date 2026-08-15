@@ -3,11 +3,13 @@ package mbtiles
 import (
 	"bytes"
 	"database/sql"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -685,6 +687,102 @@ func TestWriter_HasTileMatchesReader(t *testing.T) {
 
 		if has != readable {
 			t.Errorf("HasTile(%v) = %v but ReadTile readable = %v (read err: %v)", p, has, readable, readErr)
+		}
+	}
+}
+
+// TestNewRejectsFormatChange guards the nastiest interaction in the tile-format
+// work. New calls insertMetadata, which DELETEs and rewrites the metadata
+// table, so reopening a PNG tileset as WebP would silently relabel the file.
+// HasTile is keyed on z/x/y alone, so the resume check would then skip every
+// existing PNG tile as "already done" — leaving a database full of PNGs whose
+// metadata says WebP, with no error anywhere.
+func TestNewRejectsFormatChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tiles.mbtiles")
+
+	w, err := New(path, Metadata{Name: "test", Format: "png"})
+	if err != nil {
+		t.Fatalf("create png tileset: %v", err)
+	}
+	if err := w.WriteTile(13, 4317, 2692, []byte("png bytes")); err != nil {
+		t.Fatalf("write tile: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	_, err = New(path, Metadata{Name: "test", Format: "webp"})
+	if err == nil {
+		t.Fatal("reopening a png tileset as webp should be refused")
+	}
+	if !errors.Is(err, ErrFormatMismatch) {
+		t.Errorf("expected ErrFormatMismatch, got: %v", err)
+	}
+	// The message has to name both formats, or the operator cannot tell what
+	// happened.
+	for _, want := range []string{"png", "webp"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+
+	// And the file must be untouched: still png, still holding its tile.
+	r, err := OpenReader(path)
+	if err != nil {
+		t.Fatalf("reopen for reading: %v", err)
+	}
+	defer r.Close() //nolint:errcheck // test
+	meta, err := r.Metadata()
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if meta.Format != "png" {
+		t.Errorf("format = %q, want png — the refused open still relabelled the file", meta.Format)
+	}
+}
+
+// TestNewAllowsFormatChangeOnEmptyTileset: with no tiles there is nothing to be
+// inconsistent with, so the format may change freely.
+func TestNewAllowsFormatChangeOnEmptyTileset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tiles.mbtiles")
+
+	w, err := New(path, Metadata{Name: "test", Format: "png"})
+	if err != nil {
+		t.Fatalf("create png tileset: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	w2, err := New(path, Metadata{Name: "test", Format: "webp"})
+	if err != nil {
+		t.Fatalf("an empty tileset should accept a format change: %v", err)
+	}
+	if err := w2.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+// TestNewAllowsSameFormatReopen is the resume path, and must keep working.
+func TestNewAllowsSameFormatReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tiles.mbtiles")
+
+	for _, format := range []string{"png", "PNG"} {
+		w, err := New(path, Metadata{Name: "test", Format: format})
+		if err != nil {
+			t.Fatalf("reopen with format %q: %v", format, err)
+		}
+		if err := w.WriteTile(13, 4317, 2692, []byte("png bytes")); err != nil {
+			t.Fatalf("write tile: %v", err)
+		}
+		if err := w.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("close: %v", err)
 		}
 	}
 }

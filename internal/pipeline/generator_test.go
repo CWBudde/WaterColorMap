@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cwbudde/watercolormap/internal/tile"
+	"github.com/cwbudde/watercolormap/internal/tileformat"
 )
 
 // nonProbingWriter is a TileWriter that cannot answer existence questions —
@@ -99,5 +101,112 @@ func TestTileExists(t *testing.T) {
 				t.Errorf("tileExists = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// newFormatGenerator builds a generator far enough to exercise TilePath, which
+// needs a resolved encoder but no textures or datasource.
+func newFormatGenerator(t *testing.T, outputDir, structure string, format tileformat.Format) *Generator {
+	t.Helper()
+
+	enc, err := tileformat.NewEncoder(tileformat.EncoderOptions{Format: format})
+	if err != nil {
+		t.Fatalf("NewEncoder(%v): %v", format, err)
+	}
+	return &Generator{
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		outputDir: outputDir,
+		enc:       enc,
+		options:   GeneratorOptions{FolderStructure: structure},
+	}
+}
+
+// TestTilePath pins the on-disk naming across both layouts, both formats and
+// the @2x suffix. The tile server derives its own paths from this same method,
+// so a mistake here means the reader looks for a file the writer never wrote.
+func TestTilePath(t *testing.T) {
+	coords := tile.Coords{Z: 13, X: 4317, Y: 2692}
+
+	tests := []struct {
+		name      string
+		structure string
+		format    tileformat.Format
+		suffix    string
+		wantPath  string
+		wantDir   string
+	}{
+		{"flat png", "flat", tileformat.PNG, "", "z13_x4317_y2692.png", ""},
+		{"flat png @2x", "flat", tileformat.PNG, "@2x", "z13_x4317_y2692@2x.png", ""},
+		{"flat webp", "flat", tileformat.WebP, "", "z13_x4317_y2692.webp", ""},
+		{"flat webp @2x", "flat", tileformat.WebP, "@2x", "z13_x4317_y2692@2x.webp", ""},
+		{"nested png", "nested", tileformat.PNG, "", "13/4317/2692.png", "13/4317"},
+		{"nested png @2x", "nested", tileformat.PNG, "@2x", "13/4317/2692@2x.png", "13/4317"},
+		{"nested webp", "nested", tileformat.WebP, "", "13/4317/2692.webp", "13/4317"},
+		{"nested webp @2x", "nested", tileformat.WebP, "@2x", "13/4317/2692@2x.webp", "13/4317"},
+		// The zero format has to keep meaning PNG: it is what every
+		// pre-existing construction site passes.
+		{"unset format is png", "flat", tileformat.Format(""), "", "z13_x4317_y2692.png", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			g := newFormatGenerator(t, root, tt.structure, tt.format)
+
+			gotPath, gotDir := g.TilePath(coords, tt.suffix)
+
+			if want := filepath.Join(root, tt.wantPath); gotPath != want {
+				t.Errorf("path = %q, want %q", gotPath, want)
+			}
+			if want := filepath.Join(root, tt.wantDir); gotDir != want {
+				t.Errorf("dir = %q, want %q", gotDir, want)
+			}
+		})
+	}
+}
+
+// TestExistingPNGDoesNotSatisfyAWebPRun guards resume correctness across a
+// format change. It holds because the extension is part of the path, but it is
+// pinned anyway: a false skip leaves a permanent hole, and this is exactly the
+// shape of change that could introduce one.
+func TestExistingPNGDoesNotSatisfyAWebPRun(t *testing.T) {
+	root := t.TempDir()
+	coords := tile.Coords{Z: 13, X: 4317, Y: 2692}
+
+	pngGen := newFormatGenerator(t, root, "flat", tileformat.PNG)
+	pngPath, _ := pngGen.TilePath(coords, "")
+	if err := os.WriteFile(pngPath, []byte("a rendered png tile"), 0o600); err != nil {
+		t.Fatalf("write png tile: %v", err)
+	}
+
+	if !pngGen.tileExists(coords, pngPath) {
+		t.Fatal("the png run should consider its own tile present")
+	}
+
+	webpGen := newFormatGenerator(t, root, "flat", tileformat.WebP)
+	webpPath, _ := webpGen.TilePath(coords, "")
+	if webpPath == pngPath {
+		t.Fatal("the webp run must not target the same file as the png run")
+	}
+	if webpGen.tileExists(coords, webpPath) {
+		t.Error("an existing PNG must not let a WebP run skip the tile")
+	}
+}
+
+func TestNewGeneratorRejectsUnknownImageFormat(t *testing.T) {
+	_, err := NewGenerator(
+		nil,
+		filepath.Join("..", "..", "assets", "styles"),
+		filepath.Join("..", "..", "assets", "textures"),
+		t.TempDir(),
+		256, 1337, false,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		GeneratorOptions{ImageFormat: tileformat.Format("jpeg")},
+	)
+	if err == nil {
+		t.Fatal("expected an error for an unsupported image format")
+	}
+	if !strings.Contains(err.Error(), "tile image format") {
+		t.Errorf("error should name the offending setting, got: %v", err)
 	}
 }

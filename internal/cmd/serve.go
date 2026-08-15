@@ -20,6 +20,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/server"
+	"github.com/cwbudde/watercolormap/internal/tileformat"
 	"github.com/cwbudde/watercolormap/internal/tilejson"
 	"github.com/cwbudde/watercolormap/internal/types"
 )
@@ -46,7 +47,9 @@ func init() {
 	serveCmd.Flags().String("cache-control", "no-store", "Cache-Control header for served tiles")
 
 	serveCmd.Flags().Int("tile-size", 256, "Base tile size in pixels (256; @2x requests render 512)")
-	serveCmd.Flags().String("png-compression", "default", "PNG compression (default, speed, best, none)")
+	serveCmd.Flags().String("image-format", "png", "Tile image encoding: png or webp (webp is lossless, ~1.2x smaller)")
+	serveCmd.Flags().String("png-compression", "default", "PNG compression (default, speed, best, none); ignored for --image-format=webp")
+	serveCmd.Flags().Int("webp-effort", 0, "WebP compression effort 0-6 (0 = fastest, default 4); ignored for --image-format=png")
 	serveCmd.Flags().Int64("seed", 1337, "Deterministic seed for noise/texture alignment")
 	serveCmd.Flags().Bool("keep-layers", false, "Keep intermediate rendered layer PNGs for debugging")
 	serveCmd.Flags().Int("overpass-workers", 4, "Number of parallel Overpass API requests (2-4 recommended for public API)")
@@ -79,7 +82,9 @@ func init() {
 	mustBind("serve.cache_control", "cache-control")
 
 	mustBind("serve.tile_size", "tile-size")
+	mustBind("serve.image_format", "image-format")
 	mustBind("serve.png_compression", "png-compression")
+	mustBind("serve.webp_effort", "webp-effort")
 	mustBind("serve.seed", "seed")
 	mustBind("serve.keep_layers", "keep-layers")
 	mustBind("serve.overpass_workers", "overpass-workers")
@@ -101,10 +106,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	addr := viper.GetString("serve.addr")
-	tilesDir := viper.GetString("serve.tiles_dir")
-	if tilesDir == "" {
-		tilesDir = viper.GetString("output-dir")
-	}
+	tilesDir := serveTilesDir()
 	demoDir := viper.GetString("serve.demo_dir")
 	mbtilesPath := viper.GetString("serve.mbtiles")
 	corsOrigin := viper.GetString("serve.cors_origin")
@@ -115,7 +117,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	cacheControl := viper.GetString("serve.cache_control")
 
 	baseTileSize := viper.GetInt("serve.tile_size")
-	pngCompression := viper.GetString("serve.png_compression")
+	encoding, err := serveEncoding()
+	if err != nil {
+		return err
+	}
 	seed := viper.GetInt64("serve.seed")
 	keepLayers := viper.GetBool("serve.keep_layers")
 	overpassWorkers := viper.GetInt("serve.overpass_workers")
@@ -165,7 +170,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// TileJSON. Registered as its own exact pattern so it wins over the
 	// "/tiles/" subtree below, whose handler would reject it as a malformed
 	// tile path.
-	tileJSONHandler, err := newTileJSONHandler(mbtilesPath, proxyPolicy)
+	tileJSONHandler, err := newTileJSONHandler(mbtilesPath, encoding.format, proxyPolicy)
 	if err != nil {
 		return err
 	}
@@ -217,7 +222,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 			BaseTileSize:             baseTileSize,
 			Seed:                     seed,
 			KeepLayers:               keepLayers,
-			PNGCompression:           pngCompression,
+			PNGCompression:           encoding.pngCompression,
+			ImageFormat:              encoding.format,
+			WebPEffort:               encoding.webpEffort,
 			GenerateMissing:          generateMissing,
 			DisableCache:             disableCache,
 			MaxConcurrentGenerations: maxConc,
@@ -261,10 +268,46 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return runHTTPServer(srv, shutdownTimeout, logger)
 }
 
-// serveTileTemplate is the tile URL template the server exposes. Both tile
-// backends parse the flat "z{z}_x{x}_y{y}.png" form; the nested layout that
-// `generate --folder-structure=nested` can write is not served.
-const serveTileTemplate = "/tiles/z{z}_x{x}_y{y}.png"
+// serveTilesDir is the directory tiles are read from and written to, falling
+// back to the global output directory when serve.tiles_dir is unset.
+func serveTilesDir() string {
+	if dir := viper.GetString("serve.tiles_dir"); dir != "" {
+		return dir
+	}
+	return viper.GetString("output-dir")
+}
+
+// tileEncoding is the resolved image-encoding configuration for a serve run.
+type tileEncoding struct {
+	pngCompression string
+	format         tileformat.Format
+	webpEffort     int
+}
+
+// serveEncoding reads and validates the image encoding settings.
+//
+// Split out of runServe so an unusable format fails at startup, before the
+// listener and the datasource are built, without pushing runServe over the
+// cyclomatic complexity budget.
+func serveEncoding() (tileEncoding, error) {
+	format, err := tileformat.Parse(viper.GetString("serve.image_format"))
+	if err != nil {
+		return tileEncoding{}, err
+	}
+	return tileEncoding{
+		pngCompression: viper.GetString("serve.png_compression"),
+		format:         format,
+		webpEffort:     viper.GetInt("serve.webp_effort"),
+	}, nil
+}
+
+// serveTileTemplate is the tile URL template the server exposes for the given
+// image format. Both tile backends parse the flat "z{z}_x{x}_y{y}.{ext}" form;
+// the nested layout that `generate --folder-structure=nested` can write is not
+// served.
+func serveTileTemplate(format tileformat.Format) string {
+	return "/tiles/z{z}_x{x}_y{y}" + format.DotExt()
+}
 
 // newTileJSONHandler builds the /tiles/tilejson.json handler.
 //
@@ -273,13 +316,26 @@ const serveTileTemplate = "/tiles/z{z}_x{x}_y{y}.png"
 // whatever tile is asked for, so nothing in the serve path knows the extent of
 // the set -- and the document falls back to the whole world at
 // tilejson.DefaultMinZoom..DefaultMaxZoom.
-func newTileJSONHandler(mbtilesPath string, proxy server.ProxyPolicy) (http.Handler, error) {
+//
+// The advertised extension follows the *file* for MBTiles and the configured
+// format for folder serving. Taking it from the flag in both cases would
+// advertise URLs an MBTiles handler does not answer.
+func newTileJSONHandler(mbtilesPath string, format tileformat.Format, proxy server.ProxyPolicy) (http.Handler, error) {
 	if mbtilesPath == "" {
-		doc := tilejson.New(tilejson.Options{Tiles: []string{serveTileTemplate}})
+		doc := tilejson.New(tilejson.Options{
+			Tiles:  []string{serveTileTemplate(format)},
+			Format: format.String(),
+		})
 		return tilejson.Handler(doc, logger, proxy.TrustsPeer), nil
 	}
 
-	doc, err := tilejson.FromMBTilesFile(mbtilesPath, serveTileTemplate)
+	doc, err := tilejson.FromMBTilesFileTemplate(mbtilesPath, func(fileFormat string) []string {
+		f, parseErr := tileformat.Parse(fileFormat)
+		if parseErr != nil {
+			f = tileformat.PNG
+		}
+		return []string{serveTileTemplate(f)}
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to build TileJSON from MBTiles: %w", err)
 	}
