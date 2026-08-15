@@ -50,7 +50,7 @@ func init() {
 	// Common flags
 	generateCmd.Flags().Bool("force", false, "Re-render tiles that already exist, for folder and MBTiles output alike (without it, existing tiles are skipped so a run can resume)")
 	generateCmd.Flags().Int("tile-size", 256, "Tile size in pixels (typically 256 or 512 for Hi-DPI)")
-	generateCmd.Flags().Bool("hidpi", false, "Also generate a 2x (@2x) tile alongside the base tile")
+	generateCmd.Flags().Bool("hidpi", false, "Also generate a 2x (@2x) tile alongside the base tile (single-tile mode only; `serve` produces @2x on demand)")
 	generateCmd.Flags().String("image-format", "png", "Tile image encoding: png or webp (webp is lossless, ~1.2x smaller)")
 	generateCmd.Flags().String("png-compression", "default", "PNG compression (default, speed, best, none); ignored for --image-format=webp")
 	generateCmd.Flags().Int("webp-effort", tileformat.DefaultWebPEffort, "WebP compression effort 0-6 (0 = fastest); ignored for --image-format=png")
@@ -178,6 +178,17 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	// Determine mode: batch (bbox provided) or single tile
 	if bbox != "" {
+		// Erroring rather than ignoring is deliberate. Anyone who scripted
+		// `--bbox --hidpi` would otherwise get a run that looks entirely
+		// successful while producing half the tiles they expect, and would find
+		// out only when a @2x request 404s in production.
+		if hidpi {
+			return fmt.Errorf("--hidpi is not supported for batch generation: " +
+				"pre-rendering @2x doubles compute and quadruples storage for the whole run. " +
+				"`watercolormap serve` generates @2x tiles on demand instead; " +
+				"--hidpi still works for a single tile")
+		}
+
 		return runBatchGenerate(&batchOptions{
 			bboxStr:         bbox,
 			outputDir:       outputDir,
@@ -195,7 +206,6 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 			tileSize:        tileSize,
 			showProgress:    showProgress,
 			force:           force,
-			hidpi:           hidpi,
 			keepLayers:      keepLayers,
 			allowFailures:   allowFailures,
 			bandFetch:       bandFetch,
@@ -340,7 +350,7 @@ type batchOptions struct {
 	folderStructure string
 	imageFormat     tileformat.Format
 	// ocean is resolved in runBatchGenerate, not from a flag: it comes from the
-	// `ocean:` config block and is shared by the base and HiDPI generators.
+	// `ocean:` config block.
 	ocean renderer.OceanConfig
 	// band holds the validated band-fetching knobs; only read when bandFetch.
 	band          bandOptions
@@ -353,7 +363,6 @@ type batchOptions struct {
 	showProgress  bool
 	force         bool
 	bandFetch     bool
-	hidpi         bool
 	keepLayers    bool
 	allowFailures bool
 }
@@ -403,12 +412,12 @@ func runBatchGenerate(opts *batchOptions) error {
 		return err
 	}
 
-	// Create MBTiles writers if needed
-	mbtilesWriter, mbtilesWriterHiDPI, err := openMBTilesWriters(opts, bbox)
+	// Create the MBTiles writer if needed
+	mbtilesWriter, err := openMBTilesWriter(opts, bbox)
 	if err != nil {
 		return err
 	}
-	defer closeMBTilesWriters(mbtilesWriter, mbtilesWriterHiDPI)
+	defer closeMBTilesWriter(mbtilesWriter)
 
 	// Create generator with optional TileWriter
 	var tileWriter pipeline.TileWriter
@@ -434,18 +443,11 @@ func runBatchGenerate(opts *batchOptions) error {
 		return err
 	}
 
-	// Generate HiDPI tiles if requested
-	if opts.hidpi {
-		if err := runHiDPIBatch(ctx, opts, ds, tiles, mbtilesWriterHiDPI, wcOverrides); err != nil {
-			return err
-		}
-	}
-
 	if err := writeFolderTileJSON(opts, bbox); err != nil {
 		return err
 	}
 
-	return flushMBTilesWriters(opts, mbtilesWriter, mbtilesWriterHiDPI)
+	return flushMBTilesWriter(opts, mbtilesWriter)
 }
 
 // validateBatchZoom checks that the batch zoom range is usable.
@@ -480,18 +482,10 @@ func newTileDataSource(name string, allowEmpty bool) (pipeline.DataSource, error
 
 // logBatchStart reports what the batch run is about to do.
 func logBatchStart(opts *batchOptions, tileCount int) {
-	totalTiles := tileCount
-
-	// If hidpi, we'll generate 2x the tiles
-	if opts.hidpi {
-		totalTiles *= 2
-	}
-
 	logger.Info("Starting batch tile generation",
 		"bbox", opts.bboxStr,
 		"zoom_range", fmt.Sprintf("%d-%d", opts.zoomMin, opts.zoomMax),
 		"tiles", tileCount,
-		"total_with_hidpi", totalTiles,
 		"workers", opts.workers,
 		"output_dir", opts.outputDir,
 		"format", opts.format,
@@ -545,62 +539,43 @@ func writeFolderTileJSON(opts *batchOptions, bbox [4]float64) error {
 	return nil
 }
 
-// openMBTilesWriters creates the MBTiles writers for the run. It returns nil
-// writers when the output format is not MBTiles.
-func openMBTilesWriters(opts *batchOptions, bbox [4]float64) (base, hidpi *mbtiles.Writer, err error) {
+// openMBTilesWriter creates the MBTiles writer for the run. It returns a nil
+// writer when the output format is not MBTiles.
+func openMBTilesWriter(opts *batchOptions, bbox [4]float64) (*mbtiles.Writer, error) {
 	if opts.format != "mbtiles" {
-		return nil, nil, nil
+		return nil, nil
 	}
 
-	metadata := batchMetadata(opts, bbox)
-
-	base, err = mbtiles.New(opts.outputFile, metadata)
+	writer, err := mbtiles.New(opts.outputFile, batchMetadata(opts, bbox))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create MBTiles writer: %w", err)
+		return nil, fmt.Errorf("failed to create MBTiles writer: %w", err)
 	}
 
-	// Create separate writer for HiDPI tiles
-	if opts.hidpi {
-		hidpiFile := strings.TrimSuffix(opts.outputFile, ".mbtiles") + "@2x.mbtiles"
-		hidpi, err = mbtiles.New(hidpiFile, metadata)
-		if err != nil {
-			closeMBTilesWriters(base)
-			return nil, nil, fmt.Errorf("failed to create HiDPI MBTiles writer: %w", err)
-		}
-	}
-
-	logger.Info("MBTiles writers created", "base", opts.outputFile, "hidpi", opts.hidpi)
-	return base, hidpi, nil
+	logger.Info("MBTiles writer created", "output", opts.outputFile)
+	return writer, nil
 }
 
-// closeMBTilesWriters closes every non-nil writer, logging close failures.
-func closeMBTilesWriters(writers ...*mbtiles.Writer) {
-	for _, w := range writers {
-		if w == nil {
-			continue
-		}
-		if err := w.Close(); err != nil {
-			logger.Error("Failed to close MBTiles writer", "error", err)
-		}
+// closeMBTilesWriter closes the writer when it is in use, logging failures.
+func closeMBTilesWriter(w *mbtiles.Writer) {
+	if w == nil {
+		return
+	}
+	if err := w.Close(); err != nil {
+		logger.Error("Failed to close MBTiles writer", "error", err)
 	}
 }
 
-// flushMBTilesWriters flushes the MBTiles writers when they are in use.
-func flushMBTilesWriters(opts *batchOptions, base, hidpi *mbtiles.Writer) error {
-	if base == nil {
+// flushMBTilesWriter flushes the MBTiles writer when it is in use.
+func flushMBTilesWriter(opts *batchOptions, w *mbtiles.Writer) error {
+	if w == nil {
 		return nil
 	}
 
-	logger.Info("Flushing MBTiles databases...")
-	if err := base.Flush(); err != nil {
-		return fmt.Errorf("failed to flush base MBTiles: %w", err)
+	logger.Info("Flushing MBTiles database...")
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("failed to flush MBTiles: %w", err)
 	}
-	if hidpi != nil {
-		if err := hidpi.Flush(); err != nil {
-			return fmt.Errorf("failed to flush HiDPI MBTiles: %w", err)
-		}
-	}
-	logger.Info("MBTiles generation complete", "base", opts.outputFile)
+	logger.Info("MBTiles generation complete", "output", opts.outputFile)
 	return nil
 }
 
@@ -697,28 +672,6 @@ func failureError(failedCount int, kind string, allowFailures bool) error {
 		return nil
 	}
 	return fmt.Errorf("%d %s tiles failed to generate", failedCount, kind)
-}
-
-// runHiDPIBatch generates the @2x variants of the given tiles.
-func runHiDPIBatch(ctx context.Context, opts *batchOptions, ds pipeline.DataSource, tiles []tile.Coords, hidpiWriter *mbtiles.Writer, wcOverrides *watercolor.Overrides) error {
-	logger.Info("Generating HiDPI tiles", "count", len(tiles))
-
-	// Create HiDPI generator with appropriate writer
-	var tileWriter pipeline.TileWriter
-	if hidpiWriter != nil {
-		tileWriter = hidpiWriter
-	}
-
-	genHiDPI, err := newBatchGenerator(opts, ds, opts.tileSize*2, tileWriter, wcOverrides)
-	if err != nil {
-		return fmt.Errorf("failed to init HiDPI generator: %w", err)
-	}
-
-	results, summary := runTilePool(ctx, genHiDPI, tiles, opts, "@2x")
-	failedCount := logTileFailures(results, "HiDPI tile generation failed")
-	logger.Info(summary)
-
-	return failureError(failedCount, "HiDPI", opts.allowFailures)
 }
 
 // parseBBox parses a bounding box string "minLon,minLat,maxLon,maxLat" into [4]float64.

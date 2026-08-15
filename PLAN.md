@@ -232,8 +232,11 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
       verbatim (`internal/datasource/overpass.go:609-627`), so one flaky container fails every tile
       in its box without ever trying the nil-coverage fallback. Also order-dependent: a nested
       coverage box is unreachable unless listed first.
-- [ ] **[P2]** Make `@2x` on-demand-only rather than a second full render pass
-      (`runHiDPIBatch`). 4× storage and 2× compute from one policy decision.
+- [x] **[P2]** Make `@2x` on-demand-only rather than a second full render pass. `runHiDPIBatch`
+      is gone; `generate --bbox --hidpi` now errors instead of silently producing half the tiles
+      a script asked for, and `--hidpi` survives for single tiles. `serve` already rendered `@2x`
+      on demand, and since the `@2x` query is byte-identical to the base one, a warm response
+      cache serves it with no upstream traffic. 4× storage and 2× compute recovered.
 - [x] **[P2]** Fetch per metatile band instead of per tile — `--band-fetch`, **off by default**.
       `out geom` returns unclipped geometry, so a motorway crossing a block is transferred once
       per tile; one query per block transfers it once. At the default 4×4, Germany's 237,424 z14

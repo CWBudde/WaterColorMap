@@ -43,7 +43,7 @@ overpass:
 #
 # Entries are the raw upstream JSON, gzipped, keyed by endpoint + query text —
 # so nothing about tile identity enters the key, and a re-render, a resumed
-# batch run or a `--hidpi` pass reuses the data it already fetched instead of
+# batch run or an on-demand `@2x` render reuses the data it already fetched instead of
 # asking Overpass again. Shared by `serve` and `generate`.
 #
 # Off by default, deliberately: it changes freshness semantics (a re-run can
@@ -102,7 +102,9 @@ overpass:
 #   # Rendering
 #   force: false # regenerate even if the tile already exists
 #   tile_size: 256 # 512 for Hi-DPI base tiles
-#   hidpi: false # additionally render @2x tiles
+#   # Single-tile mode only. Batch runs reject it: pre-rendering @2x across a
+#   # bbox is 2x compute and 4x storage, and `serve` renders @2x on demand.
+#   hidpi: false
 #   # Tile image encoding: png or webp.
 #   #
 #   # WebP here is *lossless* (VP8L, pure Go, no cgo). Measured over the 689

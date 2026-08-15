@@ -1,8 +1,65 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
+
+// TestBatchRejectsHiDPI pins the behaviour that replaced the second full render
+// pass. Ignoring the flag would be worse than refusing it: a user who scripted
+// `--bbox --hidpi` would get a run that looks entirely successful while
+// producing half the tiles they expect, and would find out when a @2x request
+// 404s.
+func TestBatchRejectsHiDPI(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	viper.Set("generate.bbox", "9.7,52.3,9.9,52.4")
+	viper.Set("generate.zoom_min", 13)
+	viper.Set("generate.zoom_max", 13)
+	viper.Set("generate.hidpi", true)
+	viper.Set("generate.format", "folder")
+	viper.Set("generate.folder_structure", "flat")
+
+	err := runGenerate(nil, nil)
+	if err == nil {
+		t.Fatal("batch generation with --hidpi should be rejected")
+	}
+	// The message has to point somewhere useful, or the error is just a wall.
+	for _, want := range []string{"--hidpi", "serve"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestBatchWithoutHiDPIPassesValidation is the counterpart: the same batch
+// config without --hidpi must get past validation. It fails later, on the
+// Overpass fetch or the asset paths, which is fine — what matters is that it
+// is not rejected up front.
+func TestBatchWithoutHiDPIPassesValidation(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	viper.Set("generate.bbox", "9.7,52.3,9.9,52.4")
+	viper.Set("generate.zoom_min", 13)
+	viper.Set("generate.zoom_max", 13)
+	viper.Set("generate.hidpi", false)
+	viper.Set("generate.format", "mbtiles")
+	viper.Set("generate.folder_structure", "flat")
+	// Deliberately absent --output-file, so validation stops the run early and
+	// nothing renders. If --hidpi were still being checked, we would see its
+	// message instead of this one.
+	err := runGenerate(nil, nil)
+	if err == nil {
+		t.Fatal("expected the missing --output-file to be reported")
+	}
+	if !strings.Contains(err.Error(), "--output-file") {
+		t.Errorf("expected the --output-file error, got: %v", err)
+	}
+}
 
 func TestParseBBox(t *testing.T) {
 	tests := []struct {

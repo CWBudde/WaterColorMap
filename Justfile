@@ -354,7 +354,6 @@ prebuild-hannover zoom_min="10" zoom_max="14" *args:
         --bbox "{{hannover_bbox}}" \
         --zoom-min {{zoom_min}} \
         --zoom-max {{zoom_max}} \
-        --hidpi \
         --allow-failures \
         {{args}}
 
@@ -377,6 +376,5 @@ prebuild bbox zoom_min="10" zoom_max="14" *args:
         --bbox "{{bbox}}" \
         --zoom-min {{zoom_min}} \
         --zoom-max {{zoom_max}} \
-        --hidpi \
         --allow-failures \
         {{args}}
