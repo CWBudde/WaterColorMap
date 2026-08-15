@@ -165,7 +165,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// TileJSON. Registered as its own exact pattern so it wins over the
 	// "/tiles/" subtree below, whose handler would reject it as a malformed
 	// tile path.
-	tileJSONHandler, err := newTileJSONHandler(mbtilesPath)
+	tileJSONHandler, err := newTileJSONHandler(mbtilesPath, proxyPolicy)
 	if err != nil {
 		return err
 	}
@@ -268,17 +268,17 @@ const serveTileTemplate = "/tiles/z{z}_x{x}_y{y}.png"
 // whatever tile is asked for, so nothing in the serve path knows the extent of
 // the set -- and the document falls back to the whole world at
 // tilejson.DefaultMinZoom..DefaultMaxZoom.
-func newTileJSONHandler(mbtilesPath string) (http.Handler, error) {
+func newTileJSONHandler(mbtilesPath string, proxy server.ProxyPolicy) (http.Handler, error) {
 	if mbtilesPath == "" {
 		doc := tilejson.New(tilejson.Options{Tiles: []string{serveTileTemplate}})
-		return tilejson.Handler(doc, logger), nil
+		return tilejson.Handler(doc, logger, proxy.TrustsPeer), nil
 	}
 
 	doc, err := tilejson.FromMBTilesFile(mbtilesPath, serveTileTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build TileJSON from MBTiles: %w", err)
 	}
-	return tilejson.Handler(doc, logger), nil
+	return tilejson.Handler(doc, logger, proxy.TrustsPeer), nil
 }
 
 // newHTTPServer builds the tile server with timeouts on every phase of a

@@ -3,6 +3,7 @@ package watercolor
 import (
 	"image"
 	"image/color"
+	"math"
 	"strings"
 	"testing"
 
@@ -341,4 +342,67 @@ func TestApplyPanicsAfterScale(t *testing.T) {
 		}
 	}()
 	tuner.Apply(&p)
+}
+
+// Overriding one adaptive-noise distance still has to be checked against the
+// value the other one inherits: smoothstep(12, 10, d) is a discontinuous step,
+// not the gradual attenuation the keys promise.
+func TestValidate_AdaptiveDistancesAgainstDefaults(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+
+	tests := []struct {
+		lo      LayerOverrides
+		name    string
+		wantErr bool
+	}{
+		{LayerOverrides{NoiseMinDist: f(12)}, "min above inherited max", true},
+		{LayerOverrides{NoiseMinDist: f(5)}, "min below inherited max", false},
+		{LayerOverrides{NoiseMaxDist: f(1)}, "max below inherited min", true},
+		{LayerOverrides{NoiseMinDist: f(3), NoiseMaxDist: f(20)}, "both, ordered", false},
+		{LayerOverrides{NoiseMinDist: f(20), NoiseMaxDist: f(3)}, "both, inverted", true},
+		{LayerOverrides{}, "neither", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &Overrides{Layers: map[string]LayerOverrides{"water": tt.lo}}
+			err := o.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatal("expected an error, got none")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// YAML spells NaN ".nan", and every ordered comparison against NaN is false, so
+// a plain range check accepts it and it reaches the blur kernel.
+func TestValidate_RejectsNonFinite(t *testing.T) {
+	nan, posInf := math.NaN(), math.Inf(1)
+
+	for _, tt := range []struct {
+		o    *Overrides
+		name string
+	}{
+		{&Overrides{
+			Defaults: GlobalOverrides{BlurSigma: &nan}}, "global blur-sigma NaN"},
+		{&Overrides{
+			Defaults: GlobalOverrides{NoiseScale: &posInf}}, "global noise-scale +Inf"},
+		{&Overrides{
+			Defaults: GlobalOverrides{NoiseStrength: &nan}}, "global noise-strength NaN"},
+		{&Overrides{
+			Layers: map[string]LayerOverrides{"water": {ShadeStrength: &nan}}}, "layer shade-strength NaN"},
+		{&Overrides{
+			Layers: map[string]LayerOverrides{"water": {NoiseMinDist: &nan}}}, "layer noise-min-dist NaN"},
+		{&Overrides{
+			Layers: map[string]LayerOverrides{"water": {EdgeGamma: &posInf}}}, "layer edge-gamma +Inf"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.o.Validate(); err == nil {
+				t.Error("expected a validation error, got none")
+			}
+		})
+	}
 }

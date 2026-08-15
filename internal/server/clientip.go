@@ -118,3 +118,12 @@ func normalize(addr netip.Addr) netip.Addr {
 	}
 	return prefix.Addr()
 }
+
+// TrustsPeer reports whether r arrived directly from a trusted proxy, and so
+// whether its forwarding headers may be believed. ClientKey uses the same rule
+// for X-Forwarded-For; this exposes it for the other forwarding headers, such
+// as the X-Forwarded-Proto the TileJSON handler needs to build https:// tile
+// URLs behind a TLS-terminating proxy.
+func (p ProxyPolicy) TrustsPeer(r *http.Request) bool {
+	return p.trusts(parseAddr(r.RemoteAddr))
+}

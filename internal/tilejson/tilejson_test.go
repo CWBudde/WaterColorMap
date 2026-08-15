@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
@@ -181,7 +182,7 @@ func TestHandler_ResolvesRelativeTileURLs(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://tiles.example:8080/tiles/tilejson.json", nil)
-	tilejson.Handler(doc, nil).ServeHTTP(rec, req)
+	tilejson.Handler(doc, nil, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -209,7 +210,7 @@ func TestHandler_KeepsAbsoluteTileURLs(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://localhost/tiles/tilejson.json", nil)
-	tilejson.Handler(doc, nil).ServeHTTP(rec, req)
+	tilejson.Handler(doc, nil, nil).ServeHTTP(rec, req)
 
 	var got tilejson.TileJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -223,7 +224,7 @@ func TestHandler_KeepsAbsoluteTileURLs(t *testing.T) {
 func TestHandler_RejectsNonGET(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://localhost/tiles/tilejson.json", nil)
-	tilejson.Handler(tilejson.New(tilejson.Options{Tiles: []string{"a.png"}}), nil).ServeHTTP(rec, req)
+	tilejson.Handler(tilejson.New(tilejson.Options{Tiles: []string{"a.png"}}), nil, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", rec.Code)
@@ -238,7 +239,7 @@ func TestHandler_WinsOverTilesSubtree(t *testing.T) {
 		http.Error(w, "tile not found", http.StatusNotFound)
 	}))
 	mux.Handle("/tiles/tilejson.json", tilejson.Handler(
-		tilejson.New(tilejson.Options{Tiles: []string{"/tiles/z{z}_x{x}_y{y}.png"}}), nil))
+		tilejson.New(tilejson.Options{Tiles: []string{"/tiles/z{z}_x{x}_y{y}.png"}}), nil, nil))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://localhost/tiles/tilejson.json", nil))
@@ -282,5 +283,52 @@ func TestFromMBTilesFile(t *testing.T) {
 func TestFromMBTilesFile_MissingFile(t *testing.T) {
 	if _, err := tilejson.FromMBTilesFile(filepath.Join(t.TempDir(), "nope.mbtiles")); err == nil {
 		t.Error("expected an error for a missing MBTiles file")
+	}
+}
+
+// Behind a TLS-terminating proxy the backend request is plain HTTP, so without
+// honouring the forwarded scheme the document advertises http:// tile URLs to a
+// page loaded over https and the browser blocks them as mixed content.
+func TestHandler_ForwardedProto(t *testing.T) {
+	trustAll := func(*http.Request) bool { return true }
+
+	tests := []struct {
+		name    string
+		trust   tilejson.TrustForwarded
+		headers map[string]string
+		want    string
+	}{
+		{"no headers", trustAll, nil, "http://maps.example/tiles/z1_x2_y3.png"},
+		{"x-forwarded-proto, trusted", trustAll,
+			map[string]string{"X-Forwarded-Proto": "https"}, "https://maps.example/tiles/z1_x2_y3.png"},
+		{"x-forwarded-proto, untrusted peer", nil,
+			map[string]string{"X-Forwarded-Proto": "https"}, "http://maps.example/tiles/z1_x2_y3.png"},
+		{"forwarded header wins", trustAll,
+			map[string]string{"Forwarded": `for=1.2.3.4;proto=https`}, "https://maps.example/tiles/z1_x2_y3.png"},
+		{"leftmost hop of a chain", trustAll,
+			map[string]string{"X-Forwarded-Proto": "https, http"}, "https://maps.example/tiles/z1_x2_y3.png"},
+		{"garbage scheme ignored", trustAll,
+			map[string]string{"X-Forwarded-Proto": "javascript:"}, "http://maps.example/tiles/z1_x2_y3.png"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := tilejson.New(tilejson.Options{Tiles: []string{"/tiles/z{z}_x{x}_y{y}.png"}})
+			req := httptest.NewRequest(http.MethodGet, "http://maps.example/tiles/tilejson.json", nil)
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			tilejson.Handler(doc, nil, tt.trust).ServeHTTP(rec, req)
+
+			var got tilejson.TileJSON
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			want := strings.NewReplacer("z1_x2_y3", "z{z}_x{x}_y{y}").Replace(tt.want)
+			if len(got.Tiles) != 1 || got.Tiles[0] != want {
+				t.Errorf("tiles = %v, want [%s]", got.Tiles, want)
+			}
+		})
 	}
 }
