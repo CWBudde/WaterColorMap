@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -256,13 +257,21 @@ func purgeFolder(opts *purgeOptions) error {
 		targets = append(targets, purgeTarget(t))
 	}
 
-	// Opened even when nothing is being deleted: the stamp filters read it, and
-	// the delete path has to remove the stamp of every tile it removes.
-	stamps, err := tilestamp.OpenFolder(opts.tilesDir)
+	stamps, err := openPurgeFolderStamps(opts)
 	if err != nil {
-		return fmt.Errorf("failed to open the tile stamp store: %w", err)
+		return err
 	}
 	defer closeStampStore(stamps)
+
+	if opts.stampFiltered() && stamps == nil {
+		// Nothing recorded a source version for these tiles, and an unknown
+		// version is never evidence of an old one — so a staleness selector
+		// selects nothing, which is reported like any other empty selection.
+		logger.Info("No tile stamp store found; a staleness selector can match nothing",
+			"tiles_dir", opts.tilesDir)
+		reportSelection(nil, opts)
+		return nil
+	}
 
 	targets, err = selectTargets(targets, opts, stamps)
 	if err != nil {
@@ -284,6 +293,9 @@ func purgeFolder(opts *purgeOptions) error {
 
 		// The stamp describes a tile that no longer exists; leaving it behind
 		// would let a later freshness run believe in a tile that is gone.
+		if stamps == nil {
+			continue
+		}
 		if err := stamps.Delete(t.z, t.x, t.y, t.suffix); err != nil {
 			logger.Error("Failed to delete tile stamp", "tile", t.String(), "error", err)
 		}
@@ -291,6 +303,35 @@ func purgeFolder(opts *purgeOptions) error {
 
 	logger.Info("Purge complete", "deleted", deleted, "tiles_dir", opts.tilesDir)
 	return nil
+}
+
+// openPurgeFolderStamps opens the folder's stamp store — writable only when
+// tiles are actually going to be deleted, and read-only otherwise. It returns a
+// nil store, and no error, when the folder has no stamps at all.
+//
+// A dry run promises to change nothing, and OpenFolder does not keep that
+// promise: it creates stamps.db, switches the journal mode and creates the
+// schema. Merely reporting on a legacy tileset would therefore modify it, and
+// reporting on read-only storage would fail before printing the selection it
+// was asked for. Only the delete path needs a writable store, because only it
+// removes the stamps of the tiles it removes.
+func openPurgeFolderStamps(opts *purgeOptions) (*tilestamp.Store, error) {
+	if opts.yes {
+		stamps, err := tilestamp.OpenFolder(opts.tilesDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open the tile stamp store: %w", err)
+		}
+		return stamps, nil
+	}
+
+	stamps, err := tilestamp.OpenFolderReadOnly(opts.tilesDir)
+	switch {
+	case errors.Is(err, tilestamp.ErrNotFound):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("failed to open the tile stamp store: %w", err)
+	}
+	return stamps, nil
 }
 
 // purgeMBTiles selects and deletes from an MBTiles file.
@@ -344,15 +385,24 @@ func purgeMBTiles(opts *purgeOptions) error {
 }
 
 // selectMBTilesTargets applies the selectors, opening the stamp store only when
-// one of them needs it. The store is closed again before anything is deleted,
-// so the delete path is the only writer on the file.
+// one of them needs it. The store is opened read-only — selecting asks
+// questions, and the delete path removes the stamp rows itself, inside the same
+// transaction as the tiles — and closed again before anything is deleted, so
+// the delete path is the only writer on the file.
 func selectMBTilesTargets(candidates []purgeTarget, opts *purgeOptions) ([]purgeTarget, error) {
 	if !opts.stampFiltered() {
 		return selectTargets(candidates, opts, nil)
 	}
 
-	stamps, err := tilestamp.OpenMBTiles(opts.mbtilesPath)
-	if err != nil {
+	stamps, err := tilestamp.OpenMBTilesReadOnly(opts.mbtilesPath)
+	switch {
+	case errors.Is(err, tilestamp.ErrNotFound):
+		// No tile_stamp table, so no tile carries a source version; a
+		// staleness selector can match nothing.
+		logger.Info("No tile stamps in the MBTiles file; a staleness selector can match nothing",
+			"mbtiles", opts.mbtilesPath)
+		return nil, nil
+	case err != nil:
 		return nil, fmt.Errorf("failed to open the tile stamp store: %w", err)
 	}
 	selected, err := selectTargets(candidates, opts, stamps)
@@ -423,11 +473,8 @@ func selectTargets(candidates []purgeTarget, opts *purgeOptions, stamps *tilesta
 	}
 
 	if opts.hasBBox {
-		inBox := bboxTileSet(opts, selected)
-		selected = filterTargets(selected, func(t purgeTarget) bool {
-			_, ok := inBox[tile.NewCoords(uint32(t.z), uint32(t.x), uint32(t.y))]
-			return ok
-		})
+		inBox := newBBoxTest(opts.bbox)
+		selected = filterTargets(selected, inBox)
 	}
 
 	if !opts.stampFiltered() {
@@ -460,33 +507,29 @@ func selectTargets(candidates []purgeTarget, opts *purgeOptions, stamps *tilesta
 	}), nil
 }
 
-// bboxTileSet enumerates the tiles the bounding box covers, across the zoom
-// levels the candidates actually occupy.
+// newBBoxTest returns a predicate reporting whether a tile lies inside the
+// bounding box.
 //
-// Deriving the zoom range from the candidates rather than from 0..MaxZoom keeps
-// the enumeration to the size of the tileset: a bbox with no zoom bounds would
-// otherwise expand to 4^22 tiles at the deepest level alone.
-func bboxTileSet(opts *purgeOptions, candidates []purgeTarget) map[tile.Coords]struct{} {
-	if len(candidates) == 0 {
-		return nil
-	}
+// It tests the tiles that exist against the box rather than enumerating the box
+// and intersecting: the tileset is what purge holds, and it is finite, while the
+// box is not — a country-sized bbox over a tileset that reaches z22 covers
+// billions of theoretical tiles at that level alone, which is a run that dies
+// before it can report the three tiles it meant to delete. The per-zoom range is
+// computed once per zoom level and reused.
+func newBBoxTest(bbox [4]float64) func(purgeTarget) bool {
+	bounds := make(map[int]tile.BBoxTileBounds)
 
-	minZ, maxZ := candidates[0].z, candidates[0].z
-	for _, t := range candidates[1:] {
-		if t.z < minZ {
-			minZ = t.z
+	return func(t purgeTarget) bool {
+		if t.z < 0 || t.x < 0 || t.y < 0 {
+			return false
 		}
-		if t.z > maxZ {
-			maxZ = t.z
+		b, ok := bounds[t.z]
+		if !ok {
+			b = tile.BBoxTileBoundsAt(bbox, t.z)
+			bounds[t.z] = b
 		}
+		return b.Contains(uint32(t.x), uint32(t.y))
 	}
-
-	tiles := tile.TilesInBBox(opts.bbox, minZ, maxZ)
-	set := make(map[tile.Coords]struct{}, len(tiles))
-	for _, c := range tiles {
-		set[c] = struct{}{}
-	}
-	return set
 }
 
 func filterTargets(targets []purgeTarget, keep func(purgeTarget) bool) []purgeTarget {

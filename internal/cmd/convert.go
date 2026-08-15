@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
 	"github.com/cwbudde/watercolormap/internal/tileformat"
+	"github.com/cwbudde/watercolormap/internal/tilestamp"
 )
 
 var convertCmd = &cobra.Command{
@@ -156,7 +158,71 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to flush tiles: %w", err)
 	}
 
+	// After the tiles, and never before them: a stamp is a statement about a
+	// tile that is already in the file.
+	if err := copyFolderStamps(inputDir, outputFile, tiles); err != nil {
+		// The tiles are converted and correct; only their provenance is
+		// missing, which costs a re-render later and nothing now.
+		logger.Warn("Failed to carry the tile stamps over into the MBTiles file",
+			"input_dir", inputDir, "output", outputFile, "error", err)
+	}
+
 	logger.Info("Conversion complete", "output", outputFile, "tiles", len(tiles))
+	return nil
+}
+
+// copyFolderStamps carries the provenance of the converted tiles from the
+// source folder's stamps.db into the tile_stamp table of the MBTiles file.
+//
+// Without this the conversion silently drops what `generate` recorded: the
+// converted tileset would answer "unknown" for every tile, so `purge
+// --data-before` would select nothing in it and `generate --stale-*` would
+// re-render all of it. The source is opened read-only, and a folder that has no
+// stamps at all — anything produced before stamps existed — is not an error,
+// just nothing to copy.
+//
+// Only base tiles carry a stamp over: the MBTiles tiles table has one row per
+// z/x/y, so an @2x stamp would describe a tile that does not exist there.
+func copyFolderStamps(inputDir, outputFile string, tiles []tileInfo) error {
+	src, err := tilestamp.OpenFolderReadOnly(inputDir)
+	switch {
+	case errors.Is(err, tilestamp.ErrNotFound):
+		return nil
+	case err != nil:
+		return fmt.Errorf("failed to open the source tile stamp store: %w", err)
+	}
+	defer closeStampStore(src)
+
+	dst, err := tilestamp.OpenMBTiles(outputFile)
+	if err != nil {
+		return fmt.Errorf("failed to open the destination tile stamp store: %w", err)
+	}
+	defer closeStampStore(dst)
+
+	copied := 0
+	for _, t := range tiles {
+		if t.suffix != "" {
+			continue
+		}
+
+		stamp, ok, err := src.Get(t.z, t.x, t.y, "")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if err := dst.Put(stamp); err != nil {
+			return err
+		}
+		copied++
+	}
+
+	if err := dst.Flush(); err != nil {
+		return err
+	}
+
+	logger.Info("Carried tile stamps over", "stamps", copied, "output", outputFile)
 	return nil
 }
 

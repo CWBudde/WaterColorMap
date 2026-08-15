@@ -429,6 +429,34 @@ type batchOptions struct {
 	allowFailures bool
 }
 
+// configureBatchSources resolves the render-source configuration for a batch run
+// and stores it on opts: the ocean and Natural Earth tiers, the tile data source
+// they imply, and the band-fetch precondition.
+//
+// It runs before anything is opened for writing, so a misconfigured source stops
+// the run at startup rather than after an output file has been created.
+func configureBatchSources(opts *batchOptions) error {
+	ocean, err := oceanConfig()
+	if err != nil {
+		return err
+	}
+	opts.ocean = ocean
+
+	naturalEarth, err := naturalEarthConfig()
+	if err != nil {
+		return err
+	}
+	opts.naturalEarth = naturalEarth
+
+	ds, err := newTileDataSource(opts.dataSourceName, ocean.Enabled())
+	if err != nil {
+		return err
+	}
+	opts.dataSource = ds
+
+	return checkBandFetchUsable(opts, ds)
+}
+
 func runBatchGenerate(opts *batchOptions) error {
 	// Parse bounding box
 	bbox, err := parseBBox(opts.bboxStr)
@@ -449,27 +477,10 @@ func runBatchGenerate(opts *batchOptions) error {
 	tiles := tile.TilesInBBox(bbox, opts.zoomMin, opts.zoomMax)
 	logBatchStart(opts, len(tiles))
 
-	ocean, err := oceanConfig()
-	if err != nil {
+	if err := configureBatchSources(opts); err != nil {
 		return err
 	}
-	opts.ocean = ocean
-
-	naturalEarth, err := naturalEarthConfig()
-	if err != nil {
-		return err
-	}
-	opts.naturalEarth = naturalEarth
-
-	ds, err := newTileDataSource(opts.dataSourceName, ocean.Enabled())
-	if err != nil {
-		return err
-	}
-	opts.dataSource = ds
-
-	if err := checkBandFetchUsable(opts, ds); err != nil {
-		return err
-	}
+	ds := opts.dataSource
 
 	// Parse and validate the watercolor config before anything is opened for
 	// writing. mbtiles.New empties and re-inserts the metadata table on open, so
@@ -494,16 +505,26 @@ func runBatchGenerate(opts *batchOptions) error {
 	if err != nil {
 		return err
 	}
-	defer closeMBTilesWriter(mbtilesWriter)
 
-	// After the MBTiles writer, because for that format the stamps live in the
-	// file it just created. The deferred close therefore runs before the
-	// writer's, which is the order that leaves a consistent file behind.
+	// Opened after the MBTiles writer, because for that format the stamps live
+	// in the file it just created.
 	stamps, err := openStampStore(opts.format, opts.outputDir, opts.outputFile)
 	if err != nil {
+		// Nothing has registered a cleanup for the writer yet, so it is closed
+		// here rather than leaked on the way out.
+		closeMBTilesWriter(mbtilesWriter)
 		return fmt.Errorf("failed to open the tile stamp store: %w", err)
 	}
-	defer closeStampStore(stamps)
+
+	// One cleanup for both, in the order they have to happen: the tiles are
+	// committed before the provenance describing them. Two defers would run
+	// LIFO and give the reverse — a run that fails between the last stamp and
+	// the tile flush would leave stamps for tiles that were never written, and
+	// a later freshness check would believe them.
+	defer func() {
+		closeMBTilesWriter(mbtilesWriter)
+		closeStampStore(stamps)
+	}()
 	opts.stampStore = stampStoreOption(stamps)
 
 	// Create generator with optional TileWriter

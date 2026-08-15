@@ -2,6 +2,7 @@ package tilestamp
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -345,9 +346,9 @@ func TestMBTilesBacking(t *testing.T) {
 	}
 }
 
-// Timestamps are compared as strings in SQL, so the stored layout has to sort
-// chronologically. Values that trip plain RFC3339 — a fractional second, a
-// non-UTC offset — are the ones worth pinning.
+// The stored layout has to sort chronologically as text, so that ORDER BY and a
+// human reading the table agree with each other. Values that trip plain RFC3339
+// — a fractional second, a non-UTC offset — are the ones worth pinning.
 func TestStoredTimestampsSortChronologically(t *testing.T) {
 	berlin := time.FixedZone("CEST", 2*60*60)
 
@@ -367,5 +368,137 @@ func TestStoredTimestampsSortChronologically(t *testing.T) {
 		if _, err := ParseTime(cur); err != nil {
 			t.Errorf("ParseTime(%q) = %v, want a valid RFC3339 value", cur, err)
 		}
+	}
+}
+
+// insertRawStamp writes a row exactly as given, bypassing formatTime. That is
+// what a row written by another tool — or a corrupted one — looks like.
+func insertRawStamp(t *testing.T, path string, z, x, y int, osmBase, renderedAt string) {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close() // nolint:errcheck
+
+	if _, err := db.Exec(`INSERT OR REPLACE INTO tile_stamp
+		(zoom_level, tile_column, tile_row, suffix, osm_base_ts, rendered_at)
+		VALUES (?, ?, ?, '', ?, ?)`, z, x, y, osmBase, renderedAt); err != nil {
+		t.Fatalf("insert raw stamp: %v", err)
+	}
+}
+
+// A timestamp the store cannot parse reads as "unknown", and unknown is never
+// evidence of being old — so it must not be selected by a staleness filter,
+// however it happens to compare as text. A valid RFC3339 value in another zone
+// has to be compared as the instant it names, not as its spelling.
+func TestQueryComparesTimestampsChronologically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stamps.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	cutoff := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+
+	// 1/0/0: malformed both ways. Sorts below the cutoff as text.
+	insertRawStamp(t, path, 1, 0, 0, "2025-bad", "2025-bad")
+	// 1/0/1: valid, older than the cutoff, but written with an offset and no
+	// fractional part, so it sorts *above* the canonical cutoff as text.
+	insertRawStamp(t, path, 1, 0, 1, "2026-08-15T13:00:00+02:00", "2026-08-15T13:00:00+02:00")
+	// 1/0/2: valid and newer than the cutoff.
+	insertRawStamp(t, path, 1, 0, 2, "2026-08-15T18:00:00Z", "2026-08-15T18:00:00Z")
+
+	store, err = OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer store.Close() // nolint:errcheck
+
+	for _, tc := range []struct {
+		name   string
+		filter Filter
+	}{
+		{"data", Filter{DataBefore: cutoff}},
+		{"rendered", Filter{RenderedBefore: cutoff}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := store.Query(tc.filter)
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("Query returned %d stamps, want only the genuinely older one: %+v", len(got), got)
+			}
+			if got[0].Y != 1 {
+				t.Errorf("Query selected 1/0/%d, want 1/0/1", got[0].Y)
+			}
+		})
+	}
+}
+
+// A read-only open answers questions without creating anything. That is what
+// makes a purge dry run harmless on a tileset that has no stamps and on storage
+// the process cannot write.
+func TestOpenReadOnly(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := OpenFolderReadOnly(dir); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("OpenFolderReadOnly on an empty dir = %v, want ErrNotFound", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, FolderDBName)); !os.IsNotExist(err) {
+		t.Fatalf("OpenFolderReadOnly created %s", FolderDBName)
+	}
+
+	store, err := OpenFolder(dir)
+	if err != nil {
+		t.Fatalf("OpenFolder: %v", err)
+	}
+	if err := store.Put(Stamp{Z: 3, X: 2, Y: 1, RenderedAt: time.Now()}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ro, err := OpenFolderReadOnly(dir)
+	if err != nil {
+		t.Fatalf("OpenFolderReadOnly: %v", err)
+	}
+	defer ro.Close() // nolint:errcheck
+
+	if _, ok, err := ro.Get(3, 2, 1, ""); err != nil || !ok {
+		t.Fatalf("Get on a read-only store = ok:%v err:%v, want the stamp", ok, err)
+	}
+	if err := ro.Put(Stamp{Z: 9, X: 9, Y: 9, RenderedAt: time.Now()}); err == nil {
+		t.Error("Put on a read-only store succeeded, want an error")
+	}
+	if err := ro.Delete(3, 2, 1, ""); err == nil {
+		t.Error("Delete on a read-only store succeeded, want an error")
+	}
+}
+
+// An MBTiles file that predates stamps has no tile_stamp table, and that is a
+// tileset without stamps rather than a failure.
+func TestOpenMBTilesReadOnlyWithoutStampTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tiles.mbtiles")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE tiles (zoom_level INTEGER)`); err != nil {
+		t.Fatalf("seed tiles: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, err := OpenMBTilesReadOnly(path); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("OpenMBTilesReadOnly = %v, want ErrNotFound", err)
 	}
 }

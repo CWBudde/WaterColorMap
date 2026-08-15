@@ -16,10 +16,10 @@ import (
 	"github.com/cwbudde/watercolormap/internal/tilestamp"
 )
 
-// withPurgeFlags sets purge config keys for one test and restores viper and the
+// withCommandFlags sets command config keys for one test and restores viper and the
 // package logger afterwards. viper is process-global, so leaking a key here
 // would change the meaning of another test.
-func withPurgeFlags(t *testing.T, flags map[string]any) {
+func withCommandFlags(t *testing.T, flags map[string]any) {
 	t.Helper()
 
 	previous := make(map[string]any, len(flags))
@@ -80,7 +80,7 @@ func TestPurgeFolderDryRunDeletesNothing(t *testing.T) {
 	files := []string{"z13_x1_y2.png", "z14_x3_y4.png"}
 	dir := seedTilesDir(t, files)
 
-	withPurgeFlags(t, map[string]any{
+	withCommandFlags(t, map[string]any{
 		purgeTilesDirKey: dir,
 		purgeMBTilesKey:  "",
 		purgeBBoxKey:     "",
@@ -107,7 +107,7 @@ func TestPurgeFolderZoomSelection(t *testing.T) {
 		"z12_x1_y1.png", "z13_x1_y2.png", "z13_x1_y2@2x.png", "z14_x3_y4.png",
 	})
 
-	withPurgeFlags(t, map[string]any{
+	withCommandFlags(t, map[string]any{
 		purgeTilesDirKey: dir,
 		purgeMBTilesKey:  "",
 		purgeBBoxKey:     "",
@@ -139,7 +139,7 @@ func TestPurgeFolderZoomSelection(t *testing.T) {
 func TestPurgeFolderSuffixSelection(t *testing.T) {
 	dir := seedTilesDir(t, []string{"z13_x1_y2.png", "z13_x1_y2@2x.png"})
 
-	withPurgeFlags(t, map[string]any{
+	withCommandFlags(t, map[string]any{
 		purgeTilesDirKey: dir,
 		purgeMBTilesKey:  "",
 		purgeBBoxKey:     "",
@@ -188,7 +188,7 @@ func TestPurgeFolderDataBeforeSelection(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	withPurgeFlags(t, map[string]any{
+	withCommandFlags(t, map[string]any{
 		purgeTilesDirKey:    dir,
 		purgeMBTilesKey:     "",
 		purgeBBoxKey:        "",
@@ -267,7 +267,7 @@ func TestPurgeMBTilesDryRunDeletesNothing(t *testing.T) {
 	tiles := []mbtiles.TileCoord{{Z: 5, X: 1, Y: 1}, {Z: 6, X: 2, Y: 2}}
 	path := seedMBTiles(t, tiles)
 
-	withPurgeFlags(t, map[string]any{
+	withCommandFlags(t, map[string]any{
 		purgeTilesDirKey: "",
 		purgeMBTilesKey:  path,
 		purgeBBoxKey:     "",
@@ -293,7 +293,7 @@ func TestPurgeMBTilesDeletesExactlyTheSelection(t *testing.T) {
 	}
 	path := seedMBTiles(t, tiles)
 
-	withPurgeFlags(t, map[string]any{
+	withCommandFlags(t, map[string]any{
 		purgeTilesDirKey: "",
 		purgeMBTilesKey:  path,
 		purgeBBoxKey:     "",
@@ -329,7 +329,7 @@ func TestPurgeMBTilesBBoxSelection(t *testing.T) {
 	tiles := []mbtiles.TileCoord{{Z: 1, X: 0, Y: 0}, {Z: 1, X: 1, Y: 1}}
 	path := seedMBTiles(t, tiles)
 
-	withPurgeFlags(t, map[string]any{
+	withCommandFlags(t, map[string]any{
 		purgeTilesDirKey: "",
 		purgeMBTilesKey:  path,
 		// A small box well inside the north-west quadrant.
@@ -405,7 +405,7 @@ func TestPurgeOptionsValidation(t *testing.T) {
 			for k, v := range tt.flags {
 				flags[k] = v
 			}
-			withPurgeFlags(t, flags)
+			withCommandFlags(t, flags)
 
 			_, err := purgeOptionsFromConfig()
 			if err == nil {
@@ -415,5 +415,68 @@ func TestPurgeOptionsValidation(t *testing.T) {
 				t.Errorf("error = %v, want it to mention %q", err, tt.want)
 			}
 		})
+	}
+}
+
+// A bounding box is tested against the tiles that exist, never enumerated. A
+// z22 tile under a wide box covers 4^22 theoretical tiles at that level alone,
+// so an implementation that materialises the box does not answer this test
+// slowly — it does not answer it.
+func TestPurgeFolderBBoxWithDeepZoom(t *testing.T) {
+	// 22/2210747/1378792 is in Hanover; 22/2097152/2097152 is null island.
+	dir := seedTilesDir(t, []string{
+		"z22_x2210747_y1378792.png",
+		"z22_x2097152_y2097152.png",
+	})
+
+	withCommandFlags(t, map[string]any{
+		purgeTilesDirKey: dir,
+		purgeMBTilesKey:  "",
+		purgeBBoxKey:     "9.7,52.3,9.8,52.4",
+		purgeZoomMinKey:  -1,
+		purgeZoomMaxKey:  -1,
+		purgeSuffixKey:   "any",
+		purgeYesKey:      true,
+		purgeCompactKey:  false,
+	})
+
+	if err := runPurge(purgeCmd, nil); err != nil {
+		t.Fatalf("runPurge: %v", err)
+	}
+
+	got := remainingTiles(t, dir)
+	if len(got) != 1 || got[0] != "z22_x2097152_y2097152.png" {
+		t.Errorf("remaining tiles = %v, want only the tile outside the bbox", got)
+	}
+}
+
+// A dry run promises to change nothing, and a tile folder that has never been
+// stamped must still be one after purge has reported on it.
+func TestPurgeFolderDryRunCreatesNoStampStore(t *testing.T) {
+	dir := seedTilesDir(t, []string{"z13_x1_y2.png"})
+
+	withCommandFlags(t, map[string]any{
+		purgeTilesDirKey:    dir,
+		purgeMBTilesKey:     "",
+		purgeBBoxKey:        "",
+		purgeZoomMinKey:     -1,
+		purgeZoomMaxKey:     -1,
+		purgeSuffixKey:      "any",
+		purgeDataBeforeKey:  "2026-06-01T00:00:00Z",
+		purgeRenderedBefore: "",
+		purgeRendererRevNot: "",
+		purgeYesKey:         false,
+		purgeCompactKey:     false,
+	})
+
+	if err := runPurge(purgeCmd, nil); err != nil {
+		t.Fatalf("runPurge: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, tilestamp.FolderDBName)); !os.IsNotExist(err) {
+		t.Errorf("a dry run created %s in the tile folder", tilestamp.FolderDBName)
+	}
+	if got := remainingTiles(t, dir); len(got) != 1 {
+		t.Errorf("remaining tiles = %v, want the tile untouched", got)
 	}
 }

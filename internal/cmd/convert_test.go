@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cwbudde/watercolormap/internal/tileformat"
+	"github.com/cwbudde/watercolormap/internal/tilestamp"
 )
 
 // TestScanTilesDirectoryDetectsFormat: the folder is the authority on what its
@@ -110,5 +112,84 @@ func TestScanTilesDirectoryDetectsFormat(t *testing.T) {
 				t.Errorf("format = %v, want %v", format, tt.wantFormat)
 			}
 		})
+	}
+}
+
+// Conversion must carry the provenance of the tiles it copies. Without it the
+// converted tileset answers "unknown" for every tile, so `purge --data-before`
+// would select nothing in it and `generate --stale-*` would re-render all of it.
+func TestConvertCarriesTileStamps(t *testing.T) {
+	dir := seedTilesDir(t, []string{"z13_x1_y2.png", "z13_x1_y3.png"})
+
+	src, err := tilestamp.OpenFolder(dir)
+	if err != nil {
+		t.Fatalf("OpenFolder: %v", err)
+	}
+	want := tilestamp.Stamp{
+		Z: 13, X: 1, Y: 2,
+		OSMBase:     time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
+		RenderedAt:  time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC),
+		Source:      "https://overpass.example/api/interpreter",
+		RendererRev: "v1.2.3+abc1234",
+	}
+	if err := src.Put(want); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := src.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	out := filepath.Join(t.TempDir(), "tiles.mbtiles")
+	withCommandFlags(t, map[string]any{
+		"convert.input_dir": dir,
+		"convert.output":    out,
+		"convert.name":      "test",
+		"convert.bounds":    "",
+	})
+
+	if err := runConvert(convertCmd, nil); err != nil {
+		t.Fatalf("runConvert: %v", err)
+	}
+
+	dst, err := tilestamp.OpenMBTilesReadOnly(out)
+	if err != nil {
+		t.Fatalf("OpenMBTilesReadOnly: %v", err)
+	}
+	defer dst.Close() // nolint:errcheck
+
+	got, ok, err := dst.Get(13, 1, 2, "")
+	if err != nil || !ok {
+		t.Fatalf("Get(13/1/2) = ok:%v err:%v, want the copied stamp", ok, err)
+	}
+	if !got.OSMBase.Equal(want.OSMBase) || !got.RenderedAt.Equal(want.RenderedAt) ||
+		got.Source != want.Source || got.RendererRev != want.RendererRev {
+		t.Errorf("copied stamp = %+v, want %+v", got, want)
+	}
+
+	// The unstamped tile stays unstamped: conversion copies provenance, it does
+	// not invent it.
+	if _, ok, err := dst.Get(13, 1, 3, ""); err != nil || ok {
+		t.Errorf("Get(13/1/3) = ok:%v err:%v, want no stamp", ok, err)
+	}
+}
+
+// A tile folder from before stamps existed converts exactly as it did: nothing
+// to copy is not a failure.
+func TestConvertWithoutSourceStamps(t *testing.T) {
+	dir := seedTilesDir(t, []string{"z13_x1_y2.png"})
+	out := filepath.Join(t.TempDir(), "tiles.mbtiles")
+
+	withCommandFlags(t, map[string]any{
+		"convert.input_dir": dir,
+		"convert.output":    out,
+		"convert.name":      "test",
+		"convert.bounds":    "",
+	})
+
+	if err := runConvert(convertCmd, nil); err != nil {
+		t.Fatalf("runConvert: %v", err)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("stat output: %v", err)
 	}
 }
