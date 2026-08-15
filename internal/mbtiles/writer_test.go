@@ -3,10 +3,12 @@ package mbtiles
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"image"
 	"image/png"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -419,5 +421,270 @@ func TestWriter_ReplaceExisting(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("Expected 1 tile (replaced), got %d", count)
+	}
+}
+
+// newTestWriter opens a raster writer on a fresh temp path and returns both.
+func newTestWriter(t *testing.T) (*Writer, string) {
+	t.Helper()
+
+	dbPath := filepath.Join(t.TempDir(), "test.mbtiles")
+	w, err := New(dbPath, Metadata{Name: "Test", Format: "png"})
+	if err != nil {
+		t.Fatalf("Failed to create writer: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	return w, dbPath
+}
+
+func TestWriter_HasTile(t *testing.T) {
+	tests := []struct {
+		write *[3]int // tile to write first, nil for none
+		name  string
+		probe [3]int
+		flush bool
+		want  bool
+	}{
+		{
+			name:  "absent tile",
+			probe: [3]int{13, 100, 200},
+			want:  false,
+		},
+		{
+			name:  "written and flushed",
+			write: &[3]int{13, 100, 200},
+			flush: true,
+			probe: [3]int{13, 100, 200},
+			want:  true,
+		},
+		{
+			name:  "written but unflushed",
+			write: &[3]int{13, 100, 200},
+			probe: [3]int{13, 100, 200},
+			want:  true,
+		},
+		{
+			// Regression guard: HasTile must apply the same XYZ->TMS flip as
+			// the insert path. Without it, this mirrored y would report true.
+			name:  "mirrored y is a different tile",
+			write: &[3]int{13, 100, 200},
+			flush: true,
+			probe: [3]int{13, 100, tmsRow(13, 200)},
+			want:  false,
+		},
+		{
+			name:  "zoom zero",
+			write: &[3]int{0, 0, 0},
+			flush: true,
+			probe: [3]int{0, 0, 0},
+			want:  true,
+		},
+		{
+			name:  "high zoom",
+			write: &[3]int{20, 543210, 345678},
+			flush: true,
+			probe: [3]int{20, 543210, 345678},
+			want:  true,
+		},
+		{
+			name:  "high zoom neighbour absent",
+			write: &[3]int{20, 543210, 345678},
+			flush: true,
+			probe: [3]int{20, 543210, 345679},
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, _ := newTestWriter(t)
+
+			if tt.write != nil {
+				if err := w.WriteTile(tt.write[0], tt.write[1], tt.write[2], []byte("fake png")); err != nil {
+					t.Fatalf("WriteTile failed: %v", err)
+				}
+				if tt.flush {
+					if err := w.Flush(); err != nil {
+						t.Fatalf("Flush failed: %v", err)
+					}
+				}
+			}
+
+			got, err := w.HasTile(tt.probe[0], tt.probe[1], tt.probe[2])
+			if err != nil {
+				t.Fatalf("HasTile returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("HasTile(%d,%d,%d) = %v, want %v", tt.probe[0], tt.probe[1], tt.probe[2], got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWriter_HasTileRowMatchesInsert pins the two tmsRow call sites together:
+// the row the insert path stores must be the row the lookup path computes.
+func TestWriter_HasTileRowMatchesInsert(t *testing.T) {
+	tests := []struct{ z, x, y int }{
+		{0, 0, 0},
+		{1, 1, 1},
+		{13, 100, 200},
+		{20, 543210, 345678},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d/%d/%d", tt.z, tt.x, tt.y), func(t *testing.T) {
+			w, _ := newTestWriter(t)
+
+			if err := w.WriteTile(tt.z, tt.x, tt.y, []byte("fake png")); err != nil {
+				t.Fatalf("WriteTile failed: %v", err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush failed: %v", err)
+			}
+
+			var row int
+			err := w.db.QueryRow(
+				"SELECT tile_row FROM tiles WHERE zoom_level=? AND tile_column=?", tt.z, tt.x,
+			).Scan(&row)
+			if err != nil {
+				t.Fatalf("Failed to read tile_row: %v", err)
+			}
+
+			if want := tmsRow(tt.z, tt.y); row != want {
+				t.Errorf("stored tile_row = %d, tmsRow(%d,%d) = %d", row, tt.z, tt.y, want)
+			}
+		})
+	}
+}
+
+// TestWriter_HasTileAfterReopen is the actual resume scenario: a run writes
+// tiles, exits, and a later run must recognize them as already done.
+func TestWriter_HasTileAfterReopen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "resume.mbtiles")
+	metadata := Metadata{Name: "Test", Format: "png"}
+
+	first, err := New(dbPath, metadata)
+	if err != nil {
+		t.Fatalf("Failed to create writer: %v", err)
+	}
+	if err := first.WriteTile(13, 100, 200, []byte("fake png")); err != nil {
+		t.Fatalf("WriteTile failed: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	second, err := New(dbPath, metadata)
+	if err != nil {
+		t.Fatalf("Failed to reopen writer: %v", err)
+	}
+	defer second.Close()
+
+	has, err := second.HasTile(13, 100, 200)
+	if err != nil {
+		t.Fatalf("HasTile returned error: %v", err)
+	}
+	if !has {
+		t.Error("HasTile = false after reopen; a resumed run would re-render everything")
+	}
+
+	if has, err := second.HasTile(13, 100, 201); err != nil {
+		t.Fatalf("HasTile returned error: %v", err)
+	} else if has {
+		t.Error("HasTile = true for a tile that was never written")
+	}
+}
+
+// TestWriter_HasTileConcurrent exercises the mutex under -race.
+func TestWriter_HasTileConcurrent(t *testing.T) {
+	w, _ := newTestWriter(t)
+
+	const goroutines = 8
+	const perGoroutine = 40
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				if err := w.WriteTile(13, g, i, []byte("fake png")); err != nil {
+					t.Errorf("WriteTile failed: %v", err)
+					return
+				}
+				if _, err := w.HasTile(13, g, i); err != nil {
+					t.Errorf("HasTile failed: %v", err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	for g := 0; g < goroutines; g++ {
+		for i := 0; i < perGoroutine; i++ {
+			has, err := w.HasTile(13, g, i)
+			if err != nil {
+				t.Fatalf("HasTile failed: %v", err)
+			}
+			if !has {
+				t.Fatalf("HasTile(13,%d,%d) = false after concurrent writes", g, i)
+			}
+		}
+	}
+}
+
+// TestWriter_HasTileMatchesReader asserts the two views of the same database
+// agree: HasTile is true exactly when ReadTile returns bytes.
+func TestWriter_HasTileMatchesReader(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agree.mbtiles")
+
+	w, err := New(dbPath, Metadata{Name: "Test", Format: "png"})
+	if err != nil {
+		t.Fatalf("Failed to create writer: %v", err)
+	}
+	if err := w.WriteTile(13, 100, 200, []byte("fake png")); err != nil {
+		t.Fatalf("WriteTile failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	w2, err := New(dbPath, Metadata{Name: "Test", Format: "png"})
+	if err != nil {
+		t.Fatalf("Failed to reopen writer: %v", err)
+	}
+	defer w2.Close()
+
+	r, err := OpenReader(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open reader: %v", err)
+	}
+	defer r.Close()
+
+	probes := [][3]int{
+		{13, 100, 200},
+		{13, 100, 201},
+		{13, 100, tmsRow(13, 200)},
+		{12, 100, 200},
+	}
+
+	for _, p := range probes {
+		has, err := w2.HasTile(p[0], p[1], p[2])
+		if err != nil {
+			t.Fatalf("HasTile(%v) returned error: %v", p, err)
+		}
+
+		data, readErr := r.ReadTile(p[0], p[1], p[2])
+		readable := readErr == nil && len(data) > 0
+
+		if has != readable {
+			t.Errorf("HasTile(%v) = %v but ReadTile readable = %v (read err: %v)", p, has, readable, readErr)
+		}
 	}
 }
