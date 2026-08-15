@@ -6,20 +6,9 @@
   "attribution": "© OpenStreetMap contributors · Watercolor-inspired rendering",
   "scheme": "xyz",
   "format": "png",
-  "tiles": [
-    "z{z}_x{x}_y{y}.png"
-  ],
-  "bounds": [
-    9.65,
-    52.32,
-    9.85,
-    52.43
-  ],
-  "center": [
-    9.75,
-    52.375,
-    12
-  ],
+  "tiles": ["z{z}_x{x}_y{y}.png"],
+  "bounds": [9.65, 52.32, 9.85, 52.43],
+  "center": [9.75, 52.375, 12],
   "minzoom": 10,
   "maxzoom": 15
 }
