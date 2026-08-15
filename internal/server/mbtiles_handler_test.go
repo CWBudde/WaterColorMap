@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cwbudde/watercolormap/internal/mbtiles"
@@ -131,16 +132,21 @@ func newTestMBTilesFormat(t *testing.T, format string) string {
 // would then remember.
 func TestMBTilesHandlerContentTypeFollowsTheFile(t *testing.T) {
 	tests := []struct {
-		name   string
+		name string
+		// format is what the tileset declares; reqExt is the extension the
+		// client asks for, and has to match what that declaration resolves to
+		// — serving one format's bytes under the other's name is what
+		// TestMBTilesHandlerRejectsTheOtherExtension covers.
 		format string
+		reqExt string
 		want   string
 	}{
-		{"png tileset", "png", "image/png"},
-		{"webp tileset", "webp", "image/webp"},
+		{"png tileset", "png", ".png", "image/png"},
+		{"webp tileset", "webp", ".webp", "image/webp"},
 		// Files written before the format was trustworthy were all PNG, so an
 		// unreadable declaration must not become an error.
-		{"unknown format falls back to png", "jpeg", "image/png"},
-		{"empty format falls back to png", "", "image/png"},
+		{"unknown format falls back to png", "jpeg", ".png", "image/png"},
+		{"empty format falls back to png", "", ".png", "image/png"},
 	}
 
 	for _, tt := range tests {
@@ -154,7 +160,7 @@ func TestMBTilesHandlerContentTypeFollowsTheFile(t *testing.T) {
 			defer h.Close() //nolint:errcheck // test
 
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/tiles/z13_x4317_y2692.png", nil)
+			req := httptest.NewRequest(http.MethodGet, "/tiles/z13_x4317_y2692"+tt.reqExt, nil)
 			h.Handler()(rec, req)
 
 			if rec.Code != http.StatusOK {
@@ -162,6 +168,49 @@ func TestMBTilesHandlerContentTypeFollowsTheFile(t *testing.T) {
 			}
 			if got := rec.Header().Get("Content-Type"); got != tt.want {
 				t.Errorf("Content-Type = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMBTilesHandlerRejectsTheOtherExtension: a tileset holds exactly one
+// format, so answering the other extension with those same bytes would put
+// WebP behind a .png URL — the cache/URL lie the on-demand handler already
+// refuses. The two backends have to make the same promise, or the guarantee
+// depends on which one happens to be serving.
+func TestMBTilesHandlerRejectsTheOtherExtension(t *testing.T) {
+	tests := []struct {
+		name     string
+		format   string
+		wrongExt string
+	}{
+		{"png tileset asked for webp", "png", ".webp"},
+		{"webp tileset asked for png", "webp", ".png"},
+		// A file that declares nothing is served as PNG, so .webp is still the
+		// wrong extension for it.
+		{"undeclared tileset asked for webp", "", ".webp"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := newTestMBTilesFormat(t, tt.format)
+
+			h, err := NewMBTilesHandler(MBTilesConfig{MBTilesPath: dbPath}, nil)
+			if err != nil {
+				t.Fatalf("NewMBTilesHandler: %v", err)
+			}
+			defer h.Close() //nolint:errcheck // test
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/tiles/z13_x4317_y2692"+tt.wrongExt, nil)
+			h.Handler()(rec, req)
+
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("status = %d, want 404 for %s against a %q tileset",
+					rec.Code, tt.wrongExt, tt.format)
+			}
+			if ct := rec.Header().Get("Content-Type"); strings.HasPrefix(ct, "image/") {
+				t.Errorf("Content-Type = %q; a rejection must not be served as an image", ct)
 			}
 		})
 	}
