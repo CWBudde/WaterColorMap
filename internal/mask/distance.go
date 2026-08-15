@@ -2,7 +2,6 @@ package mask
 
 import (
 	"image"
-	"image/color"
 	"math"
 	"sync"
 )
@@ -130,12 +129,8 @@ func EuclideanDistanceTransformIntoWithContext(
 	temp := ctx.temp
 	isEdge := ctx.isEdge
 
-	// Clear the isEdge buffer (temp will be overwritten completely)
-	for i := 0; i < width*height; i++ {
-		isEdge[i] = false
-	}
-
-	// First, detect which inside pixels are at the edge (adjacent to background)
+	// Neither buffer is cleared first: detectEdgePixels assigns every one of the
+	// width*height entries it will later be read at, and temp is overwritten completely.
 	detectEdgePixels(mask, isEdge, width, height)
 
 	// Now initialize based on edge detection
@@ -146,40 +141,43 @@ func EuclideanDistanceTransformIntoWithContext(
 	distanceTransformColumns(temp, ctx, width, height)
 
 	// Convert squared distances to distances and normalize to 0-255
-	normalizeDistanceFieldInto(mask, temp, width, height, maxDistance, infinity, dst)
+	normalizeDistanceFieldInto(mask, temp, width, maxDistance, infinity, dst)
 }
 
-// detectEdgePixels marks every foreground pixel that has a 4-connected background neighbour.
+// detectEdgePixels marks every foreground pixel that has a 4-connected background
+// neighbour. Every entry is assigned, background pixels included, so the caller does not
+// have to clear the buffer first.
+//
+// The stencil reads three rows, so the row above and below are resolved once per row
+// rather than once per pixel. Both are nil at the top and bottom edge, where the
+// original bounded the neighbour check by y instead.
 func detectEdgePixels(mask *image.Gray, isEdge []bool, width, height int) {
 	bounds := mask.Bounds()
 
 	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			val := mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y).Y
+		row := grayRow(mask, bounds.Min.X, bounds.Min.Y+y, width)
+
+		var above, below []uint8
+		if y > 0 {
+			above = grayRow(mask, bounds.Min.X, bounds.Min.Y+y-1, width)
+		}
+		if y < height-1 {
+			below = grayRow(mask, bounds.Min.X, bounds.Min.Y+y+1, width)
+		}
+
+		out := isEdge[y*width:][:width]
+		for x, val := range row {
 			if val == 0 {
+				out[x] = false
+
 				continue
 			}
 
-			// Check if any 4-connected neighbor is background (value == 0)
-			isEdgePixel := false
-			// Check left
-			if x > 0 && mask.GrayAt(bounds.Min.X+x-1, bounds.Min.Y+y).Y == 0 {
-				isEdgePixel = true
-			}
-			// Check right
-			if x < width-1 && mask.GrayAt(bounds.Min.X+x+1, bounds.Min.Y+y).Y == 0 {
-				isEdgePixel = true
-			}
-			// Check top
-			if y > 0 && mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y-1).Y == 0 {
-				isEdgePixel = true
-			}
-			// Check bottom
-			if y < height-1 && mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y+1).Y == 0 {
-				isEdgePixel = true
-			}
-
-			isEdge[y*width+x] = isEdgePixel
+			// Any 4-connected background neighbour makes this an edge pixel.
+			out[x] = (x > 0 && row[x-1] == 0) ||
+				(x < width-1 && row[x+1] == 0) ||
+				(above != nil && above[x] == 0) ||
+				(below != nil && below[x] == 0)
 		}
 	}
 }
@@ -189,17 +187,19 @@ func initDistanceField(mask *image.Gray, temp []float64, isEdge []bool, width, h
 	bounds := mask.Bounds()
 
 	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			idx := y*width + x
-			val := mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y).Y
+		row := grayRow(mask, bounds.Min.X, bounds.Min.Y+y, width)
+		edges := isEdge[y*width:][:width]
+		dst := temp[y*width:][:width]
 
-			if val > 0 && isEdge[idx] {
-				temp[idx] = 0.0 // Edge pixel - distance is 0
+		for x, val := range row {
+			if val > 0 && edges[x] {
+				dst[x] = 0.0 // Edge pixel - distance is 0
+
 				continue
 			}
 
 			// Interior pixels need a distance computed; background pixels are outside the shape.
-			temp[idx] = infinity
+			dst[x] = infinity
 		}
 	}
 }
@@ -245,20 +245,28 @@ func distanceTransformColumns(temp []float64, ctx *DistanceContext, width, heigh
 // Each pixel of mask is read and written at the same coordinate in the same iteration,
 // so output may be mask itself.
 func normalizeDistanceFieldInto(
-	mask *image.Gray, temp []float64, width, height int, maxDistance, infinity float64, output *image.Gray,
+	mask *image.Gray, temp []float64, width int, maxDistance, infinity float64, output *image.Gray,
 ) {
 	bounds := mask.Bounds()
 	maxDistSq := maxDistance * maxDistance
 
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			distSq := temp[y*width+x]
-			val := mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y).Y
+	// The distance field is indexed from the mask's origin; the output is indexed from
+	// its own, and may be smaller than the mask, which SetGray used to absorb.
+	r := writeRect(bounds, output.Bounds())
+	w := r.Dx()
+	if w == 0 {
+		return
+	}
 
-			output.SetGray(
-				bounds.Min.X+x, bounds.Min.Y+y,
-				color.Gray{Y: normalizedDistanceValue(val, distSq, maxDistSq, maxDistance, infinity)},
-			)
+	tempX := r.Min.X - bounds.Min.X
+
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		srcRow := grayRow(mask, r.Min.X, y, w)
+		dstRow := grayRow(output, r.Min.X, y, w)
+		tempRow := temp[(y-bounds.Min.Y)*width+tempX:][:w]
+
+		for i, val := range srcRow {
+			dstRow[i] = normalizedDistanceValue(val, tempRow[i], maxDistSq, maxDistance, infinity)
 		}
 	}
 }
@@ -368,10 +376,25 @@ func DistanceToIntensityInto(distMask *image.Gray, gamma float64, output *image.
 // that a destination larger than the region being computed keeps the rest of its pixels
 // untouched instead of running the curve over them.
 func distanceToIntensityIntoRect(distMask *image.Gray, gamma float64, output *image.Gray, bounds image.Rectangle) {
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+	r := writeRect(bounds, output.Bounds())
+	w := r.Dx()
+
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		// A distance mask narrower than the rectangle read zero outside itself, which is
+		// what GrayAt returns; a nil row falls back to it.
+		srcRow := grayRow(distMask, r.Min.X, y, w)
+		dstRow := grayRow(output, r.Min.X, y, w)
+
+		for i := range dstRow {
+			dist := uint8(0)
+			if srcRow != nil {
+				dist = srcRow[i]
+			} else {
+				dist = distMask.GrayAt(r.Min.X+i, y).Y
+			}
+
 			// Get normalized distance (0-255)
-			distNorm := float64(distMask.GrayAt(x, y).Y) / 255.0
+			distNorm := float64(dist) / 255.0
 
 			// I = pow(1 - D/R, gamma)
 			base := math.Max(0, 1.0-distNorm)
@@ -380,8 +403,7 @@ func distanceToIntensityIntoRect(distMask *image.Gray, gamma float64, output *im
 			// Convert intensity (0-1) to output (0-255)
 			// Invert: 0 intensity = 255 output (no darkening at center)
 			//         1 intensity = 0 output (max darkening at edge)
-			outputVal := uint8(255.0 * (1.0 - intensity))
-			output.SetGray(x, y, color.Gray{Y: outputVal})
+			dstRow[i] = uint8(255.0 * (1.0 - intensity))
 		}
 	}
 }

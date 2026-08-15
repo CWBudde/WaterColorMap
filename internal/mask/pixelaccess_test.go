@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"math"
 	"testing"
 )
 
@@ -348,4 +349,210 @@ func toAlpha(src *image.Gray) *image.Alpha {
 	copy(dst.Pix, src.Pix)
 
 	return dst
+}
+
+// --- distance transform ---------------------------------------------------------
+
+func referenceDetectEdgePixels(mask *image.Gray, isEdge []bool, width, height int) {
+	bounds := mask.Bounds()
+
+	for i := 0; i < width*height; i++ {
+		isEdge[i] = false
+	}
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			val := mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y).Y
+			if val == 0 {
+				continue
+			}
+
+			isEdgePixel := false
+			if x > 0 && mask.GrayAt(bounds.Min.X+x-1, bounds.Min.Y+y).Y == 0 {
+				isEdgePixel = true
+			}
+			if x < width-1 && mask.GrayAt(bounds.Min.X+x+1, bounds.Min.Y+y).Y == 0 {
+				isEdgePixel = true
+			}
+			if y > 0 && mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y-1).Y == 0 {
+				isEdgePixel = true
+			}
+			if y < height-1 && mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y+1).Y == 0 {
+				isEdgePixel = true
+			}
+
+			isEdge[y*width+x] = isEdgePixel
+		}
+	}
+}
+
+func referenceInitDistanceField(
+	mask *image.Gray, temp []float64, isEdge []bool, width, height int, infinity float64,
+) {
+	bounds := mask.Bounds()
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			idx := y*width + x
+			val := mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y).Y
+
+			if val > 0 && isEdge[idx] {
+				temp[idx] = 0.0
+
+				continue
+			}
+
+			temp[idx] = infinity
+		}
+	}
+}
+
+func referenceNormalizeDistanceFieldInto(
+	mask *image.Gray, temp []float64, width, height int, maxDistance, infinity float64, output *image.Gray,
+) {
+	bounds := mask.Bounds()
+	maxDistSq := maxDistance * maxDistance
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			distSq := temp[y*width+x]
+			val := mask.GrayAt(bounds.Min.X+x, bounds.Min.Y+y).Y
+
+			output.SetGray(
+				bounds.Min.X+x, bounds.Min.Y+y,
+				color.Gray{Y: normalizedDistanceValue(val, distSq, maxDistSq, maxDistance, infinity)},
+			)
+		}
+	}
+}
+
+func referenceDistanceToIntensityIntoRect(
+	distMask *image.Gray, gamma float64, output *image.Gray, bounds image.Rectangle,
+) {
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			distNorm := float64(distMask.GrayAt(x, y).Y) / 255.0
+			base := math.Max(0, 1.0-distNorm)
+			intensity := math.Pow(base, gamma)
+			output.SetGray(x, y, color.Gray{Y: uint8(255.0 * (1.0 - intensity))})
+		}
+	}
+}
+
+func TestDetectEdgePixelsMatchesReference(t *testing.T) {
+	for _, bounds := range testBounds() {
+		mask := randomMask(bounds, 18)
+		w, h := bounds.Dx(), bounds.Dy()
+
+		got := make([]bool, w*h)
+		want := make([]bool, w*h)
+		for i := range got {
+			// A dirty buffer: the rewrite dropped the caller's clearing pass, so every
+			// entry has to be assigned rather than left alone.
+			got[i] = true
+		}
+
+		detectEdgePixels(mask, got, w, h)
+		referenceDetectEdgePixels(mask, want, w, h)
+
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%v: edge detection differs at index %d", bounds, i)
+			}
+		}
+	}
+}
+
+func TestInitDistanceFieldMatchesReference(t *testing.T) {
+	for _, bounds := range testBounds() {
+		mask := randomMask(bounds, 19)
+		w, h := bounds.Dx(), bounds.Dy()
+
+		isEdge := make([]bool, w*h)
+		detectEdgePixels(mask, isEdge, w, h)
+
+		got := make([]float64, w*h)
+		want := make([]float64, w*h)
+
+		initDistanceField(mask, got, isEdge, w, h, 1234.5)
+		referenceInitDistanceField(mask, want, isEdge, w, h, 1234.5)
+
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%v: distance seeding differs at index %d", bounds, i)
+			}
+		}
+	}
+}
+
+func TestNormalizeDistanceFieldIntoMatchesReference(t *testing.T) {
+	for _, bounds := range testBounds() {
+		mask := randomMask(bounds, 20)
+		w, h := bounds.Dx(), bounds.Dy()
+
+		// A plausible field: some pixels at zero, some past the cap, some in between.
+		temp := make([]float64, w*h)
+		for i := range temp {
+			temp[i] = float64((i * 37) % 400)
+		}
+
+		const (
+			maxDistance = 12.0
+			infinity    = maxDistance * maxDistance * 2.0
+		)
+
+		runIntoPair(t, "normalizeDistanceFieldInto", bounds,
+			func(dst *image.Gray) {
+				normalizeDistanceFieldInto(mask, temp, w, maxDistance, infinity, dst)
+			},
+			func(dst *image.Gray) {
+				referenceNormalizeDistanceFieldInto(mask, temp, w, h, maxDistance, infinity, dst)
+			},
+		)
+	}
+}
+
+func TestDistanceToIntensityIntoRectMatchesReference(t *testing.T) {
+	for _, bounds := range testBounds() {
+		src := randomMask(bounds, 21)
+
+		runIntoPair(t, "distanceToIntensityIntoRect", bounds,
+			func(dst *image.Gray) { distanceToIntensityIntoRect(src, testGamma, dst, bounds) },
+			func(dst *image.Gray) { referenceDistanceToIntensityIntoRect(src, testGamma, dst, bounds) },
+		)
+	}
+}
+
+// The edge mask is the one helper whose destination is routinely a different size from
+// its source, so run the whole of it over every destination shape.
+func TestCreateDistanceEdgeMaskIntoMatchesReference(t *testing.T) {
+	for _, bounds := range testBounds() {
+		src := randomMask(bounds, 22)
+		ctx := NewDistanceContext(max(bounds.Dx(), bounds.Dy()))
+
+		for _, dstBounds := range destinationBounds(bounds) {
+			got := filledGray(dstBounds, 0x5A)
+			want := filledGray(dstBounds, 0x5A)
+
+			CreateDistanceEdgeMaskIntoWithContext(src, testRadius, testGamma, ctx, got)
+
+			// The reference runs the same two passes through the accessor-based loops.
+			w, h := bounds.Dx(), bounds.Dy()
+			isEdge := make([]bool, w*h)
+			temp := make([]float64, w*h)
+			infinity := testRadius * testRadius * 2.0
+
+			referenceDetectEdgePixels(src, isEdge, w, h)
+			referenceInitDistanceField(src, temp, isEdge, w, h, infinity)
+			distanceTransformRows(temp, ctx, w, h)
+			distanceTransformColumns(temp, ctx, w, h)
+			referenceNormalizeDistanceFieldInto(src, temp, w, h, testRadius, infinity, want)
+			referenceDistanceToIntensityIntoRect(want, testGamma, want, bounds)
+
+			if !bytes.Equal(got.Pix, want.Pix) {
+				t.Errorf("src %v dst %v: edge mask differs from the reference implementation",
+					bounds, dstBounds)
+			}
+		}
+	}
 }
