@@ -19,33 +19,39 @@ type ProcessorContext struct {
 	painted   *image.NRGBA // buffer for painted result
 	tempNRGBA *image.NRGBA // temporary NRGBA buffer for edge operations
 	tempGray  *image.Gray  // temporary Gray buffer for inverted mask
+	edgeMask  *image.Gray  // buffer for the distance-based edge mask
 	tileSize  int          // current buffer size
 }
 
 // NewProcessorContext creates a context sized for the given tile size.
 func NewProcessorContext(tileSize int) *ProcessorContext {
-	bounds := image.Rect(0, 0, tileSize, tileSize)
-	return &ProcessorContext{
-		distCtx:   mask.NewDistanceContext(tileSize),
-		tiledTex:  image.NewNRGBA(bounds),
-		painted:   image.NewNRGBA(bounds),
-		tempNRGBA: image.NewNRGBA(bounds),
-		tempGray:  image.NewGray(bounds),
-		tileSize:  tileSize,
-	}
+	c := &ProcessorContext{distCtx: mask.NewDistanceContext(tileSize)}
+	c.allocate(tileSize)
+
+	return c
 }
 
-// EnsureCapacity grows buffers if needed for the given tile size.
+// EnsureCapacity resizes the buffers when they do not match the given tile size.
+//
+// This is exact-size rather than grow-only on purpose: the result bounds of a paint are
+// taken from these buffers, so an oversized buffer would silently change the output. The
+// distance context underneath stays grow-only - every loop in it is bounded by the width
+// and height it is given, never by the buffer length.
 func (c *ProcessorContext) EnsureCapacity(tileSize int) {
-	if tileSize <= c.tileSize {
+	if tileSize == c.tileSize {
 		return
 	}
-	bounds := image.Rect(0, 0, tileSize, tileSize)
 	c.distCtx.EnsureCapacity(tileSize, tileSize)
+	c.allocate(tileSize)
+}
+
+func (c *ProcessorContext) allocate(tileSize int) {
+	bounds := image.Rect(0, 0, tileSize, tileSize)
 	c.tiledTex = image.NewNRGBA(bounds)
 	c.painted = image.NewNRGBA(bounds)
 	c.tempNRGBA = image.NewNRGBA(bounds)
 	c.tempGray = image.NewGray(bounds)
+	c.edgeMask = image.NewGray(bounds)
 	c.tileSize = tileSize
 }
 
@@ -260,10 +266,79 @@ func DefaultParams(tileSize int, seed int64, textures map[geojson.LayerType]imag
 	}
 }
 
+// maskScratch holds the intermediate buffers of the mask pipeline. Every stage between
+// the input mask and the final mask is a throwaway, so a layer used to allocate four to
+// six full-size Gray images to produce one. Nothing in here escapes processMask.
+type maskScratch struct {
+	alpha   *image.Gray // extracted alpha of the layer image (PaintLayer path only)
+	blurred *image.Gray // output of the blur stage
+	work    *image.Gray // binary mask -> distance map -> noisy mask, in that order
+	dist    *mask.DistanceContext
+	bounds  image.Rectangle
+}
+
+// ensure resizes the buffers to exactly bounds. Exact rather than grow-only: every stage
+// writes the whole of its own bounds, so a larger buffer would leave stale pixels around
+// the edge of the region the next stage reads.
+func (s *maskScratch) ensure(bounds image.Rectangle) {
+	if s.bounds == bounds && s.blurred != nil {
+		return
+	}
+	s.alpha = image.NewGray(bounds)
+	s.blurred = image.NewGray(bounds)
+	s.work = image.NewGray(bounds)
+	s.bounds = bounds
+	if s.dist == nil {
+		s.dist = mask.NewDistanceContext(max(bounds.Dx(), bounds.Dy()))
+	} else {
+		s.dist.EnsureCapacity(bounds.Dx(), bounds.Dy())
+	}
+}
+
+// maskScratchPool recycles the mask pipeline's intermediate buffers across layers.
+var maskScratchPool sync.Pool
+
+func acquireMaskScratch(bounds image.Rectangle) *maskScratch {
+	sc, ok := maskScratchPool.Get().(*maskScratch)
+	if !ok || sc == nil {
+		sc = &maskScratch{}
+	}
+	sc.ensure(bounds)
+
+	return sc
+}
+
+func releaseMaskScratch(sc *maskScratch) {
+	maskScratchPool.Put(sc)
+}
+
 func processMask(baseMask *image.Gray, layer geojson.LayerType, params Params) (*image.Gray, error) {
 	if baseMask == nil {
 		return nil, errors.New("base mask is nil")
 	}
+
+	sc := acquireMaskScratch(baseMask.Bounds())
+	defer releaseMaskScratch(sc)
+
+	return processMaskWithScratch(baseMask, layer, params, sc)
+}
+
+// processMaskWithScratch runs blur -> noise -> threshold/antialias over sc's buffers.
+//
+// The buffer discipline, and why it is safe:
+//
+//   - baseMask is never written. Only the blur reads it, and the blur's destination is
+//     sc.blurred. That matters because on the PaintLayerFromMask path baseMask belongs to
+//     the pipeline, which keeps it (and may have handed it to the debug capture).
+//   - sc.work carries the binary mask, then the distance map, then the noisy mask. The
+//     distance transform and the noise pass are both safe in place, and the noise pass
+//     reads its mask input from sc.blurred and its noise from params.PerlinNoise, so no
+//     two arguments of any stage alias in a way that would tear.
+//   - the returned final mask is freshly allocated: it outlives the scratch. On the land
+//     path the pipeline keeps it to constrain the parks layer.
+func processMaskWithScratch(
+	baseMask *image.Gray, layer geojson.LayerType, params Params, sc *maskScratch,
+) (*image.Gray, error) {
 	style, ok := params.Styles[layer]
 	if !ok {
 		return nil, fmt.Errorf("missing style for layer %s", layer)
@@ -285,30 +360,33 @@ func processMask(baseMask *image.Gray, layer geojson.LayerType, params Params) (
 		threshold = *style.MaskThreshold
 	}
 
-	blurred := mask.BoxBlurSigma(baseMask, layerBlur)
+	blurred := sc.blurred
+	mask.BoxBlurSigmaInto(blurred, baseMask, layerBlur)
+
 	noisy := blurred
 	// Skip the noise stage when no noise texture is available. Production always sets
 	// params.PerlinNoise (pipeline and WASM paths), so this only guards against a missing
 	// texture instead of dereferencing nil inside the noise application.
 	if layerNoiseStrength != 0 && params.PerlinNoise != nil {
+		noisy = sc.work
 		if style.AdaptiveNoise && style.NoiseMaxDist > 0 {
 			// Compute distance transform of thresholded mask to measure feature thickness
 			// Use NoiseMaxDist as the max distance since we only need to distinguish up to that point
-			binaryMask := mask.ApplyThreshold(blurred, threshold)
-			distMap := mask.EuclideanDistanceTransform(binaryMask, style.NoiseMaxDist)
-			noisy = mask.ApplyNoiseToMaskAdaptive(blurred, params.PerlinNoise, distMap,
-				layerNoiseStrength, style.NoiseMinDist, style.NoiseMaxDist)
+			mask.ApplyThresholdInto(blurred, threshold, sc.work)
+			mask.EuclideanDistanceTransformIntoWithContext(sc.work, style.NoiseMaxDist, sc.dist, sc.work)
+			mask.ApplyNoiseToMaskAdaptiveInto(blurred, params.PerlinNoise, sc.work,
+				layerNoiseStrength, style.NoiseMinDist, style.NoiseMaxDist, sc.work)
 		} else {
-			noisy = mask.ApplyNoiseToMask(blurred, params.PerlinNoise, layerNoiseStrength)
+			mask.ApplyNoiseToMaskInto(blurred, params.PerlinNoise, layerNoiseStrength, sc.work)
 		}
 	}
 
 	// Apply threshold with antialiasing, optionally inverting (for land = invert of non-land)
-	var finalMask *image.Gray
+	finalMask := image.NewGray(baseMask.Bounds())
 	if style.InvertMask {
-		finalMask = mask.ApplyThresholdWithAntialiasAndInvert(noisy, threshold)
+		mask.ApplyThresholdWithAntialiasAndInvertInto(noisy, threshold, finalMask)
 	} else {
-		finalMask = mask.ApplyThresholdWithAntialias(noisy, threshold)
+		mask.ApplyThresholdWithAntialiasInto(noisy, threshold, finalMask)
 	}
 
 	return finalMask, nil
@@ -321,11 +399,11 @@ var processorContextPool sync.Pool
 
 func paintFromFinalMask(finalMask *image.Gray, layer geojson.LayerType, params Params) (*image.NRGBA, error) {
 	// Borrow a context from the pool. EnsureCapacity (called by the WithContext
-	// variant) grows undersized buffers, but it never shrinks them, and the
-	// result bounds are taken from the buffers - so a pooled context that is
-	// larger than the requested tile must be replaced rather than reused.
+	// variant) resizes the buffers in either direction, so a pooled context of any
+	// size can be reused - which matters for a server that serves @1x and @2x tiles
+	// from the same process.
 	ctx, ok := processorContextPool.Get().(*ProcessorContext)
-	if !ok || ctx == nil || ctx.tileSize > params.TileSize {
+	if !ok || ctx == nil {
 		ctx = NewProcessorContext(params.TileSize)
 	}
 	defer processorContextPool.Put(ctx)
@@ -352,15 +430,20 @@ func paintFromFinalMaskWithContext(finalMask *image.Gray, layer geojson.LayerTyp
 	ctx.EnsureCapacity(params.TileSize)
 
 	// The *Into helpers below are bounded by the final mask, not by the buffer:
-	// ApplyMaskToTextureInto and InvertMaskInto iterate over the mask's bounds only.
-	// If the mask is smaller than the tile, the remainder of a recycled buffer would
-	// still hold the previous paint, and the edge pass (which runs over the full
-	// buffer) would carry those stale pixels into the result. Zero the affected
-	// buffers in that case; when the mask covers the whole tile they are fully
-	// overwritten anyway and clearing is skipped.
+	// ApplyMaskToTextureInto, InvertMaskInto and the edge-mask pass iterate over the
+	// mask's bounds only. If the mask is smaller than the tile, the remainder of a
+	// recycled buffer would still hold the previous paint, and the edge pass (which
+	// runs over the full buffer) would carry those stale pixels into the result. Zero
+	// the affected buffers in that case; when the mask covers the whole tile they are
+	// fully overwritten anyway and clearing is skipped.
+	//
+	// Zero is also what the edge mask used to read outside the mask region back when it
+	// was allocated at the mask's own bounds: image.Gray.GrayAt returns the zero value
+	// out of bounds. Clearing keeps that behaviour bit-for-bit.
 	if finalMask.Bounds() != ctx.painted.Bounds() {
 		clear(ctx.painted.Pix)
 		clear(ctx.tempGray.Pix)
+		clear(ctx.edgeMask.Pix)
 	}
 
 	// Texture + mask using pooled buffers
@@ -392,18 +475,18 @@ func paintFromFinalMaskWithContext(finalMask *image.Gray, layer geojson.LayerTyp
 		gamma = 1.0
 	}
 
-	edgeMask := mask.CreateDistanceEdgeMaskWithContext(finalMask, radius, gamma, ctx.distCtx)
-	if edgeMask == nil {
-		return nil, errors.New("failed to create edge mask")
-	}
+	mask.CreateDistanceEdgeMaskIntoWithContext(finalMask, radius, gamma, ctx.distCtx, ctx.edgeMask)
+
+	// The result has to be a buffer of its own - it outlives the pooled context, which
+	// the compositor holds every painted layer of a tile at once. Since it is allocated
+	// anyway, write the last pass straight into it instead of copying out of the context:
+	// ApplySoftEdgeMaskInto writes every pixel of result's bounds, which is exactly what
+	// output is allocated with.
+	//
 	// ApplySoftEdgeMask expects: 255=no change, 0=maximum effect
 	// CreateDistanceEdgeMask produces: 255=no effect (center), 0=max effect (edges)
-	mask.ApplySoftEdgeMaskInto(result, edgeMask, style.EdgeStrength, ctx.tempNRGBA)
-
-	// Return a copy since ctx.tempNRGBA will be reused
-	bounds := ctx.tempNRGBA.Bounds()
-	output := image.NewNRGBA(bounds)
-	copy(output.Pix, ctx.tempNRGBA.Pix)
+	output := image.NewNRGBA(result.Bounds())
+	mask.ApplySoftEdgeMaskInto(result, ctx.edgeMask, style.EdgeStrength, output)
 
 	return output, nil
 }
@@ -424,9 +507,14 @@ func PaintLayer(layerImage image.Image, layer geojson.LayerType, params Params) 
 		return nil, errors.New("noise scale must be positive")
 	}
 
-	// Use alpha-only mask as the base input for the mask pipeline.
-	baseMask := mask.ExtractAlphaMask(layerImage)
-	finalMask, err := processMask(baseMask, layer, params)
+	// Use alpha-only mask as the base input for the mask pipeline. The scratch is
+	// borrowed here rather than inside processMask so that the alpha mask - which nothing
+	// downstream keeps - comes out of the pool too.
+	sc := acquireMaskScratch(layerImage.Bounds())
+	defer releaseMaskScratch(sc)
+
+	mask.ExtractAlphaMaskInto(layerImage, sc.alpha)
+	finalMask, err := processMaskWithScratch(sc.alpha, layer, params, sc)
 	if err != nil {
 		return nil, err
 	}
