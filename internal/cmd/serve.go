@@ -19,6 +19,7 @@ import (
 
 	"github.com/cwbudde/watercolormap/internal/datasource"
 	"github.com/cwbudde/watercolormap/internal/pipeline"
+	"github.com/cwbudde/watercolormap/internal/renderer"
 	"github.com/cwbudde/watercolormap/internal/server"
 	"github.com/cwbudde/watercolormap/internal/tileformat"
 	"github.com/cwbudde/watercolormap/internal/tilejson"
@@ -195,12 +196,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		mux.Handle("/tiles/", withCORS(corsOrigin, withReadMethods(rateLimiter.Middleware(mbHandler.Handler()))))
 	} else {
 		logger.Info("Using folder-based tile serving with on-demand generation", "tiles_dir", tilesDir)
-		ocean, err := oceanConfig()
+		ocean, naturalEarth, err := shapefileSources()
 		if err != nil {
 			return err
-		}
-		if ocean.Enabled() {
-			logger.Info("Ocean rendering enabled", "shapefile", ocean.FullPath, "simplified", ocean.SimplifiedPath)
 		}
 
 		ds, err := serveDataSource(overpassWorkers, ocean.Enabled(), logger)
@@ -216,6 +214,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		od, err := server.NewOnDemandTiles(ds, server.OnDemandTilesConfig{
 			Watercolor:               wcOverrides,
 			Ocean:                    ocean,
+			NaturalEarth:             naturalEarth,
 			TilesDir:                 tilesDir,
 			StylesDir:                filepath.Join("assets", "styles"),
 			TexturesDir:              filepath.Join("assets", "textures"),
@@ -409,6 +408,33 @@ func serveUntil(stopCtx context.Context, srv *http.Server, shutdownTimeout time.
 
 	logger.Info("server stopped")
 	return nil
+}
+
+// shapefileSources resolves the two shapefile-backed data sources — the ocean
+// pass and the Natural Earth low-zoom passes — and logs which are on.
+//
+// Both are opt-in and both are validated here, before the server binds a port:
+// a mistyped path should stop the process, not surface a thousand tan-ocean or
+// empty-world tiles later.
+func shapefileSources() (renderer.OceanConfig, renderer.NaturalEarthConfig, error) {
+	ocean, err := oceanConfig()
+	if err != nil {
+		return renderer.OceanConfig{}, renderer.NaturalEarthConfig{}, err
+	}
+	if ocean.Enabled() {
+		logger.Info("Ocean rendering enabled", "shapefile", ocean.FullPath, "simplified", ocean.SimplifiedPath)
+	}
+
+	naturalEarth, err := naturalEarthConfig()
+	if err != nil {
+		return renderer.OceanConfig{}, renderer.NaturalEarthConfig{}, err
+	}
+	if naturalEarth.Enabled() {
+		logger.Info("Natural Earth low-zoom rendering enabled",
+			"dir", naturalEarth.Dir, "max_zoom", naturalEarth.EffectiveMaxZoom())
+	}
+
+	return ocean, naturalEarth, nil
 }
 
 // serveDataSource resolves the configured data source for `serve`.

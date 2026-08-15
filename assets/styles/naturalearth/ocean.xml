@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Map background-color="#00000000" srs="+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs +over">
+
+  <!-- Natural Earth Ocean Layer Style (z0-5) -->
+  <!-- Same pure blue (#0000FF) as layers/ocean.xml and layers/water.xml, so the -->
+  <!-- pipeline folds this pass into the water mask as a plain union. -->
+
+  <Style name="ocean">
+    <Rule>
+      <PolygonSymbolizer fill="#0000FF" clip="false" />
+    </Rule>
+  </Style>
+
+  <!-- Data Layers -->
+  <!-- Read through Mapnik's native shape plugin, like layers/ocean.xml. Unlike -->
+  <!-- that one, the srs here is longlat: the processed OSM water polygons ship -->
+  <!-- in 3857 and need no reprojection, but Natural Earth ships in EPSG:4326, -->
+  <!-- so Mapnik reprojects. Do not copy the merc srs across from layers/. -->
+  <Layer name="ocean" srs="+proj=longlat +datum=WGS84 +no_defs">
+    <StyleName>ocean</StyleName>
+    <Datasource>
+      <Parameter name="type">shape</Parameter>
+      <Parameter name="file">DATASOURCE_PLACEHOLDER</Parameter>
+    </Datasource>
+  </Layer>
+
+</Map>

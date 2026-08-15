@@ -104,6 +104,11 @@ type GeneratorOptions struct {
 	// did before ocean rendering existed.
 	Ocean renderer.OceanConfig
 
+	// NaturalEarth points the low-zoom passes at the Natural Earth shapefiles.
+	// The zero value disables them, and every zoom then goes through Overpass
+	// exactly as it did before.
+	NaturalEarth renderer.NaturalEarthConfig
+
 	// WebPEffort is nativewebp's compression level (0-6), every value
 	// explicit — 0 is the fastest level, not "unset". Ignored unless
 	// ImageFormat is WebP. The generate command defaults it to
@@ -531,10 +536,28 @@ func (g *Generator) renderLayersWithData(
 	// Use prefetched data if available, otherwise fetch from datasource
 	var data *types.TileData
 	var err error
-	if prefetchedData != nil {
+	switch {
+	case prefetchedData != nil:
 		g.log().Info("Using pre-fetched tile data", "coords", coords.String())
 		data = prefetchedData
-	} else {
+	case g.options.NaturalEarth.CoversZoom(int(coords.Z)):
+		// Below z6 every feature comes from Natural Earth, so there is nothing
+		// to ask Overpass for. Skipping the fetch here rather than inside the
+		// renderer is what makes the low tier cheap *and* offline: one z2 query
+		// would ask a regional instance for a quarter of the planet. Doing it in
+		// the generator covers `generate`, `generate --bbox`, banded runs and
+		// `serve`'s on-demand path at once, because they all pass through here.
+		g.log().Info("Skipping tile data fetch: zoom is served from Natural Earth",
+			"coords", coords.String())
+		// No Features and no FetchedAt: nothing was fetched, and stamping a
+		// time here would claim otherwise. The renderer takes every low-zoom
+		// layer from the shapefiles and never looks at Features.
+		data = &types.TileData{
+			Coordinate: tileCoord,
+			Bounds:     dataBounds,
+			Source:     "natural-earth",
+		}
+	default:
 		g.log().Info("Fetching tile data", "coords", coords.String(), "padPx", padPx)
 		if dsb, ok := g.ds.(dataSourceWithBounds); ok {
 			data, err = dsb.FetchTileDataWithBounds(ctx, tileCoord, dataBounds)
@@ -565,6 +588,7 @@ func (g *Generator) renderLayersWithData(
 		return nil, fmt.Errorf("failed to create multipass renderer: %w", err)
 	}
 	mpRenderer.SetOceanConfig(g.options.Ocean)
+	mpRenderer.SetNaturalEarthConfig(g.options.NaturalEarth)
 	defer mpRenderer.Close() // nolint:errcheck
 
 	renderResult, err := mpRenderer.RenderTile(coords, data)

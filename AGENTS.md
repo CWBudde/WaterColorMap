@@ -31,7 +31,7 @@ Module: `github.com/cwbudde/watercolormap` (Go 1.25, cgo — Mapnik 3.1+ require
 | `internal/mbtiles`              | MBTiles reader/writer                                                  |
 | `internal/tileformat`           | Tile image format identity (ext, MIME) and encoders (PNG, WebP)        |
 | `internal/safe`                 | Panic recovery helpers for background work                             |
-| `assets/`                       | Mapnik layer styles and watercolor textures                            |
+| `assets/`                       | Mapnik layer styles (incl. the z0-5 Natural Earth set) and textures    |
 
 ## Common commands
 

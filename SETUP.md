@@ -148,6 +148,22 @@ go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
    Then uncomment the `ocean:` block in `config.yaml`. Ocean rendering stays off
    until it is configured.
 
+5. Optional — download the low-zoom (z0-5) data:
+
+   ```bash
+   just fetch-natural-earth
+   ```
+
+   Below z6, OSM is both too detailed and missing the generalised coastlines a
+   world view needs, and one z2 tile would ask Overpass for a quarter of the
+   planet. The recipe downloads the generalised ocean, lakes and river datasets
+   from [naturalearthdata.com](https://www.naturalearthdata.com/) into the same
+   gitignored `./data` directory (~10 MB) and builds their `.index` sidecars.
+
+   Then uncomment the `natural-earth:` block in `config.yaml`. Tiles at or below
+   `max-zoom` then render entirely from these shapefiles and make no Overpass
+   request at all; z6 and above are unaffected either way.
+
 ### Running Tests
 
 ```bash

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Map background-color="#00000000" srs="+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs +over">
+
+  <!-- Natural Earth Water Layer Style (z0-5) -->
+  <!-- Lakes, in the same pure blue (#0000FF) as layers/water.xml so the mask -->
+  <!-- extraction downstream is unchanged. -->
+
+  <Style name="water">
+    <Rule>
+      <PolygonSymbolizer fill="#0000FF" clip="false" />
+    </Rule>
+  </Style>
+
+  <!-- Data Layers -->
+  <!-- The shape plugin instead of ogr+GeoJSON: below z6 the features come from -->
+  <!-- a shapefile, not from Overpass. The layer srs is unchanged from -->
+  <!-- layers/water.xml, since Natural Earth ships in EPSG:4326. -->
+  <Layer name="water" srs="+proj=longlat +datum=WGS84 +no_defs">
+    <StyleName>water</StyleName>
+    <Datasource>
+      <Parameter name="type">shape</Parameter>
+      <Parameter name="file">DATASOURCE_PLACEHOLDER</Parameter>
+    </Datasource>
+  </Layer>
+
+</Map>

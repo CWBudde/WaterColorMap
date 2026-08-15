@@ -83,6 +83,35 @@ overpass:
 #   # Last zoom served from the simplified set. Default: 9.
 #   simplified-max-zoom: 9
 
+# --- natural-earth ---------------------------------------------------------
+# The z0-5 data source. Below z6 OSM is the wrong source twice over: a single
+# z2 tile would ask Overpass for a quarter of the planet, and ungeneralised
+# coastline at ~1px per 50km is detail nobody can see. Natural Earth ships
+# generalised shapefiles for exactly this scale; run `just fetch-natural-earth`
+# to download and index them into ./data (~10 MB).
+#
+# With the block enabled, tiles at or below max-zoom are rendered entirely from
+# these shapefiles and make no Overpass request at all. Coastline, lakes and
+# rivers are all that exists down there — roads, buildings and the rest render
+# absent, which is what a world view should look like.
+#
+# Leave the whole block out to disable it; every zoom then goes through
+# Overpass exactly as before. The path is checked at startup.
+#
+# natural-earth:
+#   enabled: true
+#   # Directory holding the unpacked ne_*m_* shapefiles (they extract flat).
+#   dir: "./data/natural-earth"
+#   # Last zoom served from Natural Earth. Default: 5. The 110m datasets serve
+#   # z0-2 and the 50m ones z3 upwards.
+#   #
+#   # Raising it is a real option, and measured: a z6 Overpass query over a
+#   # regional extract returns more than the 64 MiB response cap and fails the
+#   # tile outright, so z6-z8 are currently unrenderable from OSM anyway.
+#   # max-zoom: 8 makes that band render from Natural Earth instead. The
+#   # trade-off is detail: 50m coastline is visibly generalised by z8.
+#   max-zoom: 5
+
 # --- generate --------------------------------------------------------------
 # Values shown are the built-in defaults.
 # generate:

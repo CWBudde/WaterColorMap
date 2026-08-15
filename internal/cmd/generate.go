@@ -281,6 +281,11 @@ func runSingleGenerate(opts *singleOptions) error {
 		return err
 	}
 
+	naturalEarth, err := naturalEarthConfig()
+	if err != nil {
+		return err
+	}
+
 	ds, err := newTileDataSource(opts.dataSourceName, ocean.Enabled())
 	if err != nil {
 		return err
@@ -301,6 +306,7 @@ func runSingleGenerate(opts *singleOptions) error {
 		FolderStructure: opts.folderStructure,
 		Watercolor:      wcOverrides,
 		Ocean:           ocean,
+		NaturalEarth:    naturalEarth,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to init generator: %w", err)
@@ -325,6 +331,7 @@ func runSingleGenerate(opts *singleOptions) error {
 			FolderStructure: opts.folderStructure,
 			Watercolor:      wcOverrides,
 			Ocean:           ocean,
+			NaturalEarth:    naturalEarth,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to init hidpi generator: %w", err)
@@ -357,6 +364,8 @@ type batchOptions struct {
 	// ocean is resolved in runBatchGenerate, not from a flag: it comes from the
 	// `ocean:` config block.
 	ocean renderer.OceanConfig
+	// naturalEarth likewise comes from the `natural-earth:` config block.
+	naturalEarth renderer.NaturalEarthConfig
 	// band holds the validated band-fetching knobs; only read when bandFetch.
 	band          bandOptions
 	seed          int64
@@ -397,6 +406,12 @@ func runBatchGenerate(opts *batchOptions) error {
 		return err
 	}
 	opts.ocean = ocean
+
+	naturalEarth, err := naturalEarthConfig()
+	if err != nil {
+		return err
+	}
+	opts.naturalEarth = naturalEarth
 
 	ds, err := newTileDataSource(opts.dataSourceName, ocean.Enabled())
 	if err != nil {
@@ -624,6 +639,7 @@ func newBatchGenerator(opts *batchOptions, ds pipeline.DataSource, tileSize int,
 			FolderStructure: opts.folderStructure,
 			Watercolor:      wcOverrides,
 			Ocean:           opts.ocean,
+			NaturalEarth:    opts.naturalEarth,
 		},
 	)
 }

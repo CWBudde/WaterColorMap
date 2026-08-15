@@ -252,6 +252,68 @@ require-water-polygons:
       exit 1
     fi
 
+# Natural Earth — the z0-5 source. OSM below z6 is both too detailed and
+# missing the generalised coastlines a world view needs, and one z2 tile would
+# ask Overpass for a quarter of the planet. See docs/zoom-levels.md and
+# PLAN.md 5.3.
+natural_earth_dir := "data/natural-earth"
+natural_earth_base := "https://naciscdn.org/naturalearth"
+
+# Download and index the Natural Earth datasets used at z0-5 (~10 MB total).
+#
+# Three orders of magnitude smaller than the water polygons, so unlike those
+# there is no reason to split the download: fetch both scales at once. 110m
+# serves z0-2 and 50m serves z3-5.
+fetch-natural-earth:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for scale in 110m 50m; do
+      for set in ocean lakes rivers_lake_centerlines; do
+        just _fetch-natural-earth "$scale" "ne_${scale}_${set}"
+      done
+    done
+    echo "Natural Earth ready in {{natural_earth_dir}}/"
+    echo "Point config.yaml at it (see the 'natural-earth:' block in config.example.yaml)."
+
+# Download, unzip and index one Natural Earth dataset.
+#
+# Same shape as _fetch-water-polygons, and for the same reason: without the
+# .index sidecar Mapnik scans the whole shapefile for every tile instead of
+# doing a bbox lookup. These zips extract flat, so everything lands directly in
+# the dataset directory.
+#
+# If naciscdn.org is unreachable, the same files are published under
+# https://github.com/nvkelso/natural-earth-vector (releases, or the
+# `<scale>_physical/` directories on main).
+_fetch-natural-earth scale name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="{{natural_earth_dir}}"
+    mkdir -p "$dir"
+    if [ -f "$dir/{{name}}.shp" ]; then
+      echo "{{name}} already present in $dir — skipping download."
+    else
+      echo "Downloading {{name}}.zip ..."
+      curl -fL --progress-bar -o "$dir/{{name}}.zip" \
+        "{{natural_earth_base}}/{{scale}}/physical/{{name}}.zip"
+      unzip -q -o -d "$dir" "$dir/{{name}}.zip"
+      rm -f "$dir/{{name}}.zip"
+    fi
+    if [ ! -f "$dir/{{name}}.index" ]; then
+      echo "Indexing {{name}}.shp ..."
+      shapeindex "$dir/{{name}}.shp"
+    fi
+
+# Fail early with a useful message instead of rendering an empty world.
+require-natural-earth:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d "{{natural_earth_dir}}" ]; then
+      echo "No Natural Earth data in {{natural_earth_dir}}." >&2
+      echo "Run:  just fetch-natural-earth" >&2
+      exit 1
+    fi
+
 # Build Docker image
 docker-build:
     @echo "Building Docker image..."

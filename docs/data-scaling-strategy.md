@@ -274,10 +274,16 @@ of thing:
   simplified water polygons up to `DefaultSimplifiedMaxZoom = 9` and the full set
   above.
 
-**Natural Earth currently appears nowhere in code** — grep finds it only in
-PLAN.md and `docs/goal.md`. Filling § 5.3's z0-5 gap by copying the ocean pattern
-is the concrete piece of work this section recommends, and it is the tier that §3's
-T1 depends on.
+Filling § 5.3's z0-5 gap by copying the ocean pattern is the concrete piece of
+work this section recommends, and it is the tier that §3's T1 depends on.
+
+**This has since been implemented** (`internal/renderer/naturalearth.go`,
+`assets/styles/naturalearth/`, `just fetch-natural-earth`), so the sentence that
+used to stand here — "Natural Earth currently appears nowhere in code" — is no
+longer true. One correction to the recommendation above, found in the doing: the
+water polygons ship in 3857 and reproject nothing, but **Natural Earth ships in
+EPSG:4326**, so its styles declare a longlat layer srs and Mapnik reprojects.
+Copying `layers/ocean.xml`'s srs across fails silently.
 
 ## 3. Storage requirements
 
@@ -845,9 +851,9 @@ _capability_ is not: there is no purge command, and no data-version stamp on a
 tile, so the design above cannot actually be implemented today without writing
 both.
 
-**§ 5.3 Multi-Zoom Generation stays open**, and § 2 hands it a concrete plan
-(Natural Earth via `shape.input`, following the ocean pattern) rather than closing
-it.
+**§ 5.3 Multi-Zoom Generation is closed.** § 2 handed it a concrete plan
+(Natural Earth via `shape.input`, following the ocean pattern) and that plan has
+since been carried out; see [zoom-levels.md](zoom-levels.md).
 
 Follow-ups this work surfaced, roughly in priority order:
 
@@ -864,7 +870,14 @@ Follow-ups this work surfaced, roughly in priority order:
 5. **WebP encoding + serving** (§ 3) — done, but lossless: 1.21× measured, not the
    9.2× a lossy encoder would give. The only thing that makes an
    empty tile cheap.
-6. **Natural Earth for z0-5** (§ 2, § 3's T1) — copy the ocean pattern.
+6. **Natural Earth for z0-5** (§ 2, § 3's T1) — **done.** The ocean pattern was
+   copied as recommended: `NaturalEarthConfig` (`internal/renderer/naturalearth.go`)
+   selects 110m below z3 and 50m up to z5, three styles under
+   `assets/styles/naturalearth/` read them through `shape.input`, and
+   `just fetch-natural-earth` downloads and `shapeindex`es them. The part worth
+   knowing beyond the recommendation: the generator **skips the Overpass fetch
+   entirely** below the ceiling, so the low tier renders offline. See
+   [zoom-levels.md](zoom-levels.md).
 7. **Tile data-version stamp and a purge command** (§ 4) — prerequisites for any
    real update policy.
 8. **Streaming task enumeration in `worker.Pool`** (§ 1, defect 3) — not needed for
