@@ -332,3 +332,24 @@ func TestHandler_ForwardedProto(t *testing.T) {
 		})
 	}
 }
+
+// nil already means "not supplied", so an explicit zero value must survive:
+// [0, 0, 0] is null island at zoom 0 and [0,0,0,0] is a degenerate but stated
+// bounds. Both were being silently replaced before.
+func TestNew_PreservesExplicitZeroBoundsAndCenter(t *testing.T) {
+	zeroBounds := [4]float64{}
+	zeroCenter := [3]float64{}
+
+	doc := tilejson.New(tilejson.Options{
+		Tiles:  []string{"z{z}_x{x}_y{y}.png"},
+		Bounds: &zeroBounds,
+		Center: &zeroCenter,
+	})
+
+	if !reflect.DeepEqual(doc.Bounds, []float64{0, 0, 0, 0}) {
+		t.Errorf("bounds = %v, want [0 0 0 0]", doc.Bounds)
+	}
+	if !reflect.DeepEqual(doc.Center, []float64{0, 0, 0}) {
+		t.Errorf("center = %v, want [0 0 0]", doc.Center)
+	}
+}

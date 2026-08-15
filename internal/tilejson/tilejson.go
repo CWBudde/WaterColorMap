@@ -115,13 +115,16 @@ func New(opts Options) TileJSON {
 		doc.MaxZoom = *opts.MaxZoom
 	}
 
+	// The pointer already distinguishes "not supplied" from "supplied"; an extra
+	// zero-value check would drop legitimate input. [0, 0, 0] is null island at
+	// zoom 0, a perfectly valid centre, and it was being silently discarded.
 	bounds := WorldBounds
-	if opts.Bounds != nil && *opts.Bounds != ([4]float64{}) {
+	if opts.Bounds != nil {
 		bounds = *opts.Bounds
 	}
 	doc.Bounds = bounds[:]
 
-	if opts.Center != nil && *opts.Center != ([3]float64{}) {
+	if opts.Center != nil {
 		center := *opts.Center
 		doc.Center = center[:]
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/pipeline"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/tilejson"
+	"github.com/cwbudde/watercolormap/internal/watercolor"
 	"github.com/cwbudde/watercolormap/internal/worker"
 )
 
@@ -313,6 +314,15 @@ func runBatchGenerate(opts *batchOptions) error {
 		return err
 	}
 
+	// Parse and validate the watercolor config before anything is opened for
+	// writing. mbtiles.New empties and re-inserts the metadata table on open, so
+	// loading this afterwards would let a typo in the watercolor block destroy
+	// the metadata of an existing output database on its way to a startup error.
+	wcOverrides, err := loadWatercolorOverrides()
+	if err != nil {
+		return err
+	}
+
 	// Create MBTiles writers if needed
 	mbtilesWriter, mbtilesWriterHiDPI, err := openMBTilesWriters(opts, bbox)
 	if err != nil {
@@ -326,7 +336,7 @@ func runBatchGenerate(opts *batchOptions) error {
 		tileWriter = mbtilesWriter
 	}
 
-	gen, err := newBatchGenerator(opts, ds, opts.tileSize, tileWriter)
+	gen, err := newBatchGenerator(opts, ds, opts.tileSize, tileWriter, wcOverrides)
 	if err != nil {
 		return fmt.Errorf("failed to init generator: %w", err)
 	}
@@ -346,7 +356,7 @@ func runBatchGenerate(opts *batchOptions) error {
 
 	// Generate HiDPI tiles if requested
 	if opts.hidpi {
-		if err := runHiDPIBatch(ctx, opts, ds, tiles, mbtilesWriterHiDPI); err != nil {
+		if err := runHiDPIBatch(ctx, opts, ds, tiles, mbtilesWriterHiDPI, wcOverrides); err != nil {
 			return err
 		}
 	}
@@ -506,12 +516,7 @@ func flushMBTilesWriters(opts *batchOptions, base, hidpi *mbtiles.Writer) error 
 }
 
 // newBatchGenerator builds a pipeline generator for the given tile size.
-func newBatchGenerator(opts *batchOptions, ds pipeline.DataSource, tileSize int, tileWriter pipeline.TileWriter) (*pipeline.Generator, error) {
-	wcOverrides, err := loadWatercolorOverrides()
-	if err != nil {
-		return nil, err
-	}
-
+func newBatchGenerator(opts *batchOptions, ds pipeline.DataSource, tileSize int, tileWriter pipeline.TileWriter, wcOverrides *watercolor.Overrides) (*pipeline.Generator, error) {
 	return pipeline.NewGenerator(
 		ds,
 		filepath.Join("assets", "styles"),
@@ -596,7 +601,7 @@ func failureError(failedCount int, kind string, allowFailures bool) error {
 }
 
 // runHiDPIBatch generates the @2x variants of the given tiles.
-func runHiDPIBatch(ctx context.Context, opts *batchOptions, ds pipeline.DataSource, tiles []tile.Coords, hidpiWriter *mbtiles.Writer) error {
+func runHiDPIBatch(ctx context.Context, opts *batchOptions, ds pipeline.DataSource, tiles []tile.Coords, hidpiWriter *mbtiles.Writer, wcOverrides *watercolor.Overrides) error {
 	logger.Info("Generating HiDPI tiles", "count", len(tiles))
 
 	// Create HiDPI generator with appropriate writer
@@ -605,7 +610,7 @@ func runHiDPIBatch(ctx context.Context, opts *batchOptions, ds pipeline.DataSour
 		tileWriter = hidpiWriter
 	}
 
-	genHiDPI, err := newBatchGenerator(opts, ds, opts.tileSize*2, tileWriter)
+	genHiDPI, err := newBatchGenerator(opts, ds, opts.tileSize*2, tileWriter, wcOverrides)
 	if err != nil {
 		return fmt.Errorf("failed to init HiDPI generator: %w", err)
 	}
