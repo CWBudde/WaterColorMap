@@ -172,6 +172,41 @@ func TestNaturalEarthMissingDatasetIsAbsentNotFatal(t *testing.T) {
 	}
 }
 
+// TestNaturalEarthScaleFallsBackToTheOtherScale: with only the 110m set on disk
+// — which Validate accepts, because it is a real download — z3-5 must not lose
+// the ocean. An oceanless low-zoom tile is all land, i.e. the inverted world
+// OceanConfig's own two-dataset fallback exists to avoid.
+func TestNaturalEarthScaleFallsBackToTheOtherScale(t *testing.T) {
+	t.Run("110m stands in above the mid-scale threshold", func(t *testing.T) {
+		cfg := NaturalEarthConfig{Dir: neDir(t, "ne_110m_ocean.shp")}
+		got := cfg.ShapefileForLayer(geojson.LayerOcean, 5)
+		if got == "" {
+			t.Fatal("z5 ocean must fall back to 110m rather than render no ocean at all")
+		}
+		if filepath.Base(got) != "ne_110m_ocean.shp" {
+			t.Errorf("got %q, want the 110m stand-in", filepath.Base(got))
+		}
+	})
+
+	t.Run("50m stands in below it", func(t *testing.T) {
+		cfg := NaturalEarthConfig{Dir: neDir(t, "ne_50m_ocean.shp")}
+		got := cfg.ShapefileForLayer(geojson.LayerOcean, 0)
+		if filepath.Base(got) != "ne_50m_ocean.shp" {
+			t.Errorf("got %q, want the 50m stand-in", filepath.Base(got))
+		}
+	})
+
+	t.Run("the scale for the zoom still wins when both exist", func(t *testing.T) {
+		cfg := NaturalEarthConfig{Dir: neDir(t)}
+		if got := filepath.Base(cfg.ShapefileForLayer(geojson.LayerOcean, 0)); got != "ne_110m_ocean.shp" {
+			t.Errorf("z0 got %q, want ne_110m_ocean.shp", got)
+		}
+		if got := filepath.Base(cfg.ShapefileForLayer(geojson.LayerOcean, 5)); got != "ne_50m_ocean.shp" {
+			t.Errorf("z5 got %q, want ne_50m_ocean.shp", got)
+		}
+	})
+}
+
 func TestNaturalEarthConfigValidate(t *testing.T) {
 	t.Run("zero value is valid", func(t *testing.T) {
 		if err := (NaturalEarthConfig{}).Validate(); err != nil {

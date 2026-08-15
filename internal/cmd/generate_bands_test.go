@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/cwbudde/watercolormap/internal/datasource"
+	"github.com/cwbudde/watercolormap/internal/renderer"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/cwbudde/watercolormap/internal/worker"
@@ -567,6 +568,56 @@ func TestBandFetchUnavailableRejectsNonAreaSource(t *testing.T) {
 	}
 	if err := bandFetchUnavailable(&areaCapableSource{}, nil); err != nil {
 		t.Errorf("an area-capable source should be accepted: %v", err)
+	}
+}
+
+// TestBandFetchSkipsNaturalEarthZooms: --band-min-zoom and
+// natural-earth.max-zoom may overlap, and when they do the band scheduler must
+// not fetch. The band query happens before the generator ever sees the tile, so
+// without the exclusion the run would still issue the continent-scale query the
+// low tier exists to avoid, only to have the renderer throw the answer away.
+func TestBandFetchSkipsNaturalEarthZooms(t *testing.T) {
+	coords := block(4, 4, 5, 2)
+
+	ds := &fakeAreaSource{features: oneFeature()}
+	gen := newRecordingGenerator()
+
+	opts := bandTestOptions(1, 0)
+	opts.naturalEarth = renderer.NaturalEarthConfig{Dir: t.TempDir(), MaxZoom: 5}
+
+	results, _ := runBandedTilePool(context.Background(), gen, &fakeBandGenerator{}, ds,
+		coords, opts, "")
+
+	if len(results) != len(coords) {
+		t.Fatalf("got %d results, want %d", len(results), len(coords))
+	}
+	if len(ds.requests) != 0 {
+		t.Errorf("%d band fetches issued for Natural-Earth-covered zooms, want 0", len(ds.requests))
+	}
+
+	with, without := gen.counts()
+	if with != 0 {
+		t.Errorf("%d tiles got prefetched band data, want 0", with)
+	}
+	if without != len(coords) {
+		t.Errorf("%d tiles went the plain path, want %d", without, len(coords))
+	}
+}
+
+// TestBandFetchStillBandsAboveTheNaturalEarthCeiling guards the other side: the
+// exclusion must not cost banding at the zooms it was built for.
+func TestBandFetchStillBandsAboveTheNaturalEarthCeiling(t *testing.T) {
+	coords := block(14, 8632, 5380, 2)
+
+	ds := &fakeAreaSource{features: oneFeature()}
+	gen := newRecordingGenerator()
+
+	opts := bandTestOptions(1, 10)
+	opts.naturalEarth = renderer.NaturalEarthConfig{Dir: t.TempDir(), MaxZoom: 5}
+
+	if _, _ = runBandedTilePool(context.Background(), gen, &fakeBandGenerator{}, ds,
+		coords, opts, ""); len(ds.requests) != 1 {
+		t.Fatalf("%d band fetches at z14, want 1", len(ds.requests))
 	}
 }
 

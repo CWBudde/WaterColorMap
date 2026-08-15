@@ -28,13 +28,24 @@ const (
 // The path is validated here rather than at first use so a typo stops the run
 // before the first tile instead of quietly producing an empty world.
 func naturalEarthConfig() (renderer.NaturalEarthConfig, error) {
-	if viper.IsSet(naturalEarthEnabledKey) && !viper.GetBool(naturalEarthEnabledKey) {
+	explicit := viper.IsSet(naturalEarthEnabledKey)
+	if explicit && !viper.GetBool(naturalEarthEnabledKey) {
 		return renderer.NaturalEarthConfig{}, nil
 	}
 
 	cfg := renderer.NaturalEarthConfig{
 		Dir:     viper.GetString(naturalEarthDirKey),
 		MaxZoom: viper.GetInt(naturalEarthMaxZoomKey),
+	}
+
+	// An explicit `enabled: true` with no directory is a configuration error,
+	// not a disabled config. Treating it as disabled would send z0-5 to
+	// Overpass — continent-scale queries — behind a setting that says the
+	// opposite. Only the *absent* key means "off by default".
+	if explicit && cfg.Dir == "" {
+		return renderer.NaturalEarthConfig{}, fmt.Errorf(
+			"invalid natural-earth configuration: %s is true but %s is empty (run `just fetch-natural-earth`)",
+			naturalEarthEnabledKey, naturalEarthDirKey)
 	}
 
 	if err := cfg.Validate(); err != nil {

@@ -25,6 +25,13 @@ const DefaultNaturalEarthMaxZoom = 5
 // resolve at z0-2.
 const DefaultNaturalEarthMidScaleMinZoom = 3
 
+// The two Natural Earth scales this project downloads. Only these two exist
+// here: 10m is far more detail than any zoom below z6 can resolve.
+const (
+	naturalEarthCoarseScale = "110m"
+	naturalEarthMidScale    = "50m"
+)
+
 // naturalEarthDatasets maps a render layer to the Natural Earth dataset that
 // feeds it, without the scale prefix.
 //
@@ -85,9 +92,18 @@ func (c NaturalEarthConfig) CoversZoom(zoom int) bool {
 // scaleForZoom returns the Natural Earth scale prefix for this zoom.
 func (c NaturalEarthConfig) scaleForZoom(zoom int) string {
 	if zoom < DefaultNaturalEarthMidScaleMinZoom {
-		return "110m"
+		return naturalEarthCoarseScale
 	}
-	return "50m"
+	return naturalEarthMidScale
+}
+
+// otherNaturalEarthScale is the scale that is not this one — the stand-in used
+// when only half of the download is on disk.
+func otherNaturalEarthScale(scale string) string {
+	if scale == naturalEarthCoarseScale {
+		return naturalEarthMidScale
+	}
+	return naturalEarthCoarseScale
 }
 
 // ShapefileForLayer returns the shapefile backing this layer at this zoom, or
@@ -96,9 +112,13 @@ func (c NaturalEarthConfig) scaleForZoom(zoom int) string {
 //
 // A missing file yields "" rather than an error, deliberately. The datasets are
 // independent: a missing lakes file should cost the lakes, not the coastline.
-// This mirrors OceanConfig's stance that a wrong-detail coastline beats an
-// inverted one — Validate is what turns a mistyped directory into a startup
-// failure.
+// Validate is what turns a mistyped directory into a startup failure.
+//
+// The scale for the zoom is tried first and the other scale second, exactly as
+// OceanConfig stands its two datasets in for each other: a wrong-detail
+// coastline beats an inverted one. Without the fallback a half-finished
+// download — only the 110m set, say — passes Validate and then renders z3-5
+// with no ocean at all, which is the inverted world in its worst form.
 //
 // The path is made absolute. Mapnik resolves a relative datasource path against
 // the directory of the XML it was loaded from, and LoadXML writes that XML to a
@@ -114,16 +134,21 @@ func (c NaturalEarthConfig) ShapefileForLayer(layer geojson.LayerType, zoom int)
 		return ""
 	}
 
-	path := filepath.Join(c.Dir, fmt.Sprintf("ne_%s_%s.shp", c.scaleForZoom(zoom), dataset))
-	if _, err := os.Stat(path); err != nil {
-		return ""
+	preferred := c.scaleForZoom(zoom)
+	for _, scale := range []string{preferred, otherNaturalEarthScale(preferred)} {
+		path := filepath.Join(c.Dir, fmt.Sprintf("ne_%s_%s.shp", scale, dataset))
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return path
+		}
+		return abs
 	}
 
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return path
-	}
-	return abs
+	return ""
 }
 
 // Validate checks that the configured directory exists and holds at least one
