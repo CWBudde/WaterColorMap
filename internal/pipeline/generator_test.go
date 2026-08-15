@@ -210,3 +210,49 @@ func TestNewGeneratorRejectsUnknownImageFormat(t *testing.T) {
 		t.Errorf("error should name the offending setting, got: %v", err)
 	}
 }
+
+// TestTileExistsHonoursTheConfiguredFormat pins the interaction between two
+// changes that arrived independently: banded generation asks TileExists which
+// tiles a resumed run can skip, and WebP output made the tile's extension
+// configurable.
+//
+// If TileExists resolved the path with a hardcoded ".png" while a WebP run
+// wrote ".webp" — or the reverse — a resumed banded WebP run would find none of
+// its own tiles, re-query Overpass for every block it had already finished and
+// re-render the lot. The two must derive the name from the same place, which is
+// why this asserts the negative case as well: the file being there under the
+// *other* extension must not count.
+func TestTileExistsHonoursTheConfiguredFormat(t *testing.T) {
+	coords := tile.Coords{Z: 13, X: 4317, Y: 2692}
+
+	tests := []struct {
+		name     string
+		format   tileformat.Format
+		writeExt string
+		want     bool
+	}{
+		{"webp run finds its webp tile", tileformat.WebP, ".webp", true},
+		{"png run finds its png tile", tileformat.PNG, ".png", true},
+		// The cross cases are the regression: a tile in the other format is a
+		// different tile, and skipping on it would leave a permanent hole.
+		{"webp run ignores a png tile", tileformat.WebP, ".png", false},
+		{"png run ignores a webp tile", tileformat.PNG, ".webp", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			g := newFormatGenerator(t, root, "flat", tt.format)
+
+			existing := filepath.Join(root, "z13_x4317_y2692"+tt.writeExt)
+			if err := os.WriteFile(existing, []byte("existing tile"), 0o600); err != nil {
+				t.Fatalf("Failed to create tile file: %v", err)
+			}
+
+			if got := g.TileExists(coords, ""); got != tt.want {
+				t.Errorf("TileExists = %v, want %v (format %v, file on disk %s)",
+					got, tt.want, tt.format, tt.writeExt)
+			}
+		})
+	}
+}
