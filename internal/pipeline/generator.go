@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cwbudde/watercolormap/internal/composite"
 	"github.com/cwbudde/watercolormap/internal/geojson"
@@ -21,6 +22,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/texture"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/tileformat"
+	"github.com/cwbudde/watercolormap/internal/tilestamp"
 	"github.com/cwbudde/watercolormap/internal/types"
 	"github.com/cwbudde/watercolormap/internal/watercolor"
 )
@@ -79,6 +81,18 @@ type GeneratorOptions struct {
 	// If nil, tiles are written to disk in outputDir.
 	TileWriter TileWriter
 
+	// StampStore, when non-nil, records what source data each written tile was
+	// rendered from, and is read back by the freshness check below. Nil means
+	// exactly today's behaviour: nothing is written and nothing is consulted,
+	// so a caller that has no stamp store — including every test fake — is
+	// unaffected.
+	StampStore StampStore
+
+	// Freshness turns "does this tile exist" into "is this tile still good".
+	// The zero value asks nothing beyond existence, which is what every
+	// pre-existing caller gets.
+	Freshness FreshnessPolicy
+
 	// Watercolor optionally overrides the watercolor parameters from config.
 	// Nil means "use DefaultParams verbatim", with no arithmetic in between.
 	// It is validated in NewGenerator so a bad config fails at startup rather
@@ -92,6 +106,11 @@ type GeneratorOptions struct {
 	// FolderStructure controls file naming for folder format. Supported values:
 	// "flat" (z{z}_x{x}_y{y}.{ext}), "nested" ({z}/{x}/{y}.{ext}).
 	FolderStructure string
+
+	// RendererRev identifies this binary in the stamps it writes, so a later
+	// run can re-render what an older renderer produced. The generate command
+	// builds it from the ldflags-injected version and commit.
+	RendererRev string
 
 	// ImageFormat selects the tile image encoding. The zero value is PNG, so
 	// every existing construction site keeps its behaviour. It is resolved into
@@ -129,6 +148,34 @@ type TileWriter interface {
 // onto every test fake and onto any future writer that has no way to answer.
 type TileProber interface {
 	HasTile(z, x, y int) (bool, error)
+}
+
+// StampStore records and reads the per-tile source-data stamps that make
+// freshness decidable. *tilestamp.Store implements it; it is an interface here
+// so the pipeline neither owns the file nor forces a test to open one.
+type StampStore interface {
+	Put(tilestamp.Stamp) error
+	Get(z, x, y int, suffix string) (tilestamp.Stamp, bool, error)
+}
+
+// FreshnessPolicy says which already-rendered tiles are nevertheless out of
+// date. Every field is opt-in; the zero value asks nothing, and then the
+// existing-tile check is the pure existence test it has always been.
+type FreshnessPolicy struct {
+	// DataBefore re-renders a tile whose source data (osm_base_ts) predates
+	// this instant — "everything older than the last import".
+	DataBefore time.Time
+	// RenderedBefore re-renders a tile written before this instant, regardless
+	// of its data. Useful after a styling change that is not a code change.
+	RenderedBefore time.Time
+	// RendererRev re-renders a tile stamped by a different binary than the one
+	// running, using GeneratorOptions.RendererRev as the comparison.
+	RendererRev bool
+}
+
+// Enabled reports whether the policy asks anything at all.
+func (p FreshnessPolicy) Enabled() bool {
+	return !p.DataBefore.IsZero() || !p.RenderedBefore.IsZero() || p.RendererRev
 }
 
 // DataSource fetches OSM features for a tile coordinate.
@@ -224,7 +271,7 @@ func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, fo
 	// the check below about which file this tile is.
 	finalPath, tileDir := g.TilePath(coords, suffix)
 
-	if !force && g.tileExists(coords, finalPath) {
+	if !force && g.tileExists(coords, finalPath, suffix) {
 		g.log().Info("Tile already exists; skipping", "coords", coords.String(), "path", finalPath)
 		return finalPath, "", nil
 	}
@@ -257,19 +304,33 @@ func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, fo
 	}
 
 	// Phase 4: Composite and write final tile
-	return g.compositeAndWrite(painted, coords, finalPath, renderResult.params, renderResult.padPx, renderResult.layerDirReturn, dc)
+	return g.compositeAndWrite(painted, coords, finalPath, suffix, renderResult, dc)
 }
 
-// tileExists reports whether the tile is already present in whichever backend
-// this generator writes to: the configured TileWriter when there is one (if it
-// can answer, i.e. implements TileProber), otherwise the file at finalPath.
+// tileExists reports whether the tile may be skipped: present in whichever
+// backend this generator writes to *and*, when a FreshnessPolicy is configured,
+// still current according to its stamp.
 //
 // Every uncertain case answers false, i.e. "render it". That asymmetry is
 // deliberate: a wrong "skip" leaves a permanent hole in the tileset that nothing
 // later in the run will fill, while a wrong "render" costs a few seconds of CPU
 // and overwrites the tile with an identical one. So a writer that is not a
-// TileProber, and a probe that fails, both fall through to rendering.
-func (g *Generator) tileExists(coords tile.Coords, finalPath string) bool {
+// TileProber, and a probe that fails, both fall through to rendering — and so
+// does every unanswerable freshness question: no stamp store, no stamp for this
+// tile, an unreadable store, a stamp with no usable timestamp. A missing stamp
+// in particular is the common case on the first run after this feature landed,
+// and re-rendering those tiles is the only answer that cannot leave a hole.
+func (g *Generator) tileExists(coords tile.Coords, finalPath, suffix string) bool {
+	if !g.tilePresent(coords, finalPath) {
+		return false
+	}
+	return g.tileIsFresh(coords, suffix)
+}
+
+// tilePresent is the existence half of tileExists: the configured TileWriter
+// when there is one (if it can answer, i.e. implements TileProber), otherwise
+// the file at finalPath.
+func (g *Generator) tilePresent(coords tile.Coords, finalPath string) bool {
 	if g.options.TileWriter != nil {
 		prober, ok := g.options.TileWriter.(TileProber)
 		if !ok {
@@ -288,6 +349,80 @@ func (g *Generator) tileExists(coords tile.Coords, finalPath string) bool {
 
 	_, err := os.Stat(finalPath)
 	return err == nil
+}
+
+// tileIsFresh reports whether an existing tile still satisfies the configured
+// FreshnessPolicy.
+//
+// With no policy it returns true without touching the stamp store at all, which
+// is what makes an unconfigured run byte-for-byte what it was before stamps
+// existed. With a policy, anything it cannot establish counts as stale, for the
+// reason spelled out on tileExists.
+func (g *Generator) tileIsFresh(coords tile.Coords, suffix string) bool {
+	policy := g.options.Freshness
+	if !policy.Enabled() {
+		return true
+	}
+
+	store := g.options.StampStore
+	if store == nil {
+		g.log().Warn("Freshness check requested but no stamp store is open; rendering",
+			"coords", coords.String())
+		return false
+	}
+
+	stamp, ok, err := store.Get(int(coords.Z), int(coords.X), int(coords.Y), suffix)
+	if err != nil {
+		g.log().Warn("Stamp lookup failed; rendering anyway",
+			"coords", coords.String(), "error", err)
+		return false
+	}
+	if !ok {
+		g.log().Debug("Tile has no stamp; rendering", "coords", coords.String())
+		return false
+	}
+
+	switch {
+	case !policy.DataBefore.IsZero() &&
+		(stamp.OSMBase.IsZero() || stamp.OSMBase.Before(policy.DataBefore)):
+		return false
+	case !policy.RenderedBefore.IsZero() &&
+		(stamp.RenderedAt.IsZero() || stamp.RenderedAt.Before(policy.RenderedBefore)):
+		return false
+	case policy.RendererRev && stamp.RendererRev != g.options.RendererRev:
+		return false
+	}
+
+	return true
+}
+
+// putStamp records what this tile was rendered from.
+//
+// A failure here is logged and swallowed on purpose: the tile is on disk and
+// correct, and the stamp is bookkeeping about it. Failing the tile would turn a
+// sidecar problem into a hole in the tileset — the very outcome the whole
+// skip-existing asymmetry is built to avoid. The cost of a lost stamp is that a
+// later freshness run re-renders that tile, which is the safe direction.
+func (g *Generator) putStamp(coords tile.Coords, suffix string, res *renderLayersResult) {
+	store := g.options.StampStore
+	if store == nil {
+		return
+	}
+
+	err := store.Put(tilestamp.Stamp{
+		Z:           int(coords.Z),
+		X:           int(coords.X),
+		Y:           int(coords.Y),
+		Suffix:      suffix,
+		OSMBase:     res.dataTimestamp,
+		RenderedAt:  time.Now(),
+		Source:      res.dataSource,
+		RendererRev: g.options.RendererRev,
+	})
+	if err != nil {
+		g.log().Warn("Failed to record tile stamp; the tile itself is fine",
+			"coords", coords.String(), "suffix", suffix, "error", err)
+	}
 }
 
 func cropNRGBA(src image.Image, rect image.Rectangle) *image.NRGBA {
@@ -402,8 +537,9 @@ func (g *Generator) TileSize() int {
 // whenever it cannot tell, so acting on it can never skip a tile that Generate
 // would have rendered.
 func (g *Generator) TileExists(coords tile.Coords, filenameSuffix string) bool {
-	finalPath, _ := g.TilePath(coords, strings.TrimSpace(filenameSuffix))
-	return g.tileExists(coords, finalPath)
+	suffix := strings.TrimSpace(filenameSuffix)
+	finalPath, _ := g.TilePath(coords, suffix)
+	return g.tileExists(coords, finalPath, suffix)
 }
 
 // BandFetchBounds returns the bounding box that covers every given tile's own
@@ -453,10 +589,15 @@ func (g *Generator) SliceForTile(band *types.TileData, coords tile.Coords) *type
 			X:    int(coords.X),
 			Y:    int(coords.Y),
 		},
-		Bounds:    bounds,
-		Features:  band.Features.FilterByBounds(bounds),
-		FetchedAt: band.FetchedAt,
-		Source:    band.Source,
+		Bounds:   bounds,
+		Features: band.Features.FilterByBounds(bounds),
+		// Provenance is a property of the response, and every tile in the band
+		// came out of the same one, so all three carry over verbatim. Dropping
+		// them here would leave banded runs writing unstamped tiles — invisible
+		// until a later refresh had to re-render them for want of a stamp.
+		FetchedAt:     band.FetchedAt,
+		DataTimestamp: band.DataTimestamp,
+		Source:        band.Source,
 	}
 }
 
@@ -628,6 +769,8 @@ func (g *Generator) renderLayersWithData(
 
 	return &renderLayersResult{
 		rawLayers:      rawLayers,
+		dataTimestamp:  data.DataTimestamp,
+		dataSource:     data.Source,
 		params:         params,
 		padPx:          padPx,
 		layerDir:       layerDir,
@@ -677,7 +820,12 @@ func foldOceanIntoWater(rawLayers map[geojson.LayerType]image.Image) {
 
 // renderLayersResult holds the output from the rendering phase.
 type renderLayersResult struct {
-	rawLayers      map[geojson.LayerType]image.Image
+	rawLayers map[geojson.LayerType]image.Image
+	// dataTimestamp and dataSource carry the fetched data's provenance through
+	// to the stamp written after the tile lands. They are copied out of the
+	// TileData here because that value does not survive this function.
+	dataTimestamp  time.Time
+	dataSource     string
 	layerDir       string
 	layerDirReturn string
 	params         watercolor.Params
@@ -1017,11 +1165,14 @@ func (g *Generator) compositeAndWrite(
 	painted map[geojson.LayerType]image.Image,
 	coords tile.Coords,
 	finalPath string,
-	params watercolor.Params,
-	padPx int,
-	layerDirReturn string,
+	suffix string,
+	res *renderLayersResult,
 	dc *DebugContext,
 ) (string, string, error) {
+	params := res.params
+	padPx := res.padPx
+	layerDirReturn := res.layerDirReturn
+
 	// Paper base: fill the entire tile with a white texture so road cutouts show through
 	base := texture.TileTextureScaled(g.textures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY, params.Scale)
 
@@ -1058,6 +1209,10 @@ func (g *Generator) compositeAndWrite(
 			return "", "", fmt.Errorf("failed to write tile: %w", err)
 		}
 
+		// After the write, on both branches: a stamp is a claim that the tile
+		// exists with this provenance, so it must never precede the tile.
+		g.putStamp(coords, suffix, res)
+
 		return finalPath, layerDirReturn, nil
 	}
 
@@ -1066,6 +1221,8 @@ func (g *Generator) compositeAndWrite(
 	if err := encodeTileAtomic(g.enc, finalPath, final); err != nil {
 		return "", "", err
 	}
+
+	g.putStamp(coords, suffix, res)
 
 	return finalPath, layerDirReturn, nil
 }

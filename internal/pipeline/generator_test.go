@@ -96,7 +96,7 @@ func TestTileExists(t *testing.T) {
 				options: GeneratorOptions{TileWriter: tt.writer},
 			}
 
-			got := g.tileExists(tile.Coords{Z: 13, X: 100, Y: 200}, finalPath)
+			got := g.tileExists(tile.Coords{Z: 13, X: 100, Y: 200}, finalPath, "")
 			if got != tt.want {
 				t.Errorf("tileExists = %v, want %v", got, tt.want)
 			}
@@ -179,7 +179,7 @@ func TestExistingPNGDoesNotSatisfyAWebPRun(t *testing.T) {
 		t.Fatalf("write png tile: %v", err)
 	}
 
-	if !pngGen.tileExists(coords, pngPath) {
+	if !pngGen.tileExists(coords, pngPath, "") {
 		t.Fatal("the png run should consider its own tile present")
 	}
 
@@ -188,7 +188,7 @@ func TestExistingPNGDoesNotSatisfyAWebPRun(t *testing.T) {
 	if webpPath == pngPath {
 		t.Fatal("the webp run must not target the same file as the png run")
 	}
-	if webpGen.tileExists(coords, webpPath) {
+	if webpGen.tileExists(coords, webpPath, "") {
 		t.Error("an existing PNG must not let a WebP run skip the tile")
 	}
 }
