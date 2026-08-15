@@ -73,6 +73,10 @@ test-purego:
 bench *args:
     go test -ldflags "{{mapnik_ldflags}}" -run '^$' -bench . -benchmem {{args}} ./internal/...
 
+# Run the tile-server load benchmarks (hit path, dedup, admission, MBTiles)
+load-test *args:
+    go test -ldflags "{{mapnik_ldflags}}" -run '^$' -bench 'BenchmarkTile|BenchmarkMBTiles' -benchmem -benchtime 2s -cpu 1,4,8 {{args}} ./internal/server/
+
 # Run just the blur benchmarks
 bench-blur *args:
     go test -ldflags "{{mapnik_ldflags}}" -run '^$' -bench 'Blur|Antialias' -benchmem {{args}} ./internal/mask/ ./internal/watercolor/

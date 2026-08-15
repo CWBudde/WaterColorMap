@@ -16,7 +16,7 @@ import (
 
 // newTestMBTiles writes a single-tile MBTiles database and returns its path
 // together with the raw PNG bytes it contains.
-func newTestMBTiles(t *testing.T, z, x, y int) (string, []byte) {
+func newTestMBTiles(t testing.TB, z, x, y int) (string, []byte) {
 	t.Helper()
 
 	var buf bytes.Buffer

@@ -88,12 +88,12 @@ func newStubServer(t *testing.T, cfg OnDemandTilesConfig, delay time.Duration) (
 
 // writeFixtureTile puts a tile on disk without rendering one, so the cache-hit
 // path can be tested for what it is: a file that is already there.
-func writeFixtureTile(t *testing.T, dir, name, body string) string {
-	t.Helper()
+func writeFixtureTile(tb testing.TB, dir, name, body string) string {
+	tb.Helper()
 
 	full := filepath.Join(dir, name)
 	if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
-		t.Fatalf("writing fixture tile %s: %v", name, err)
+		tb.Fatalf("writing fixture tile %s: %v", name, err)
 	}
 	return full
 }
