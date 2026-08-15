@@ -1,7 +1,7 @@
 # Phase 4: Compositing and Tile Delivery (4.1–4.9)
 
 Archived from `PLAN.md`. These sections are complete; the detail is kept here
-because it records *why* several non-obvious decisions were made. The one part
+because it records _why_ several non-obvious decisions were made. The one part
 of Phase 4 that is still open — **4.10 Ocean/Coastline Rendering** — stays in
 `PLAN.md`.
 
@@ -9,7 +9,7 @@ Two findings below are still live and are also summarised in `PLAN.md`:
 the unresolved `EdgeAlignment` failure (4.4) and the low-zoom viewport
 coverage limit of the Hanover set (4.8).
 
-### 4.1 Layer Compositing
+## 4.1 Layer Compositing
 
 - [x] Implement layer compositing engine
 - [x] Define correct draw order (water, land, parks, civic, roads)
@@ -18,18 +18,18 @@ coverage limit of the Hanover set (4.8).
 - [x] Test compositing on single tile
 - [x] Verify layer overlap handling
 
-### 4.2 Road Layer Fidelity (per Stamen)
+## 4.2 Road Layer Fidelity (per Stamen)
 
 - [x] Make road stroke widths zoom-aware in Mapnik (scale_denominator or per-zoom multiplier) so visual thickness stays consistent on 256/512 px tiles
 - [x] Keep road watercolor treatment readable: thinner blur/edge params for linear features, reddish/orange tint that survives compositing
 - [x] Add regression test comparing rendered road width/alpha at two zooms to prove scaling works
 
-### 4.3 Labels Policy (Stamen default: none)
+## 4.3 Labels Policy (Stamen default: none)
 
 - [x] Ship label-free tiles (matches Stamen aesthetic)
 - [x] Keep Mapnik styles label-free (current state: no labels)
 
-### 4.4 Seam & Alignment Verification
+## 4.4 Seam & Alignment Verification
 
 - [x] Use metatile padding + crop during generation to avoid blur/edge artifacts at tile borders
 - [x] Add an integration test rendering adjacent tiles and checking border deltas stay within tolerance (`TestCompositedTileSeams` in `internal/pipeline/seam_test.go` renders a 2×2 block at z13 through `Generator.Generate` and judges each border against an in-tile control step, since composited tiles are grainy everywhere and a fixed per-pixel threshold would measure grain rather than seams)
@@ -44,7 +44,7 @@ coverage limit of the Hanover set (4.8).
   it. Either the tolerance is wrong for raw layer masks or there is a real half-pixel offset — the
   `TestCompositedTileSeams` control-step approach is the pattern to fold it into. Unresolved.
 
-### 4.5 Output Formats & Hi-DPI
+## 4.5 Output Formats & Hi-DPI
 
 - [x] Add `--hidpi`/config toggle to emit 512px `@2x` tiles alongside 256px output
 - [x] Ensure watercolor offsets/noise/texture stay globally aligned between 256px and 512px outputs (same world anchoring) — `internal/watercolor/scale.go` (`ScaleForTileSize`, `ApplyScale`, `DefaultParamsForTileSize`), world-space `RequiredPaddingPx`, and `texture.TileTextureScaled`. The offsets were always right; every _length_ they were measured against was a fixed device-px constant, so @2x grain, texture and blur were half the ground size of @1x
@@ -56,7 +56,7 @@ coverage limit of the Hanover set (4.8).
 
   256 px output is unchanged: `ScaleForTileSize(256)` is exactly `1.0`, and go-mapnik normalises both `0` and `1.0` to the same `scale_factor` (`mapnik.go:342-343`, `:350`, `:381`, `:403`), so the 1× path issues a bit-identical Mapnik call. Covered by `TestRoadStrokeScalesWithTileSize` (`internal/renderer/roads_zoom_test.go`), integration-gated like every other Mapnik test in that package.
 
-### 4.6 Leaflet Demo & Local Serving
+## 4.6 Leaflet Demo & Local Serving
 
 - [x] Add a dedicated demo server command (prefer `watercolormap serve`) for local viewing and sharing screenshots
 
@@ -101,13 +101,13 @@ coverage limit of the Hanover set (4.8).
   - [x] Missing tiles are generated on-demand and displayed — 35 tiles generated on demand during browsing (`msg="tile generated on-demand"`), base and `@2x`, all displayed, 0 errors or warnings in the server log
   - [x] Regenerated tiles are cached to disk for subsequent requests — a tile absent from `tiles/` returned in 6.66 s and appeared on disk at the same byte size; the second request for it returned in 3.7 ms
 
-### 4.7 Visual Tuning Controls
+## 4.7 Visual Tuning Controls
 
 - [x] Expose per-layer watercolor params via config with Phase 3 defaults — `internal/watercolor/tuning.go` (`Overrides`/`Tuner`), `watercolor:` block in `config.example.yaml`, threaded through `generate`, `serve` and the batch path. **Scope correction:** "edge colors" do not exist and cannot be exposed — the edge pass only reduces HSL lightness — so the keys are `edge-strength` / `edge-sigma` / `edge-gamma`. `tint` does exist and is now wired (it was dead code before)
 - [x] Add golden/snapshot render for a known tile to catch regressions when tuning (`TestPipelineStages` in `internal/pipeline/pipeline_stages_test.go:22`, goldens in `testdata/golden/pipeline-stages/`)
 - [x] Document tuning guidance referencing the Stamen process steps (blur → noise → threshold → edge darkening) — `docs/watercolor-tuning.md`, which supersedes the stale parameter list in `docs/3.6-visual-quality-testing.md`
 
-### 4.8 Hanover Coverage Generation
+## 4.8 Hanover Coverage Generation
 
 - [x] Add CLI flags for bbox/zoom-range batch generation (reuse `tile.TileRange`) — all present on `generate` (`internal/cmd/generate.go`): `--bbox` (:40), `--zoom-min` (:41), `--zoom-max` (:42), `--workers`/`-w` (:43), `--progress` (:44, default `true`), `--force` (:48). Also available and used by the recipes: `--allow-failures` (:45), `--hidpi` (:50).
 - [x] Script batch generation for Hanover with progress logging, `--force`, and resumable output dirs — the `Justfile` provides `prebuild-hannover` (:243) plus the `-quick` (z10–12), `-detailed` (z10–15) and `-full` (z10–16) wrappers (:254–263).
@@ -135,7 +135,7 @@ coverage limit of the Hanover set (4.8).
 
   **Out of scope but visible in the result**: railways render as heavy solid-black bands and dominate the z13 view; also 155 tiles from other locations remain in `tiles/` from earlier work and are still on the December stylesheet.
 
-### 4.9 TileJSON / Delivery Metadata
+## 4.9 TileJSON / Delivery Metadata
 
 - [x] Emit a minimal `tilejson.json` (bounds, min/max zoom, format, tile URL template) for the generated set — new `internal/tilejson` package, written next to the tiles by batch folder generation and served at `GET /tiles/tilejson.json`
 - [x] Include required attribution text (Stamen-style / OSM) in the metadata (`© OpenStreetMap contributors · Watercolor-inspired rendering`). The demo carries both halves, but in two places: Leaflet's attribution control holds `© OpenStreetMap contributors` (`docs/leaflet-demo/index.html:434`) and the header panel holds "Watercolor-inspired raster tiles (OSM data)." (`:128`). An earlier note here called the watercolor half open; it is present on the page, just not inside the attribution control
