@@ -15,7 +15,31 @@ The system checks tile coordinates against configured coverage areas in order an
 
 ```
 Tile Request → Check Coverage Areas → Route to Matching Server
+                                          ↓ on failure
+                                      Next Matching Server
 ```
+
+### Failover
+
+When a matching server fails, the **next** matching server is tried. Before this,
+the first coverage match was terminal: one restarting local container failed
+every tile inside its coverage box without ever trying the public fallback,
+which is fatal to a long bulk run.
+
+Two failures are deliberately **not** retried elsewhere, because another server
+cannot help:
+
+| Failure                                       | Retried elsewhere? | Why                                                      |
+| --------------------------------------------- | ------------------ | -------------------------------------------------------- |
+| Connection refused, 5xx, 429, HTML error page | ✅                 | A healthy second server answers it                       |
+| Empty response at z8–13                       | ✅                 | This is what a silent upstream failure looks like        |
+| Context cancelled / deadline exceeded         | ❌                 | The caller is gone; another attempt only delays shutdown |
+| Response over the size cap                    | ❌                 | A property of the data and the cap, not of the server    |
+
+Every failover is logged at `warn` with the failing server, the tile and the
+error, so a run that degrades to the public API looks like a broken server
+rather than an unexplained slowdown. If every candidate fails, the returned error
+names them all.
 
 ## Configuration
 
@@ -61,10 +85,13 @@ overpass:
 #### Coverage Notes
 
 - Servers are checked **in order**
-- First matching coverage area wins
+- The first matching coverage area is tried first; on failure the next match is tried
 - `nil` coverage (omit the field) = matches everything (use for fallback)
 - Coverage areas can overlap
-- Always include at least one server with no coverage as a fallback
+- Always include at least one server with no coverage as a fallback, **last**
+- A coverage box fully inside an earlier server's box can never be selected
+  first. That is almost always a mistake, so startup logs a warning naming both
+  servers; put the most specific box first.
 
 ## Example Configurations
 
@@ -217,9 +244,19 @@ docker run -d \
 
 ### Wrong server being used
 
-- **Cause**: Coverage areas checked in order, earlier match wins
-- **Debug**: Check server logs for "Configured ... Overpass server" messages
+- **Cause**: Coverage areas checked in order, earlier match tried first
+- **Debug**: Check server logs for "Configured ... Overpass server" messages, and
+  for the startup warning "coverage is shadowed by an earlier server"
 - **Fix**: Reorder servers or adjust coverage boundaries
+
+### Run is unexpectedly slow, or hitting public rate limits
+
+- **Cause**: The regional server is failing and every tile is falling over to the
+  public fallback
+- **Debug**: Look for `Overpass server failed; trying the next one` at `warn`, and
+  `Overpass request succeeded on a fallback server` at `info`
+- **Fix**: Repair the regional server. Failover keeps the run alive, but it does
+  not make it fast
 
 ## Geographic Coverage Examples
 

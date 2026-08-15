@@ -136,6 +136,26 @@
   cache key is the endpoint plus the query text, and headers are no part of it. Override with
   `overpass.user_agent`, globally or per server.
 
+- **datasource:** fail over to the next Overpass server instead of giving up on the first one.
+  `MultiOverpassDataSource` took the first coverage match and returned its error verbatim, so one
+  restarting local container failed **every tile inside its coverage box** without ever trying the
+  nil-coverage public fallback — enough to kill a multi-day bulk run over a blip it could have
+  ridden out. Matching servers are now tried in order, and the error returned when they all fail
+  names every one of them.
+
+  Two failures are deliberately not retried elsewhere, because another server cannot help: a
+  cancelled or expired context, where the caller is already gone and a second attempt only delays
+  shutdown, and a response over the size cap, which is a property of the data and the configured
+  limit rather than of the server. Everything else — transport errors, 5xx, 429, an HTML error
+  page, and the empty mid-zoom response that is the shape of a silent upstream failure — is
+  exactly what a second server exists to answer.
+
+  Failovers log at `warn`, so a run that quietly degrades to the public API reads as a broken
+  server rather than an unexplained slowdown. Startup additionally warns about a coverage box
+  fully contained in an earlier server's box: routing takes servers in order, so such a box can
+  never be selected first, and the only symptom used to be paying the public API's rate limits for
+  a region you built a local instance for.
+
 - **watercolor:** anchor hi-DPI rendering to world position. Noise scale, all blur/shade/edge
   sigmas, the adaptive-noise distances and the paper/layer texture period are lengths, and they
   were fixed **device**-pixel constants while the sampling offsets scaled with the tile size. An

@@ -697,6 +697,8 @@ func NewMultiOverpassDataSource(configs ...ServerConfig) *MultiOverpassDataSourc
 		})
 	}
 
+	warnUnreachableCoverage(servers)
+
 	return &MultiOverpassDataSource{servers: servers}
 }
 
@@ -706,23 +708,53 @@ func (mds *MultiOverpassDataSource) FetchTileData(ctx context.Context, tile type
 	return mds.FetchTileDataWithBounds(ctx, tile, bounds)
 }
 
-// FetchTileDataWithBounds routes the query to the appropriate Overpass server.
+// FetchTileDataWithBounds routes the query to the appropriate Overpass server,
+// falling back to the next matching one when a server fails.
+//
+// Servers are tried in configuration order, so the coverage-first routing is
+// unchanged on the happy path: a tile inside a regional server's box is still
+// answered by that server. What changed is the failure path. Returning the first
+// server's error verbatim meant one flaky container failed every tile inside its
+// coverage box without ever trying the nil-coverage fallback, which is fatal to
+// a multi-day bulk run — the run dies on a restart it could have ridden out.
+//
+// Not every error earns a second attempt; see shouldTryNextServer.
 func (mds *MultiOverpassDataSource) FetchTileDataWithBounds(ctx context.Context, tile types.TileCoordinate, bounds types.BoundingBox) (*types.TileData, error) {
-	// Find the first server whose coverage contains this tile
-	for _, srv := range mds.servers {
-		if srv.coverage == nil || intersects(bounds, *srv.coverage) {
-			// Found a matching server - delegate to it
-			data, err := srv.datasource.FetchTileDataWithBounds(ctx, tile, bounds)
-			if err != nil {
-				// Include server name in error for debugging
-				return nil, fmt.Errorf("[%s] %w", srv.name, err)
+	candidates := mds.candidates(bounds)
+	if len(candidates) == 0 {
+		// No server matched (shouldn't happen if you have a nil-coverage fallback)
+		return nil, fmt.Errorf("no overpass server configured for tile %s", tile)
+	}
+
+	// Errors keep their [name] prefix so the joined error still says which
+	// server produced which failure.
+	errs := make([]error, 0, len(candidates))
+
+	for i, srv := range candidates {
+		data, err := srv.datasource.FetchTileDataWithBounds(ctx, tile, bounds)
+		if err == nil {
+			if i > 0 {
+				slog.Info("Overpass request succeeded on a fallback server",
+					"server", srv.name, "tile", tile.String(), "after_failures", i)
 			}
 			return data, nil
 		}
+
+		errs = append(errs, fmt.Errorf("[%s] %w", srv.name, err))
+
+		if !shouldTryNextServer(err) {
+			break
+		}
+		if i < len(candidates)-1 {
+			// Warn, not debug: a run that silently degrades to the public API
+			// looks like an unexplained slowdown rather than a broken server.
+			slog.Warn("Overpass server failed; trying the next one",
+				"server", srv.name, "tile", tile.String(), "err", err,
+				"remaining", len(candidates)-i-1)
+		}
 	}
 
-	// No server matched (shouldn't happen if you have a nil-coverage fallback)
-	return nil, fmt.Errorf("no overpass server configured for tile %s", tile)
+	return nil, errors.Join(errs...)
 }
 
 // ErrAreaSpansServers reports that no single configured server covers a whole
@@ -761,6 +793,14 @@ func (mds *MultiOverpassDataSource) FetchAreaData(
 			return data, nil
 		}
 		errs = append(errs, fmt.Errorf("[%s] %w", srv.name, err))
+
+		// Same classification as the per-tile path: a cancelled context or an
+		// over-cap response is not a server's fault, and the next one answers
+		// it identically. An over-cap band is also exactly what the scheduler
+		// splits on, so retrying it elsewhere only delays the split.
+		if !shouldTryNextServer(err) {
+			break
+		}
 	}
 
 	if len(errs) == 0 {

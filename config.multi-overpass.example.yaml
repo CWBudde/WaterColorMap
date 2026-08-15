@@ -56,5 +56,16 @@ overpass:
 # - Niedersachsen (Lower Saxony): 51.3°N to 53.9°N, 6.6°E to 11.6°E
 #   Covers: Hannover, Braunschweig, Osnabrück, Oldenburg, Göttingen, Wolfsburg
 # - For other regions, add additional server entries with their coverage areas
-# - Coverage areas can overlap; first match wins
+# - Coverage areas can overlap; the first match is tried first
 # - At least one server should have no coverage (fallback)
+#
+# Failover: when a matching server fails, the next matching one is tried, so a
+# restarting local container no longer fails every tile in its coverage box.
+# Two failures are deliberately NOT retried elsewhere, because another server
+# would not help: a cancelled or timed-out context (the caller is gone), and a
+# response over the size cap (a property of the data, not the server).
+#
+# Ordering still matters. A coverage box fully inside an earlier server's box is
+# only ever reached when that earlier server fails, so list the most specific
+# box first and the no-coverage fallback last. Startup logs a warning if it
+# finds a box that can never be selected first.
