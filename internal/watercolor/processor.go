@@ -493,6 +493,11 @@ func paintFromFinalMaskWithContext(finalMask *image.Gray, layer geojson.LayerTyp
 
 // PaintLayer applies the watercolor pipeline to a single rendered layer image.
 func PaintLayer(layerImage image.Image, layer geojson.LayerType, params Params) (*image.NRGBA, error) {
+	// Explicit rather than incidental: the scratch is sized from these bounds, so a nil
+	// image would panic here where it used to fall through to "base mask is nil".
+	if layerImage == nil {
+		return nil, errors.New("layer image is nil")
+	}
 	style, ok := params.Styles[layer]
 	if !ok {
 		return nil, fmt.Errorf("missing style for layer %s", layer)
