@@ -596,13 +596,9 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Past this point the request renders the tile itself, so its outcome is
-	// settled: a miss, or a bypass when the cache was never consulted. Requests
-	// shed by admit() above never get here and are counted as neither.
-	if t.cfg.DisableCache {
-		t.cacheBypasses.Add(1)
-	} else {
-		t.cacheMisses.Add(1)
-	}
+	// settled. Requests shed by admit() above never get here and are counted as
+	// neither a hit nor a miss.
+	cacheStatus := t.noteGeneration()
 
 	releaseSlot, ok := t.acquireRenderSlot(w, r, coords.String()+suffix)
 	if !ok {
@@ -668,12 +664,20 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if t.cfg.DisableCache {
-		w.Header().Set(cacheStatusHeader, cacheStatusBypass)
-	} else {
-		w.Header().Set(cacheStatusHeader, cacheStatusMiss)
-	}
+	w.Header().Set(cacheStatusHeader, cacheStatus)
 	t.serveTileFile(w, r, fullPath)
+}
+
+// noteGeneration records that this request is about to render the tile itself
+// and returns the X-Cache label that says so: a miss, or a bypass when the
+// cache was never consulted in the first place.
+func (t *OnDemandTiles) noteGeneration() string {
+	if t.cfg.DisableCache {
+		t.cacheBypasses.Add(1)
+		return cacheStatusBypass
+	}
+	t.cacheMisses.Add(1)
+	return cacheStatusMiss
 }
 
 // serveTileFile serves a rendered tile with the configured cache policy.
