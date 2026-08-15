@@ -499,7 +499,7 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 	filename := coords.FileName(suffix, format.Ext())
 	fullPath := filepath.Join(t.cfg.TilesDir, filename)
 
-	if t.serveCachedTile(w, r, fullPath) {
+	if t.serveCachedTile(w, r, fullPath, coords, suffix) {
 		return
 	}
 
@@ -533,7 +533,7 @@ func (t *OnDemandTiles) serveTile(w http.ResponseWriter, r *http.Request) {
 
 	t.extendWriteDeadline(w)
 
-	if t.serveCachedTile(w, r, fullPath) {
+	if t.serveCachedTile(w, r, fullPath, coords, suffix) {
 		return
 	}
 
@@ -617,13 +617,61 @@ func (t *OnDemandTiles) serveTileFile(w http.ResponseWriter, r *http.Request, fu
 }
 
 // serveCachedTile serves an already-rendered tile from disk when caching is
-// enabled and the file is there, reporting whether it answered the request.
-func (t *OnDemandTiles) serveCachedTile(w http.ResponseWriter, r *http.Request, fullPath string) bool {
+// enabled, the file is there and it still satisfies the freshness policy,
+// reporting whether it answered the request. Returning false hands the request
+// to the generation path, which re-renders the tile.
+func (t *OnDemandTiles) serveCachedTile(
+	w http.ResponseWriter,
+	r *http.Request,
+	fullPath string,
+	coords tile.Coords,
+	suffix string,
+) bool {
 	if t.cfg.DisableCache || !fileExists(fullPath) {
+		return false
+	}
+	if !t.cachedTileIsFresh(coords, suffix) {
 		return false
 	}
 	t.serveTileFile(w, r, fullPath)
 	return true
+}
+
+// cachedTileIsFresh reports whether the tile already on disk still satisfies
+// the configured freshness policy. Without a policy it answers true without
+// touching the stamp store, which is the pure existence test the server did
+// before stamps existed.
+//
+// One case is answered differently from the batch run in
+// pipeline.Generator.tileExists, which treats every unanswerable question as
+// "render it": a server with no stamp store open serves the cached tile. There,
+// "unknown" costs one re-render and is then settled by the stamp that render
+// writes; here no render can write a stamp, so the same answer would re-render
+// every tile on every request, forever. The missing store is already reported
+// once at startup.
+func (t *OnDemandTiles) cachedTileIsFresh(coords tile.Coords, suffix string) bool {
+	policy := t.cfg.Freshness
+	if !policy.Enabled() {
+		return true
+	}
+
+	store := t.cfg.StampStore
+	if store == nil {
+		return true
+	}
+
+	stamp, ok, err := store.Get(int(coords.Z), int(coords.X), int(coords.Y), suffix, t.imageFormat().String())
+	if err != nil {
+		t.log().Warn("stamp lookup failed; re-rendering the cached tile",
+			"coords", coords.String(), "error", err)
+		return false
+	}
+	if !ok {
+		t.log().Debug("cached tile has no stamp; re-rendering", "coords", coords.String())
+		return false
+	}
+
+	return policy.SatisfiedBy(stamp, t.cfg.RendererRev)
 }
 
 // acquireRenderSlot waits for a render semaphore slot, tracking the tile as

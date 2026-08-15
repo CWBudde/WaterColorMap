@@ -178,6 +178,29 @@ func (p FreshnessPolicy) Enabled() bool {
 	return !p.DataBefore.IsZero() || !p.RenderedBefore.IsZero() || p.RendererRev
 }
 
+// SatisfiedBy reports whether an existing tile described by this stamp is still
+// current under the policy, comparing the recorded renderer revision against
+// rendererRev. A stamp that is missing the timestamp a policy field asks about
+// counts as stale, for the reason spelled out on tileExists.
+//
+// It is exported because the freshness question is asked from two places that
+// must answer it identically: the batch skip-existing check in tileExists, and
+// the server's cache-hit path in internal/server.
+func (p FreshnessPolicy) SatisfiedBy(stamp tilestamp.Stamp, rendererRev string) bool {
+	switch {
+	case !p.DataBefore.IsZero() &&
+		(stamp.OSMBase.IsZero() || stamp.OSMBase.Before(p.DataBefore)):
+		return false
+	case !p.RenderedBefore.IsZero() &&
+		(stamp.RenderedAt.IsZero() || stamp.RenderedAt.Before(p.RenderedBefore)):
+		return false
+	case p.RendererRev && stamp.RendererRev != rendererRev:
+		return false
+	}
+
+	return true
+}
+
 // DataSource fetches OSM features for a tile coordinate.
 type DataSource interface {
 	FetchTileData(context.Context, types.TileCoordinate) (*types.TileData, error)
@@ -382,18 +405,7 @@ func (g *Generator) tileIsFresh(coords tile.Coords, suffix string) bool {
 		return false
 	}
 
-	switch {
-	case !policy.DataBefore.IsZero() &&
-		(stamp.OSMBase.IsZero() || stamp.OSMBase.Before(policy.DataBefore)):
-		return false
-	case !policy.RenderedBefore.IsZero() &&
-		(stamp.RenderedAt.IsZero() || stamp.RenderedAt.Before(policy.RenderedBefore)):
-		return false
-	case policy.RendererRev && stamp.RendererRev != g.options.RendererRev:
-		return false
-	}
-
-	return true
+	return policy.SatisfiedBy(stamp, g.options.RendererRev)
 }
 
 // stampFormat is the image encoding a stamp written by this generator records.
