@@ -285,6 +285,7 @@ Keys that are actually read:
 - `verbose`, `log-level`: logging (default level: `info`)
 - `overpass.endpoint` / `overpass.servers`: read by `serve` only — `generate` always builds a default single-endpoint Overpass source
 - `ocean.*`: the water polygons used for ocean and coastline rendering (see below)
+- `natural-earth.*`: the generalised shapefiles used at z0-5 (see below)
 - `generate.*`, `serve.*`, `convert.*`, `textures.*`: mirror the flags of the respective command
 
 ### Ocean and coastlines
@@ -307,6 +308,29 @@ just fetch-water-polygons-simplified   # ~120 MB
 Then point `config.yaml` at them — see the `ocean:` block in
 [config.example.yaml](config.example.yaml). Ocean rendering is off until it is
 configured; inland tiles render identically either way.
+
+### World and continent zooms (z0-5)
+
+Below z6, OSM is the wrong source twice over: a single z2 tile would ask
+Overpass for a quarter of the planet, and ungeneralised coastline at roughly one
+pixel per 50 km is detail nobody can see. Those zooms come from
+[Natural Earth](https://www.naturalearthdata.com/) instead — generalised
+coastlines, lakes and rivers, read through the same Mapnik shapefile plugin:
+
+```bash
+just fetch-natural-earth   # ~10 MB into ./data (gitignored)
+```
+
+Then point `config.yaml` at it — see the `natural-earth:` block in
+[config.example.yaml](config.example.yaml). With it enabled, a tile at or below
+`max-zoom` (default 5) is rendered entirely from these shapefiles and makes **no
+Overpass request at all**, so the whole low tier generates offline and in
+minutes. Coastline, lakes and rivers are all that exists down there; roads and
+buildings render absent, which is what a world view should look like.
+
+Like ocean rendering, it is off until configured, and z6 and above are unchanged
+either way. [docs/zoom-levels.md](docs/zoom-levels.md) documents the full zoom
+stack.
 
 ## Development
 

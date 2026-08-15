@@ -295,25 +295,58 @@ Filed rather than smuggled into the 5.1 work, in rough value order.
 - [x] Optimize worker count (defaults to `runtime.NumCPU()`)
 - [x] Add batch CLI command (`--bbox`, `--zoom-min`, `--zoom-max`, `--workers`, `--progress`)
 
-### 5.3 Multi-Zoom Generation
+### 5.3 Multi-Zoom Generation ✅ COMPLETE
 
-Natural Earth still exists only in this line and in `docs/goal.md` — there is no code anywhere.
-5.1 recommends filling z0–5 exactly the way the ocean was filled in 4.10: Natural Earth ships
-shapefiles, Mapnik's `shape` plugin is installed, and `shapeindex` plus zoom-based dataset
-selection are already implemented and proven (`internal/renderer/ocean.go`, `Justfile:204-243`).
-That is also the answer to the question "vector tile input" was being asked.
-→ [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md)
+Filled the z0–5 gap the way 5.1 recommended and 4.10 proved: Natural Earth
+shapefiles through Mapnik's `shape` plugin, following the ocean pattern.
+→ [docs/zoom-levels.md](docs/zoom-levels.md),
+[docs/data-scaling-strategy.md](docs/data-scaling-strategy.md) § 2
 
 The zoom stack as it stands today — what each zoom fetches, which dataset answers
 it, and the zoom-conditioned behaviour that lives nowhere near the rule tables —
-is written down in [docs/zoom-levels.md](docs/zoom-levels.md). It records the
-z0–5 gap rather than closing it.
+is written down in [docs/zoom-levels.md](docs/zoom-levels.md).
 
-- [ ] Define zoom range strategy (0-5: Natural Earth, 6-9: country, 10+: OSM)
-- [ ] Implement zoom-specific data filtering
-- [ ] Create generalized rendering for low zooms
-- [ ] Test rendering at each zoom range
+- [x] Zoom range strategy — z0–5 Natural Earth, z6+ OSM, expressed as
+      `NaturalEarthConfig.CoversZoom` (`internal/renderer/naturalearth.go`), the one
+      predicate the renderer and the pipeline both branch on so they cannot disagree
+      about where a tile's data comes from. 110m serves z0–2, 50m z3–5, the same
+      scale-by-zoom trade `OceanConfig.ShapefileForZoom` already makes. z6–9 needed no
+      change: the OSM rules were already coarse there.
+- [x] Zoom-specific data filtering — `renderLayersWithData` skips the Overpass fetch
+      entirely below the ceiling. Doing it in the generator rather than the renderer
+      covers `generate`, `generate --bbox`, banded runs and `serve`'s on-demand path at
+      once, and is what makes the low tier offline as well as cheap: one z2 query would
+      ask a regional instance for a quarter of the planet.
+- [x] Generalized rendering for low zooms — there is no separate "generalized" style,
+      only a source that carries three layers. Ocean, lakes and rivers render from
+      `assets/styles/naturalearth/*.xml`; roads, buildings, parks, civic, urban and
+      railroads resolve to no shapefile and are therefore absent. That absence _is_ the
+      world-scale look. Land keeps painting, since it is the background fill.
+- [x] Tested at each zoom range — `TestNaturalEarthRendering` (open Pacific, continental
+      Asia, a z5 coastline, and the z0 world tile against Earth's real ~71% ocean
+      fraction), `TestNaturalEarthOnlyLowZoomLayersRender`, and a datasource fake that
+      fails the test if it is ever queried. No pipeline golden moved: nothing here
+      touches z≥6.
 - [x] Document zoom level characteristics (`docs/zoom-levels.md`)
+
+Two things worth carrying forward:
+
+- **Natural Earth is EPSG:4326, the water polygons are 3857.** `layers/ocean.xml` can
+  declare the map's own merc srs and reproject nothing; the Natural Earth styles must
+  declare longlat and let Mapnik reproject. Copying the srs across from `layers/` is the
+  obvious mistake and it fails silently.
+- **A missing dataset costs its layer, not the tile.** `ShapefileForLayer` returns "" for
+  a file that is not on disk, mirroring `OceanConfig`'s "a wrong-detail coastline beats an
+  inverted one". `Validate` is what turns a mistyped _directory_ into a startup failure —
+  the two cases are deliberately separate.
+- **The z5 ceiling may be one or two zooms too low, and there is now evidence.** Measured
+  while verifying this work: `generate --zoom 6` over the Niedersachsen extract fails with
+  `overpass response exceeds size limit: over 67108864 bytes`. z6–z8 are therefore not
+  merely slow from OSM, they are **unrenderable** against the 64 MiB cap. `max-zoom: 8`
+  renders that band from Natural Earth instead and works today, so the escape hatch
+  exists; what has not been decided is whether it should be the default, since 50m
+  coastline is visibly generalised by z8. Deciding it needs a side-by-side at z6-8, not
+  more code.
 
 ### 5.4 Tile Storage Format
 

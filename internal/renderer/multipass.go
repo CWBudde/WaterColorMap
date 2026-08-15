@@ -20,6 +20,7 @@ type MultiPassRenderer struct {
 	outputDir      string
 	tempDir        string
 	ocean          OceanConfig
+	naturalEarth   NaturalEarthConfig
 	baseTileSize   int
 	padPx          int
 }
@@ -112,6 +113,13 @@ func (r *MultiPassRenderer) SetOceanConfig(cfg OceanConfig) {
 	r.ocean = cfg
 }
 
+// SetNaturalEarthConfig enables the low-zoom Natural Earth passes. The zero
+// value leaves them off, which is how every call site that predates them keeps
+// its exact output.
+func (r *MultiPassRenderer) SetNaturalEarthConfig(cfg NaturalEarthConfig) {
+	r.naturalEarth = cfg
+}
+
 // Close cleans up resources, including the renderer's private GeoJSON temp directory.
 func (r *MultiPassRenderer) Close() error {
 	err := r.mapnikRenderer.Close()
@@ -189,6 +197,14 @@ func (r *MultiPassRenderer) renderLayer(
 ) *LayerRenderResult {
 	result := &LayerRenderResult{
 		Layer: layer,
+	}
+
+	// Below the Natural Earth ceiling every layer except land comes from a
+	// shapefile rather than from Overpass, and most layers do not come at all.
+	// Land is excluded because it is the background fill, not a feature layer:
+	// it has to keep painting at every zoom.
+	if layer != geojson.LayerLand && r.naturalEarth.CoversZoom(int(coords.Z)) {
+		return r.renderNaturalEarthLayer(coords, layer, bounds)
 	}
 
 	// Get style file path
@@ -272,9 +288,7 @@ func (r *MultiPassRenderer) renderLayer(
 //
 // It bypasses the zero-feature skip in renderLayer on purpose: the whole point
 // of an ocean tile is that Overpass returned nothing for it, so "no features"
-// must not mean "no ocean". The shapefile is handed straight to Mapnik's shape
-// plugin, which does its own bbox lookup against the .index sidecar, so there is
-// no geometry work on the Go side.
+// must not mean "no ocean".
 //
 // With no shapefile configured this returns an empty OutputPath, which every
 // consumer already treats as "layer absent".
@@ -283,11 +297,54 @@ func (r *MultiPassRenderer) renderOceanLayer(
 	stylePath string,
 	bounds [4]float64,
 ) *LayerRenderResult {
+	shapefile := r.ocean.ShapefileForZoom(int(coords.Z))
+	return r.renderShapefileLayer(coords, geojson.LayerOcean, stylePath, shapefile, bounds)
+}
+
+// renderNaturalEarthLayer renders one low-zoom layer from Natural Earth.
+//
+// Below z6 there is no Overpass fetch at all, so like the ocean pass this
+// cannot go through the zero-feature skip: there are no features to count. The
+// layer is present exactly when Natural Earth carries a dataset for it, which
+// is why roads, railroads, buildings, civic and parks simply disappear here
+// rather than needing a rule of their own. At world scale the map is coastline,
+// lakes and rivers.
+//
+// The styles live in a directory of their own rather than reusing
+// assets/styles/layers/: those declare an ogr+GeoJSON datasource fed from a
+// temp file, and only the <Datasource> element differs. Copying the three files
+// keeps the substitution a plain string replace instead of XML surgery, the
+// same way layers/ocean.xml was handled.
+func (r *MultiPassRenderer) renderNaturalEarthLayer(
+	coords tile.Coords,
+	layer geojson.LayerType,
+	bounds [4]float64,
+) *LayerRenderResult {
+	shapefile := r.naturalEarth.ShapefileForLayer(layer, int(coords.Z))
+	stylePath := filepath.Join(r.stylesDir, "naturalearth", fmt.Sprintf("%s.xml", layer))
+	return r.renderShapefileLayer(coords, layer, stylePath, shapefile, bounds)
+}
+
+// renderShapefileLayer renders one layer straight from a shapefile.
+//
+// The shapefile is handed to Mapnik's shape plugin, which does its own bbox
+// lookup against the .index sidecar, so there is no geometry work on the Go
+// side.
+//
+// An empty shapefile path returns an empty OutputPath — "layer absent" — and is
+// checked before the style is read, so a layer Natural Earth does not carry
+// costs nothing and needs no style file to exist.
+func (r *MultiPassRenderer) renderShapefileLayer(
+	coords tile.Coords,
+	layer geojson.LayerType,
+	stylePath string,
+	shapefile string,
+	bounds [4]float64,
+) *LayerRenderResult {
 	result := &LayerRenderResult{
-		Layer: geojson.LayerOcean,
+		Layer: layer,
 	}
 
-	shapefile := r.ocean.ShapefileForZoom(int(coords.Z))
 	if shapefile == "" {
 		result.OutputPath = ""
 		return result
@@ -295,14 +352,14 @@ func (r *MultiPassRenderer) renderOceanLayer(
 
 	styleXML, err := os.ReadFile(stylePath)
 	if err != nil {
-		result.Error = fmt.Errorf("failed to read ocean style: %w", err)
+		result.Error = fmt.Errorf("failed to read %s style: %w", layer, err)
 		return result
 	}
 
 	modifiedStyleXML := strings.ReplaceAll(string(styleXML), "DATASOURCE_PLACEHOLDER", shapefile)
 
 	if err := r.mapnikRenderer.LoadXML(modifiedStyleXML); err != nil {
-		result.Error = fmt.Errorf("failed to load ocean style: %w", err)
+		result.Error = fmt.Errorf("failed to load %s style: %w", layer, err)
 		return result
 	}
 
@@ -311,9 +368,9 @@ func (r *MultiPassRenderer) renderOceanLayer(
 		return result
 	}
 
-	outputPath := filepath.Join(r.outputDir, fmt.Sprintf("%s_%s.png", coords.String(), geojson.LayerOcean))
+	outputPath := filepath.Join(r.outputDir, fmt.Sprintf("%s_%s.png", coords.String(), layer))
 	if err := r.mapnikRenderer.RenderCurrentToFile(outputPath); err != nil {
-		result.Error = fmt.Errorf("failed to render ocean layer: %w", err)
+		result.Error = fmt.Errorf("failed to render %s layer: %w", layer, err)
 		return result
 	}
 

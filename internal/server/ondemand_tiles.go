@@ -41,6 +41,9 @@ type OnDemandTilesConfig struct {
 	// Ocean points the ocean pass at the processed OSM water polygons.
 	// The zero value disables it.
 	Ocean renderer.OceanConfig
+	// NaturalEarth points the low-zoom passes at the Natural Earth shapefiles.
+	// The zero value disables them, and every zoom then goes through Overpass.
+	NaturalEarth renderer.NaturalEarthConfig
 	// WebPEffort is nativewebp's compression level (0-6), every value
 	// explicit — 0 is the fastest level, not "unset". Ignored unless
 	// ImageFormat is WebP. The serve command defaults it to
@@ -756,6 +759,7 @@ func (t *OnDemandTiles) getGenerator(tileSize int) (*pipeline.Generator, error) 
 			WebPEffort:     t.cfg.WebPEffort,
 			Watercolor:     t.cfg.Watercolor,
 			Ocean:          t.cfg.Ocean,
+			NaturalEarth:   t.cfg.NaturalEarth,
 		},
 	)
 	if err != nil {
