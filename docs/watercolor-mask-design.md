@@ -61,8 +61,8 @@ Fuzzy boundary mask (the Stamen step):
 
 Invert for land:
 
-- `landMask` := invert(aa) — everything not water/roads becomes the textured land
-  region.
+- `landMask` := invert(aa) — everything outside the non-land union above becomes
+  the textured land region.
 
 Antialiasing strategy, simplest first: a small blur kernel (sigma ≈ 0.3–0.8)
 after the threshold; supersampling at 2× and downsampling was the fallback if
@@ -118,8 +118,10 @@ layer-specific darkening overlay.
 - A cross-layer mask construction step that runs before any layer is painted
 - The land pipeline switched to `landMask := invert(process(nonLandMask))`
   instead of land's own alpha
-- Parks and civic constrained to land (AND `landMask`)
-- A test verifying land is fully excluded where water or roads are present
+- Parks constrained to land plus urban and civic; civic and urban constrained by
+  subtracting the road/rail/highway union instead (see the section above for why
+  "AND `landMask`" would be wrong for them)
+- A test verifying land is fully excluded where the non-land layers are present
 - Blur/noise/threshold parameters retuned after the behaviour change
 
 > **Note on sigmas**: the default sigma values were rescaled again during the

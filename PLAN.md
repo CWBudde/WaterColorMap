@@ -29,10 +29,14 @@ tests.
 
 ## Phase 3: Image Processing - Watercolor Effect ✅ COMPLETE
 
-Cross-layer mask construction: `nonLandMask = max(water, roads)` →
-blur → noise → threshold → antialias → invert for land; parks and civic
-constrained to land; further-blurred masks reused as darkening overlays. All work
-items done, parameters retuned.
+Cross-layer mask construction: `nonLandMask` = the union of every layer that
+punches a hole in land (water, rivers, roads, railroads, highways, urban, civic,
+buildings) → blur → noise → threshold → antialias → invert for land. Urban and
+civic are painted with the road/rail/highway union subtracted rather than
+intersected with land — they are already subtracted _from_ it — and parks are
+constrained to land plus urban and civic, so a park in a built-up area survives.
+Further-blurred masks are reused as darkening overlays. All work items done,
+parameters retuned.
 → [docs/watercolor-mask-design.md](docs/watercolor-mask-design.md)
 
 ## Phase 4: Compositing and Tile Delivery
