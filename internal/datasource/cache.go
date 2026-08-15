@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,8 +33,10 @@ const (
 	// is short enough that a re-render eventually picks edits up and long
 	// enough to cover a multi-day batch run.
 	DefaultCacheTTL = 7 * 24 * time.Hour
-	// DefaultCacheMaxBytes is the on-disk budget enforced by LRU-by-mtime
-	// eviction.
+	// DefaultCacheMaxBytes is the on-disk budget, enforced by evicting the
+	// oldest-written entries first. Not LRU: Get deliberately leaves mtime
+	// alone, because mtime is also what the TTL reads and refreshing it on
+	// access would make a hot entry immortal.
 	DefaultCacheMaxBytes int64 = 5 << 30 // 5 GB
 )
 
@@ -268,27 +271,47 @@ func (c *ResponseCache) Put(endpoint, query string, body []byte) {
 
 // storable reports whether a body is worth caching.
 //
-// Bodies that do not parse as JSON never get here (the transport filters them),
-// but the zero-element check does live here: validateFeatureResponse exists to
-// catch a silent Overpass failure that answers 200 with no data, and persisting
-// that answer for a week would turn a transient failure into a permanent one.
-// The structural check is the cheap equivalent of validateFeatureResponse,
-// which cannot be used at this layer because it needs the zoom level.
+// The governing rule is that the cache must never turn a transient failure into
+// a persistent one. Overpass signals failure in three shapes, and only the first
+// is caught before this point:
+//
+//   - a non-200 status or a non-JSON body — filtered by the transport;
+//   - a 200 carrying a "remark", which is how Overpass reports a query timeout
+//     or a runtime error while still returning whatever it managed to collect;
+//   - a 200 with an empty "elements" array, which is what a silently failing
+//     instance looks like (the same case validateFeatureResponse guards, which
+//     cannot be reused here because it needs the zoom level).
+//
+// The remark case is the dangerous one, because go-overpass does not decode
+// "remark" at all: a timed-out query is indistinguishable from a successful one
+// with fewer features, so without this check a partial result would be replayed
+// as authoritative for the whole TTL and every tile in that area would render
+// with features missing.
+//
+// storeEmpty relaxes only the empty-elements rule. It is not an escape hatch
+// from structural validation: a body must still parse and still carry an
+// "elements" array, so a JSON error object can never be cached.
 func (c *ResponseCache) storable(body []byte) bool {
 	if c.maxBytes > 0 && int64(len(body)) > c.maxBytes {
 		return false
 	}
-	if c.storeEmpty {
-		return true
-	}
 
 	var probe struct {
-		Elements []json.RawMessage `json:"elements"`
+		Elements *[]json.RawMessage `json:"elements"`
+		Remark   string             `json:"remark"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
 		return false
 	}
-	if len(probe.Elements) == 0 {
+	if probe.Remark != "" {
+		c.log.Debug("overpass cache skipped a response carrying a remark", "remark", probe.Remark)
+		return false
+	}
+	if probe.Elements == nil {
+		c.log.Debug("overpass cache skipped a response without an elements array")
+		return false
+	}
+	if len(*probe.Elements) == 0 && !c.storeEmpty {
 		c.log.Debug("overpass cache skipped a zero-element response")
 		return false
 	}
@@ -574,9 +597,23 @@ func ParseByteSize(s string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("invalid size %q: expected a number optionally followed by KB/MB/GB/TB", s)
 	}
+	// ParseFloat accepts "NaN" and "Inf", and neither is caught by a negative
+	// check — NaN compares false against everything. Both, and any value that
+	// overflows the int64 range, convert to an implementation-defined result
+	// that is in practice the *negative* int64 minimum, which ResponseCache
+	// reads as "eviction disabled". A malformed budget would therefore become a
+	// silently unbounded disk cache, which is the opposite of what configuring
+	// a limit asks for, so every one of these is rejected at startup instead.
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("invalid size %q: must be a finite number", s)
+	}
 	if value < 0 {
 		return 0, fmt.Errorf("invalid size %q: must not be negative", s)
 	}
+	scaled := value * float64(multiplier)
+	if scaled > math.MaxInt64 {
+		return 0, fmt.Errorf("invalid size %q: exceeds the maximum of %d bytes", s, int64(math.MaxInt64))
+	}
 
-	return int64(value * float64(multiplier)), nil
+	return int64(scaled), nil
 }

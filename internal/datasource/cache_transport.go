@@ -28,6 +28,13 @@ const maxCachedQueryBytes = 1 << 20
 type cachingTransport struct {
 	base  http.RoundTripper
 	cache *ResponseCache
+
+	// maxResponseBytes is this datasource's configured cap, repeated here
+	// because the limiter it belongs to sits *below* this transport and so
+	// never runs on a hit. Without it a cache populated under a larger (or
+	// shared) configuration could hand back a body the caller had explicitly
+	// capped smaller. Zero or negative means no cap, matching limitedTransport.
+	maxResponseBytes int64
 }
 
 func (t *cachingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -42,7 +49,17 @@ func (t *cachingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	if body, hit := t.cache.Get(endpoint, query); hit {
-		return cachedResponse(req, body), nil
+		// A hit bypasses the limiter underneath, so the cap is applied here
+		// instead. Treating an oversized entry as a miss (rather than an error)
+		// keeps the cache incapable of failing a request that would otherwise
+		// have succeeded: the fetch below re-runs through the limiter and
+		// produces whatever verdict the configured cap calls for.
+		if t.maxResponseBytes > 0 && int64(len(body)) > t.maxResponseBytes {
+			t.cache.log.Debug("overpass cache hit exceeded the configured response cap; refetching",
+				"bytes", len(body), "max_response_bytes", t.maxResponseBytes)
+		} else {
+			return cachedResponse(req, body), nil
+		}
 	}
 
 	resp, err := base.RoundTrip(req)
@@ -128,7 +145,7 @@ func cachedResponse(req *http.Request, body []byte) *http.Response {
 //
 // Apply it *outside* withResponseLimit so the size cap still bounds the miss
 // path; a cached body is already bounded by maxCacheEntryBytes on read.
-func withResponseCache(client *http.Client, cache *ResponseCache) *http.Client {
+func withResponseCache(client *http.Client, cache *ResponseCache, maxResponseBytes int64) *http.Client {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -137,6 +154,10 @@ func withResponseCache(client *http.Client, cache *ResponseCache) *http.Client {
 	}
 
 	cached := *client
-	cached.Transport = &cachingTransport{base: client.Transport, cache: cache}
+	cached.Transport = &cachingTransport{
+		base:             client.Transport,
+		cache:            cache,
+		maxResponseBytes: maxResponseBytes,
+	}
 	return &cached
 }

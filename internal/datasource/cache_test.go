@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cwbudde/go-overpass"
 
 	"github.com/cwbudde/watercolormap/internal/types"
 )
@@ -106,19 +109,25 @@ func TestCacheKeyDistinguishesInputs(t *testing.T) {
 
 func TestCacheRoundTrip(t *testing.T) {
 	tests := []struct {
-		name string
-		body []byte
+		name       string
+		body       []byte
+		storeEmpty bool
+		wantHit    bool
 	}{
-		{"typical", []byte(`{"elements":[{"type":"way","id":1}]}`)},
-		{"empty body", []byte{}},
-		{"five megabytes", bigElementsJSON(5 << 20)},
+		{name: "typical", body: []byte(`{"elements":[{"type":"way","id":1}]}`), wantHit: true},
+		{name: "five megabytes", body: bigElementsJSON(5 << 20), wantHit: true},
+
+		// A zero-length body is not JSON and therefore carries no elements
+		// array, so it is never storable — not even with store-empty, which
+		// relaxes only the "elements is present but empty" rule and is not an
+		// escape hatch from structural validation.
+		{name: "empty body", body: []byte{}, wantHit: false},
+		{name: "empty body, store-empty", body: []byte{}, storeEmpty: true, wantHit: false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// A zero-length body is not valid JSON and is deliberately not
-			// storable, so that case asserts a miss rather than a round-trip.
-			cache := testCache(t, func(cfg *CacheConfig) { cfg.StoreEmpty = len(tc.body) == 0 })
+			cache := testCache(t, func(cfg *CacheConfig) { cfg.StoreEmpty = tc.storeEmpty })
 			query := queryFor(goldenQueryBounds, 13)
 
 			if _, hit := cache.Get(testEndpoint, query); hit {
@@ -128,8 +137,11 @@ func TestCacheRoundTrip(t *testing.T) {
 			cache.Put(testEndpoint, query, tc.body)
 
 			got, hit := cache.Get(testEndpoint, query)
-			if !hit {
-				t.Fatal("expected a hit after Put")
+			if hit != tc.wantHit {
+				t.Fatalf("hit after Put = %v, want %v", hit, tc.wantHit)
+			}
+			if !tc.wantHit {
+				return
 			}
 			if !bytes.Equal(got, tc.body) {
 				t.Errorf("round-trip changed the body: got %d bytes, want %d", len(got), len(tc.body))
@@ -257,6 +269,29 @@ func TestCacheSkipsZeroElementResponses(t *testing.T) {
 		{"zero elements, store-empty", `{"elements":[]}`, true, true},
 		{"missing elements key", `{"version":0.6}`, false, false},
 		{"one element", `{"elements":[{"type":"node","id":1}]}`, false, true},
+
+		// A timed-out or failing Overpass answers 200 with a "remark" and
+		// whatever it collected before giving up. go-overpass does not decode
+		// "remark" at all, so such a body is indistinguishable from a smaller
+		// successful one; caching it would replay a partial result as
+		// authoritative for the whole TTL and render every tile in the area
+		// with features missing.
+		{
+			"remark with partial elements",
+			`{"remark":"runtime error: Query timed out in \"query\" at line 3 after 26 seconds.","elements":[{"type":"node","id":1}]}`,
+			false, false,
+		},
+		{"remark with no elements", `{"remark":"runtime error","elements":[]}`, false, false},
+
+		// store-empty relaxes only the empty-elements rule; it is not an
+		// escape hatch from structural validation.
+		{
+			"remark, store-empty",
+			`{"remark":"runtime error","elements":[{"type":"node","id":1}]}`,
+			true, false,
+		},
+		{"missing elements key, store-empty", `{"version":0.6}`, true, false},
+		{"json error object, store-empty", `{"error":"boom"}`, true, false},
 	}
 
 	for _, tc := range tests {
@@ -411,6 +446,18 @@ func TestParseByteSize(t *testing.T) {
 		{name: "nonsense", in: "nonsense", wantErr: true},
 		{name: "negative", in: "-1GB", wantErr: true},
 		{name: "unit only", in: "GB", wantErr: true},
+
+		// ParseFloat accepts these, and none is caught by a negative check —
+		// NaN compares false against everything. Each converts to the negative
+		// int64 minimum, which ResponseCache reads as "eviction disabled", so
+		// accepting any of them would silently turn a configured budget into an
+		// unbounded disk cache.
+		{name: "nan", in: "NaN", wantErr: true},
+		{name: "nan with unit", in: "nanGB", wantErr: true},
+		{name: "positive infinity", in: "Inf", wantErr: true},
+		{name: "negative infinity", in: "-Inf", wantErr: true},
+		{name: "overflows int64", in: "99999999999999999999999", wantErr: true},
+		{name: "overflows int64 after scaling", in: "99999999999TB", wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -445,4 +492,45 @@ func bigElementsJSON(n int) []byte {
 	}
 	buf.WriteString(`]}`)
 	return buf.Bytes()
+}
+
+// TestMultiServerCacheSizeCountsSharedEntriesOnce guards a reporting bug:
+// createOverpassDataSource hands the *same* *ResponseCache to every configured
+// server, so summing each server's own count reported an N-server setup as
+// holding N times the entries it really has.
+func TestMultiServerCacheSizeCountsSharedEntriesOnce(t *testing.T) {
+	cache := testCache(t, nil)
+	noRetry := overpass.RetryConfig{MaxRetries: 0}
+
+	server := func(name, endpoint string) ServerConfig {
+		return ServerConfig{
+			Endpoint:    endpoint,
+			Workers:     1,
+			RetryConfig: &noRetry,
+			HTTPClient:  &http.Client{},
+			Name:        name,
+			Cache:       cache,
+		}
+	}
+
+	ds := NewMultiOverpassDataSource(
+		server("a", "http://example.invalid/a"),
+		server("b", "http://example.invalid/b"),
+		server("c", "http://example.invalid/c"),
+	)
+
+	cache.Put(testEndpoint, queryFor(goldenQueryBounds, 13), []byte(`{"elements":[{"type":"node","id":1}]}`))
+	cache.Put(testEndpoint, queryFor(goldenQueryBounds, 14), []byte(`{"elements":[{"type":"node","id":2}]}`))
+
+	if got, want := cache.Entries(), 2; got != want {
+		t.Fatalf("cache holds %d entries, want %d", got, want)
+	}
+	if got, want := ds.CacheSize(), 2; got != want {
+		t.Errorf("CacheSize() = %d, want %d — the shared cache must be counted once, not once per server", got, want)
+	}
+
+	ds.ClearCache()
+	if got := ds.CacheSize(); got != 0 {
+		t.Errorf("CacheSize() after ClearCache = %d, want 0", got)
+	}
 }
