@@ -27,7 +27,9 @@ import (
 )
 
 // checkpointAuto is the sentinel `--checkpoint` takes when given without a
-// value: put the checkpoint in the output directory under its default name.
+// value: put the checkpoint next to the run's output under its default name —
+// the output directory for a folder run, the MBTiles file's directory for an
+// MBTiles one, which is the only one of the two an MBTiles run creates.
 const checkpointAuto = "auto"
 
 var generateCmd = &cobra.Command{
@@ -60,7 +62,8 @@ func init() {
 	// changes what a rerun does, which an operator opts into.
 	generateCmd.Flags().String("checkpoint", "",
 		"Record batch progress in this file so an interrupted run resumes where it stopped; "+
-			"give the flag without a value to use <output-dir>/"+checkpoint.FileName)
+			"give the flag without a value to use "+checkpoint.FileName+" next to the output "+
+			"(<output-dir> for folder runs, the --output-file's directory for MBTiles)")
 	generateCmd.Flags().Lookup("checkpoint").NoOptDefVal = checkpointAuto
 	generateCmd.Flags().Int("checkpoint-interval", checkpoint.DefaultInterval, "Write the checkpoint every N completed tiles")
 
@@ -551,6 +554,8 @@ func runBatchGenerate(opts *batchOptions) error {
 	}()
 	opts.stampStore = stampStoreOption(stamps)
 
+	bindCheckpointToWriter(cp, mbtilesWriter)
+
 	// Create generator with optional TileWriter
 	var tileWriter pipeline.TileWriter
 	if mbtilesWriter != nil {
@@ -706,6 +711,21 @@ func openMBTilesWriter(opts *batchOptions, bbox [4]float64) (*mbtiles.Writer, er
 
 	logger.Info("MBTiles writer created", "output", opts.outputFile)
 	return writer, nil
+}
+
+// bindCheckpointToWriter makes the checkpoint wait for durable MBTiles rows.
+//
+// A watermark is a promise that the tiles below it are in the output.
+// mbtiles.Writer buffers rows and commits them a batch at a time, so a
+// successful render is not yet a written tile: without this, a crash could leave
+// a durable watermark over rows that never reached SQLite, and the resumed run
+// would skip them for good. Folder output needs nothing here — encodeTileAtomic
+// has already renamed the file into place by the time the result arrives.
+func bindCheckpointToWriter(cp *checkpoint.Tracker, w *mbtiles.Writer) {
+	if cp == nil || w == nil {
+		return
+	}
+	cp.SetFlush(w.Flush)
 }
 
 // closeMBTilesWriter closes the writer when it is in use, logging failures.

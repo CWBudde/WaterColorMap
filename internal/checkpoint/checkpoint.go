@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -24,7 +25,11 @@ const FileName = ".watercolormap-checkpoint.json"
 
 // Schema is the version of the on-disk format. A file written by a different
 // schema is ignored, exactly like a run-key mismatch.
-const Schema = 1
+//
+// Bumped to 2 when Target and FolderStructure joined RunKey: a schema-1 file
+// carries neither, so resuming it would be resuming a run whose destination is
+// unknown.
+const Schema = 2
 
 // DefaultInterval is how many completed tiles pass between saves. Small enough
 // that an interrupted run loses seconds of work, large enough that the write is
@@ -36,12 +41,23 @@ const DefaultInterval = 2000
 // resuming across a change of any of these would skip tiles that were never
 // rendered under the new settings.
 type RunKey struct {
-	Format      string     `json:"format"`
-	ImageFormat string     `json:"image_format"`
-	Suffix      string     `json:"suffix"`
-	BBox        [4]float64 `json:"bbox"`
-	ZoomMin     int        `json:"zoom_min"`
-	ZoomMax     int        `json:"zoom_max"`
+	Format string `json:"format"`
+	// Target is the absolute path the run writes to: the MBTiles file, or the
+	// output directory of a folder run. Without it, a watermark taken against
+	// one destination would be replayed against another — an empty database or
+	// a fresh directory — and the skipped prefix would never be rendered,
+	// because skipped tiles are never emitted for the existence check.
+	Target      string `json:"target"`
+	ImageFormat string `json:"image_format"`
+	// FolderStructure is the on-disk layout of a folder run ("flat" or
+	// "nested"), and empty for MBTiles, where it has no effect. Switching
+	// layouts changes every tile's path, so it changes which files a resumed
+	// run would be assuming exist.
+	FolderStructure string     `json:"folder_structure"`
+	Suffix          string     `json:"suffix"`
+	BBox            [4]float64 `json:"bbox"`
+	ZoomMin         int        `json:"zoom_min"`
+	ZoomMax         int        `json:"zoom_max"`
 }
 
 // State is the checkpoint file's content.
@@ -100,21 +116,36 @@ func (s *State) Resumable(key RunKey, total int) (bool, string) {
 // Tracker maintains the watermark of a running batch and persists it.
 //
 // It is safe for concurrent use, though in practice the worker pool calls
-// Complete from a single collector goroutine.
+// Complete from a single collector goroutine. Both the in-memory state and the
+// file are protected: mu guards the counters, saveMu serialises publication so
+// two snapshots cannot reach disk out of the order they were taken. The lock
+// order is always mu then saveMu; nothing takes them the other way round.
 type Tracker struct {
 	// frontier holds indices that succeeded ahead of the watermark. Its size is
 	// bounded by how far out of order completions can be, i.e. by the number of
-	// workers and any stalled tile — not by the length of the run.
-	frontier  map[int]struct{}
+	// workers and any stalled tile — not by the length of the run. `blocked`
+	// is what keeps that true once something fails.
+	frontier map[int]struct{}
+	// flush, when set, makes the run's output durable before a watermark that
+	// covers it is written. It is set once, before the run starts, and read
+	// without holding mu.
+	flush     func() error
 	path      string
 	key       RunKey
 	interval  int
 	watermark int
+	// blocked is the lowest index known to have failed, or noFailure while
+	// nothing has. The watermark can never move past it in this run.
+	blocked   int
 	completed int
 	failed    int
 	sinceSave int
 	mu        sync.Mutex
+	saveMu    sync.Mutex
 }
+
+// noFailure is `blocked` while nothing has failed: every index is below it.
+const noFailure = math.MaxInt
 
 // NewTracker returns a tracker writing to path, resuming from state when state
 // is non-nil (the caller decides that with State.Resumable). interval <= 0
@@ -129,6 +160,7 @@ func NewTracker(path string, key RunKey, state *State, interval int) *Tracker {
 		key:      key,
 		interval: interval,
 		frontier: make(map[int]struct{}),
+		blocked:  noFailure,
 	}
 	if state != nil {
 		t.watermark = state.Watermark
@@ -140,6 +172,18 @@ func NewTracker(path string, key RunKey, state *State, interval int) *Tracker {
 
 // Path returns the file the tracker writes to.
 func (t *Tracker) Path() string { return t.path }
+
+// SetFlush installs a function that makes the run's output durable, and must be
+// called before the run starts.
+//
+// A watermark is a promise that the tiles below it exist in the output. For a
+// backend that buffers — mbtiles.Writer batches rows and commits them in one
+// transaction — a successful render is not yet a written tile, so publishing a
+// watermark over buffered rows would let a crash leave a durable checkpoint
+// covering tiles that were lost. A resumed run skips that prefix outright, so
+// those rows would be missing for good. With flush set, nothing is published
+// before the output it describes is committed.
+func (t *Tracker) SetFlush(flush func() error) { t.flush = flush }
 
 // Watermark returns the number of leading tiles known to have succeeded, i.e.
 // how many entries a resuming run skips.
@@ -162,6 +206,7 @@ func (t *Tracker) Complete(index int, ok bool) error {
 	t.completed++
 	if !ok {
 		t.failed++
+		t.block(index)
 	} else {
 		t.record(index)
 	}
@@ -173,15 +218,40 @@ func (t *Tracker) Complete(index int, ok bool) error {
 	}
 	t.sinceSave = 0
 	state := t.stateLocked()
+	// Taken while mu is still held, so snapshots are published in the order
+	// they were taken and a later watermark can never be overwritten by an
+	// earlier one.
+	t.saveMu.Lock()
 	t.mu.Unlock()
+	defer t.saveMu.Unlock()
 
-	return writeAtomic(t.path, state)
+	return t.publish(state)
+}
+
+// block records that index failed.
+//
+// The watermark can never move past a failed index in this run, so every
+// success at or beyond it is dead weight: a resume re-attempts the whole suffix
+// anyway. Dropping those entries is what keeps the frontier bounded when an
+// early tile fails — without it, a failure at index 4 of a planet-sized run
+// would leave every later success in the map, which is exactly the O(tiles)
+// allocation the streaming path exists to remove.
+func (t *Tracker) block(index int) {
+	if index >= t.blocked {
+		return
+	}
+	t.blocked = index
+	for i := range t.frontier {
+		if i >= t.blocked {
+			delete(t.frontier, i)
+		}
+	}
 }
 
 // record marks index as succeeded and advances the watermark over any
 // contiguous run of successes it now completes.
 func (t *Tracker) record(index int) {
-	if index < t.watermark {
+	if index < t.watermark || index >= t.blocked {
 		return
 	}
 	t.frontier[index] = struct{}{}
@@ -200,14 +270,31 @@ func (t *Tracker) Save() error {
 	t.mu.Lock()
 	t.sinceSave = 0
 	state := t.stateLocked()
+	t.saveMu.Lock()
 	t.mu.Unlock()
+	defer t.saveMu.Unlock()
 
+	return t.publish(state)
+}
+
+// publish flushes the run's output and writes state. Callers hold saveMu, so a
+// snapshot cannot be overtaken on its way to disk, and Remove cannot land
+// between a save's flush and its rename.
+func (t *Tracker) publish(state State) error {
+	if t.flush != nil {
+		if err := t.flush(); err != nil {
+			return fmt.Errorf("failed to flush output before checkpoint: %w", err)
+		}
+	}
 	return writeAtomic(t.path, state)
 }
 
 // Remove deletes the checkpoint file, for a run that finished the whole range.
 // A missing file is success.
 func (t *Tracker) Remove() error {
+	t.saveMu.Lock()
+	defer t.saveMu.Unlock()
+
 	if err := os.Remove(t.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to remove checkpoint %s: %w", t.path, err)
 	}
