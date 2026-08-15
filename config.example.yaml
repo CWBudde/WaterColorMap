@@ -114,10 +114,11 @@ overpass:
 #   # tile, against a ~576 ms render).
 #   image_format: "png"
 #   png_compression: "default" # default, speed, best, none; ignored for webp
-#   # WebP encoder effort, 0-6. Higher is smaller and slower, with little left
-#   # to gain above 4: effort 0 gives 1.16x at 29 ms, 4 gives 1.20x at 52 ms,
-#   # 6 gives 1.21x at 56 ms. 0 means "use the default", which is 4.
-#   webp_effort: 0
+#   # WebP encoder effort, 0-6, defaulting to 4. Higher is smaller and slower,
+#   # with little left to gain above 4: effort 0 gives 1.16x at 29 ms, 4 gives
+#   # 1.20x at 52 ms, 6 gives 1.21x at 56 ms. 0 is the fastest level, not "use
+#   # the default" -- setting it here really does select effort 0.
+#   webp_effort: 4
 #   seed: 1337 # deterministic noise/texture alignment
 #   keep_layers: false # keep intermediate layer PNGs for debugging
 #
@@ -179,7 +180,7 @@ overpass:
 #   # bytes under the other's name.
 #   image_format: "png"
 #   png_compression: "default"
-#   webp_effort: 0
+#   webp_effort: 4 # 0-6; 0 is the fastest level, not "use the default"
 #   seed: 1337
 #   keep_layers: false
 #

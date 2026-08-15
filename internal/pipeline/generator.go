@@ -104,8 +104,10 @@ type GeneratorOptions struct {
 	// did before ocean rendering existed.
 	Ocean renderer.OceanConfig
 
-	// WebPEffort is nativewebp's compression level (0-6). Zero means the
-	// package default. Ignored unless ImageFormat is WebP.
+	// WebPEffort is nativewebp's compression level (0-6), every value
+	// explicit — 0 is the fastest level, not "unset". Ignored unless
+	// ImageFormat is WebP. The generate command defaults it to
+	// tileformat.DefaultWebPEffort.
 	WebPEffort int
 }
 

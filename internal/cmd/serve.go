@@ -49,7 +49,7 @@ func init() {
 	serveCmd.Flags().Int("tile-size", 256, "Base tile size in pixels (256; @2x requests render 512)")
 	serveCmd.Flags().String("image-format", "png", "Tile image encoding: png or webp (webp is lossless, ~1.2x smaller)")
 	serveCmd.Flags().String("png-compression", "default", "PNG compression (default, speed, best, none); ignored for --image-format=webp")
-	serveCmd.Flags().Int("webp-effort", 0, "WebP compression effort 0-6 (0 = fastest, default 4); ignored for --image-format=png")
+	serveCmd.Flags().Int("webp-effort", tileformat.DefaultWebPEffort, "WebP compression effort 0-6 (0 = fastest); ignored for --image-format=png")
 	serveCmd.Flags().Int64("seed", 1337, "Deterministic seed for noise/texture alignment")
 	serveCmd.Flags().Bool("keep-layers", false, "Keep intermediate rendered layer PNGs for debugging")
 	serveCmd.Flags().Int("overpass-workers", 4, "Number of parallel Overpass API requests (2-4 recommended for public API)")

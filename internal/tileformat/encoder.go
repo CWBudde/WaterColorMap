@@ -30,13 +30,19 @@ type EncoderOptions struct {
 	// "none". Ignored for WebP.
 	PNGCompression string
 	// WebPEffort is nativewebp's CompressionLevel: how much analysis the
-	// encoder does before committing. Zero means DefaultWebPEffort. Ignored
-	// for PNG.
+	// encoder does before committing. Ignored for PNG.
+	//
+	// Every value 0-6 is explicit, zero included — 0 is the fastest level, not
+	// "unset", so it has to stay reachable. That means this field has no
+	// "use the default" state and callers must supply one; the CLI flags
+	// default to DefaultWebPEffort for exactly that reason.
 	WebPEffort int
 }
 
 // DefaultWebPEffort is nativewebp's own default (4 of 0-6), and measurement on
-// this project's tiles says it is the right place to stop.
+// this project's tiles says it is the right place to stop. NewEncoder does not
+// apply it — see EncoderOptions.WebPEffort — the CLI flags carry it as their
+// default value instead.
 //
 // Measured over the 689 base tiles in tiles/, re-encoding each from PNG:
 //
@@ -61,9 +67,6 @@ func NewEncoder(opts EncoderOptions) (Encoder, error) {
 	switch format {
 	case WebP:
 		effort := opts.WebPEffort
-		if effort == 0 {
-			effort = DefaultWebPEffort
-		}
 		if effort < 0 || effort > 6 {
 			return nil, fmt.Errorf("webp effort %d out of range: must be 0-6", effort)
 		}
