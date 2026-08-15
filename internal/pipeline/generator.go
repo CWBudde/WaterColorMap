@@ -876,8 +876,6 @@ type maskSet struct {
 	nonLandUnion  *image.Gray // Union of water + rivers + roads + railroads (used as base for land inversion)
 }
 
-// buildMasks extracts alpha masks from rendered layers and creates the non-land union.
-// The actual blur/noise/threshold processing is now handled by the watercolor processor.
 // alphaMaskOrEmpty returns the layer's alpha mask, or an all-zero mask of the tile bounds
 // when the layer was not rendered. Callers keep these masks (the debug context holds a
 // reference to each), so they are freshly allocated rather than pooled - but only once:
@@ -890,6 +888,8 @@ func alphaMaskOrEmpty(img image.Image, bounds image.Rectangle) *image.Gray {
 	return mask.ExtractAlphaMask(img)
 }
 
+// buildMasks extracts alpha masks from rendered layers and creates the non-land union.
+// The actual blur/noise/threshold processing is now handled by the watercolor processor.
 func buildMasks(
 	rawLayers map[geojson.LayerType]image.Image,
 	params watercolor.Params,
