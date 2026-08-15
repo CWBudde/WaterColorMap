@@ -61,10 +61,21 @@ Hannover tile, so without this setting the suite fails semi-randomly.
 
 ### The CLI
 
-`config.yaml` already routes to it — but note `config.yaml` is gitignored, so a
-fresh checkout has no routing at all and falls back to the public API. That is
-why the `-local` recipes set `WATERCOLORMAP_OVERPASS_ENDPOINT` rather than
-relying on the config being present. Both `generate` and `serve` read the
+**`config.yaml` is gitignored, so a fresh checkout has none** and both commands
+fall back to the public API until you create one. Two ways to point them at the
+local instance:
+
+```bash
+# 1. one-off, no config file: supplies the *default* endpoint
+export WATERCOLORMAP_OVERPASS_ENDPOINT=http://localhost:12345/api/interpreter
+
+# 2. persistent, with geographic routing: create config.yaml from the block below
+```
+
+The `-local` recipes take route 1 for you, which is why they work on a fresh
+checkout.
+
+For route 2, put this in `config.yaml`. Both `generate` and `serve` read the
 `overpass.servers` list and pick a server by geography, falling back to the
 public API for anything outside the coverage box:
 
