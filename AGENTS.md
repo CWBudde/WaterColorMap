@@ -78,6 +78,10 @@ outstanding.
 - [docs/seam-inspection.md](docs/seam-inspection.md) — manual Leaflet checklist for
   tile seams, and what the automated `TestCompositedTileSeams` does and does not
   cover. Use it after touching blur, noise, texture or metatile padding.
+- [docs/zoom-levels.md](docs/zoom-levels.md) — what each zoom fetches, which
+  dataset answers it, and the zoom-conditioned behaviour that does not live near
+  the rule tables (empty-response validation, blur rescaling, band and retry
+  thresholds, Mapnik scale tiers). Read before changing any zoom window.
 - [docs/MULTI-SERVER-OVERPASS.md](docs/MULTI-SERVER-OVERPASS.md) — multi-endpoint
   Overpass configuration.
 - [docs/data-scaling-strategy.md](docs/data-scaling-strategy.md) — how the data
