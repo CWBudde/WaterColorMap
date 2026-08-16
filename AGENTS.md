@@ -85,6 +85,10 @@ outstanding.
   behaviours (`writeRect`, `grayRow`) that replaced what `SetGray` and `GrayAt` used to
   do implicitly. Read before writing a loop over `Pix`, and note that the `pixelaccess_test.go`
   reference implementations are frozen copies of the old loops on purpose.
+- [docs/performance/texture-optimization.md](docs/performance/texture-optimization.md) —
+  the texture tiling rewrite: why tiling is a row `copy` rather than a per-texel sample,
+  why textures are normalised to `*image.NRGBA` at load time, and **why no texture atlas
+  was built**. Read before touching `internal/texture` or adding a texture loader.
 - [docs/watercolor-tuning.md](docs/watercolor-tuning.md) — the `watercolor:` config
   block: every knob, which of the five pipeline stages it belongs to, and the
   current defaults. Supersedes the stale parameter list in `3.6`.

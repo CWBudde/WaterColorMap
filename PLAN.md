@@ -18,6 +18,8 @@ This document outlines the complete implementation plan for creating Stamen Wate
 >   [docs/performance/allocation-optimization.md](docs/performance/allocation-optimization.md)
 > - Phase 5.11.4 (pixel access: row-slice loops, clipping rules, measurements) →
 >   [docs/performance/pixel-access-optimization.md](docs/performance/pixel-access-optimization.md)
+> - Phase 5.11.6 (texture tiling: row copies, load-time NRGBA, why no atlas) →
+>   [docs/performance/texture-optimization.md](docs/performance/texture-optimization.md)
 > - Phase 7.1/7.2/7.3/7.7 (build, tile-server hardening, code quality) →
 >   [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
 
@@ -502,16 +504,36 @@ used on this machine →
 
 **Context**: Water, land, parks, civic layers can be painted independently. Roads/highways depend on land mask but could still be parallelized after land completes.
 
-#### 5.11.6 Texture Processing Optimization 🟢 LOW PRIORITY
+#### 5.11.6 Texture Processing Optimization ✅ COMPLETE
 
-**Target**: Reduce texture tiling overhead (Expected gain: 3-5% speedup)
+**Result**: tiling a texture into a metatile costs 96% less CPU (620µs → 22.5µs),
+masking one 87% less, and the @2x path no longer allocates. `BenchmarkFullPipeline` is
+14% faster and `BenchmarkPaintFromMask` 22% faster; texture work fell from ~17.5% of the
+pipeline's CPU profile to 1.5%. Output is bit-identical — the pipeline goldens did not
+move.
 
-- [ ] Implement texture atlas (single large texture, UV mapping)
-- [ ] Add lazy texture tiling (on-demand vs upfront)
-- [ ] Profile texture operation performance
-- [ ] Measure memory reduction from atlas approach
+Unscaled tiling is doubly periodic, so a row is now built by copying one texture period
+out of the source row and replicating it, and repeats vertically by copying the row one
+texture height above. Textures are normalised to `*image.NRGBA` at load time, which is
+what lets those copies exist: every PNG in `assets/textures` decodes to `*image.RGBA`
+and `white.png` to `*image.Paletted`, so production was running the two slow sampler
+paths while every benchmark and test fed the loops the fast one.
 
-**Context**: TileTexture allocates 175MB per benchmark. Texture atlasing could reduce allocations and improve cache locality.
+The "TileTexture allocates 175MB per benchmark" this section rested on was **wrong** and
+two phases stale: 5.11.3 gave tiling a destination-taking form on a pooled buffer, and
+the texture package allocated nothing per tile on `main`. The cost was CPU, and it was
+17.5%, not the 3-5% predicted. **No texture atlas was built, deliberately** — with ten
+textures, one per layer, each used at full size, an atlas changes resident bytes by
+nothing and cannot touch the remaining cost, which is the destination write. Lazy tiling
+has nothing to defer (the tiled texture is consumed on the next line, out of a pooled
+buffer), and caching tiled textures across tiles would trade microseconds for a shared
+mutable buffer under the parallel tile server. Two things a future reader could undo: the
+`reference*` loops in `internal/texture/pixelaccess_test.go` are frozen copies of the old
+implementation on purpose, and `ToNRGBA` must keep routing texels through `getNRGBA` —
+any other conversion moves pixels.
+
+Profile, measurements, the row-copy convention and the full atlas argument →
+[docs/performance/texture-optimization.md](docs/performance/texture-optimization.md)
 
 #### 5.11.7 SIMD Optimization 🟢 FUTURE ENHANCEMENT
 
