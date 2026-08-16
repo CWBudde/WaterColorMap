@@ -220,6 +220,107 @@
   wins, and unset the default remains the public API. See `docs/local-overpass.md`, plus
   `just test-integration-local` and `just smoke-local`.
 
+## [1.0.0](https://github.com/CWBudde/WaterColorMap/compare/v0.3.0...v1.0.0) (2026-08-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **server:** --cache-control now defaults to "no-cache" rather than "no-store". Tiles become storable and revalidatable, which is what makes the ETag reach the client, while a tile removed by `purge` is still gone on the very next request. A positive max-age would be faster and would outlive a purge, so it stays the operator's call; --cache-control no-store restores the previous behaviour exactly.
+
+### Features
+
+* add local Overpass instance support for faster integration testing and data fetching ([1129141](https://github.com/CWBudde/WaterColorMap/commit/1129141fbb527f8484bf8cce2e57c6f65b53c151))
+* add scaling support for texture processing and padding calculations ([be6e07f](https://github.com/CWBudde/WaterColorMap/commit/be6e07f9f17cbe0ed22355cbddc420cc9ff28bd0))
+* **checkpoint:** record batch progress as a watermark over the enumeration ([0635622](https://github.com/CWBudde/WaterColorMap/commit/06356220442e3dce29b21dcb8496db32c0f2a6ee))
+* **cmd,server:** make per-tile paint concurrency configurable ([c1f1cce](https://github.com/CWBudde/WaterColorMap/commit/c1f1ccec2c8228ddec493d45952217a87e0d0340))
+* **cmd:** add the purge command and the generate --stale-* flags ([847a433](https://github.com/CWBudde/WaterColorMap/commit/847a433d41176d7db240abb748fdb2344ee32b6a))
+* **datasource:** add an optional on-disk Overpass response cache ([2e7e8ba](https://github.com/CWBudde/WaterColorMap/commit/2e7e8ba57500f108db52d0e0968983bca2439fca))
+* **datasource:** carry the OSM source-data version out of Overpass ([789c01a](https://github.com/CWBudde/WaterColorMap/commit/789c01a3093700640e25720eb94eb4743a8a3f75))
+* document completion of manual step for local Overpass instance and verify tile generation results ([b2fbc0b](https://github.com/CWBudde/WaterColorMap/commit/b2fbc0bde272bfd01b6069d3122542d96d5a42d6))
+* **generate:** fetch Overpass data per band instead of per tile ([c0b6454](https://github.com/CWBudde/WaterColorMap/commit/c0b645442558a376aa945d519b08f8d5bae6e658))
+* **generate:** stream the batch run and checkpoint it ([3fc2a9c](https://github.com/CWBudde/WaterColorMap/commit/3fc2a9ca62c580a681c958452b2d213322a40556))
+* implement hi-DPI scaling for Mapnik rendering and update tests ([9c654e9](https://github.com/CWBudde/WaterColorMap/commit/9c654e92e63cac0543e7068451862ac13c62e817))
+* **lru:** add a bounded LRU with TTL and statistics ([34efbe8](https://github.com/CWBudde/WaterColorMap/commit/34efbe8c4a301f794cbd7a64fd7e54179d0f8449))
+* **mbtiles:** add the tile delete path and OpenForUpdate ([6d4e836](https://github.com/CWBudde/WaterColorMap/commit/6d4e836aa184a133ff3568548852793ea5b83bb5))
+* **mbtiles:** resume batch generation instead of re-rendering everything ([450f4c0](https://github.com/CWBudde/WaterColorMap/commit/450f4c0a004a56dd0ca9c0c767a4b0af4138b7f8))
+* **ocean:** add ocean rendering support and configuration ([9f31af1](https://github.com/CWBudde/WaterColorMap/commit/9f31af1ac56aca9dad41722a54d5ade4905aa34c))
+* **pipeline:** stamp written tiles and make skip-existing freshness-aware ([a79d3e1](https://github.com/CWBudde/WaterColorMap/commit/a79d3e1ba9f95d6207041b3069e403efcbe15abc))
+* **renderer:** render z0-5 from Natural Earth ([6d2204e](https://github.com/CWBudde/WaterColorMap/commit/6d2204e551b890522da678de1197ae67fc7cc049))
+* **server:** count cache hits and misses and report them per request ([2583143](https://github.com/CWBudde/WaterColorMap/commit/2583143ca06286c1e008bab0db8e581d1f5f6dca))
+* **server:** stamp tiles served on demand and key stamps by image format ([9cb9b84](https://github.com/CWBudde/WaterColorMap/commit/9cb9b8490efce64759ca5e1108c679a4bd6b5d32))
+* **server:** validate cached tiles with an ETag and revalidate by default ([9065751](https://github.com/CWBudde/WaterColorMap/commit/90657517cdacc492f2dd33898ec3fd2b05c8ceea))
+* **server:** validate MBTiles rows with a content ETag ([a3d2dab](https://github.com/CWBudde/WaterColorMap/commit/a3d2dab963e70db6c8fac16db715729f9475ee3a))
+* **tileformat:** add WebP tile output end to end ([93dff03](https://github.com/CWBudde/WaterColorMap/commit/93dff0310a73fcffffd189652ab261376a4706eb))
+* **tilestamp:** add the per-tile source-data stamp store ([82fafe9](https://github.com/CWBudde/WaterColorMap/commit/82fafe90217749c4215e8003a36b91d5534727ff))
+* **tile:** stream tile enumeration as an iter.Seq ([dbf2864](https://github.com/CWBudde/WaterColorMap/commit/dbf28644c1485daa82cf5c1c1e3302b3f734be96))
+* update changelog and demo to support local Overpass instance and fix favicon error ([60f8595](https://github.com/CWBudde/WaterColorMap/commit/60f8595aba646f0c11d6304dcddf6ef88a734a1c))
+* **worker:** let RunStream hand results to a callback instead of retaining them ([90e7080](https://github.com/CWBudde/WaterColorMap/commit/90e7080fb53f655fe2edd3bdae8a967a02714cba))
+
+
+### Bug Fixes
+
+* address further PR review comments (buffer size, OPTIONS, tilejson center, config order) ([5883982](https://github.com/CWBudde/WaterColorMap/commit/5883982e5264dbb4c50bd7967a8b4c1fb5376611))
+* address PR review comments ([6b919e8](https://github.com/CWBudde/WaterColorMap/commit/6b919e82cf6f5cc914e08af1595bcc0849badd53))
+* address PR review comments ([3adce86](https://github.com/CWBudde/WaterColorMap/commit/3adce86dd8361ebdb4bd7d7fc0a4c1c8852b7c42))
+* address PR review comments ([55578e0](https://github.com/CWBudde/WaterColorMap/commit/55578e076a7b20a289c99b366ab1ca32ee45874a))
+* address PR review comments ([f5aab07](https://github.com/CWBudde/WaterColorMap/commit/f5aab077d1d92dc105ba3a791fb1165e265a0b88))
+* address PR review comments ([8339e52](https://github.com/CWBudde/WaterColorMap/commit/8339e52ec6570e812a540a9eb055f4287dadc8f1))
+* address PR review comments ([e3a521d](https://github.com/CWBudde/WaterColorMap/commit/e3a521de97c9dac17119e3590755cfbded7b4dcc))
+* address PR review comments ([71111b5](https://github.com/CWBudde/WaterColorMap/commit/71111b559f90b44f501d1159e764bbf77b3f0e7a))
+* address PR review comments on tuning validation and TileJSON origin ([2e95cce](https://github.com/CWBudde/WaterColorMap/commit/2e95cceb4d2f9982c89887a3fa47422ea80611c6))
+* **ci:** install mapnik for the lint job ([#17](https://github.com/CWBudde/WaterColorMap/issues/17)) ([3a8a31a](https://github.com/CWBudde/WaterColorMap/commit/3a8a31a3cc77d74906433ab4545c9f5740f63468))
+* **ci:** unbreak all three failing jobs and clear the lint backlog ([#10](https://github.com/CWBudde/WaterColorMap/issues/10)) ([8c60a7b](https://github.com/CWBudde/WaterColorMap/commit/8c60a7b6083b4f8bdfcd36feba349944dccdaca8))
+* **convert:** recognise the nested folder layout when scanning tiles ([2df46f6](https://github.com/CWBudde/WaterColorMap/commit/2df46f614ffcfff7fef3208c00d00dc4bae59213))
+* **datasource:** address PR review findings on the response cache ([fb90d3b](https://github.com/CWBudde/WaterColorMap/commit/fb90d3ba453aa799f1c57ee02c47ac25ddc042e0))
+* **datasource:** fail over to the next Overpass server ([b4c579a](https://github.com/CWBudde/WaterColorMap/commit/b4c579a26a98eb8b3aadf442a2a9c022bbc59a2c))
+* **datasource:** send a real User-Agent to Overpass ([7793ac0](https://github.com/CWBudde/WaterColorMap/commit/7793ac0c9b78fe67138d2c3069893a5bf4952586))
+* **datasource:** sort Overpass features by OSM ID ([bc4bb3c](https://github.com/CWBudde/WaterColorMap/commit/bc4bb3c2149f647b311a7239258ea68af6cd20c7))
+* **demo:** request the format the server actually serves ([3c670db](https://github.com/CWBudde/WaterColorMap/commit/3c670db5d0b64cb34dbfb3d2b1f3aa00d6b9d5e5))
+* **docker:** unbreak the image build and harden the build inputs ([82ead90](https://github.com/CWBudde/WaterColorMap/commit/82ead904319b114283f4620bfaa1e1294cf903f4))
+* **docs:** update data scaling strategy to reflect new capabilities and close open items ([c751a3b](https://github.com/CWBudde/WaterColorMap/commit/c751a3bb1c45e73eddf237d7413e24366b94afa5))
+* export the local endpoint from smoke-local instead of assuming config.yaml ([3ba2bbc](https://github.com/CWBudde/WaterColorMap/commit/3ba2bbc6be310c1cc2632c649692ae9d2596d771))
+* formatting ([77761e7](https://github.com/CWBudde/WaterColorMap/commit/77761e7b1714c99688c25f448dba0bb586438d69))
+* **generate:** keep resume and cancellation honest for banded runs ([8c24e3c](https://github.com/CWBudde/WaterColorMap/commit/8c24e3c863e1a066a00a94b50fa01e35efdef96c))
+* **generate:** make zoom 0 reachable in batch generation ([f8a28c6](https://github.com/CWBudde/WaterColorMap/commit/f8a28c68356dfc4d0dc148342de0981cef20d6e7))
+* **mask:** bound both edge-mask passes by the source mask ([43d71ff](https://github.com/CWBudde/WaterColorMap/commit/43d71ffa667defbb600a6b0fd4034f3a4348badd))
+* **mbtiles:** do not let an undeclared format bypass the resume guard ([045f85a](https://github.com/CWBudde/WaterColorMap/commit/045f85a3895ddfdd6f5a3881a6b9e612eb026cc3))
+* **mbtiles:** store png tiles uncompressed for interop ([#18](https://github.com/CWBudde/WaterColorMap/issues/18)) ([e01da0b](https://github.com/CWBudde/WaterColorMap/commit/e01da0bba856c2e590b03a330df69c04fbf0d43e))
+* **renderer:** give each renderer its own geojson temp dir ([8900e39](https://github.com/CWBudde/WaterColorMap/commit/8900e394cb4a4816941d21528136be4b07acdda7))
+* **renderer:** keep temp dir path when cleanup fails ([aabcedd](https://github.com/CWBudde/WaterColorMap/commit/aabcedd40c03790ccca45794fe3c7ceac000e9c3))
+* **server:** 404 the wrong extension on the MBTiles backend too ([d2fb7fd](https://github.com/CWBudde/WaterColorMap/commit/d2fb7fdb77267b7fde29b507d9cdeb4151a31841))
+* **server:** check tile freshness on the cache hit ([9fa1adb](https://github.com/CWBudde/WaterColorMap/commit/9fa1adbd0fe779ade2ccfd4e174a2f8ca93ce311))
+* **server:** keep an uppercase tile extension parseable ([217fde6](https://github.com/CWBudde/WaterColorMap/commit/217fde6bdb41fdbc1c76f16925a931d0f6261e86))
+* **test:** budget the padded metatile, not a bare 256px tile ([1c2448f](https://github.com/CWBudde/WaterColorMap/commit/1c2448ffcc5caca661a4c3798aad6475d17c1af0))
+* **test:** move the per-layer budget behind !race and re-measure on new main ([bcdef1e](https://github.com/CWBudde/WaterColorMap/commit/bcdef1e7f391466be1fd08fc0109314f1d4a63bd))
+* **tileformat:** let an explicit --webp-effort=0 reach the encoder ([180d023](https://github.com/CWBudde/WaterColorMap/commit/180d023793999efbde414a4403ccc44e2625bda5))
+* **tile:** reject and clip out-of-world bbox bounds ([26852d1](https://github.com/CWBudde/WaterColorMap/commit/26852d16730b636cd76de84f08f0e6a138718d00))
+* update .gitignore to include AI agent files ([075768f](https://github.com/CWBudde/WaterColorMap/commit/075768f59d83b1125ef5adeb1ebb40627af4f37f))
+* **watercolor:** clear pooled buffers when mask is smaller than tile ([0f023ab](https://github.com/CWBudde/WaterColorMap/commit/0f023ab4f747d8e6f6b210c1085c38c311af2904))
+* **watercolor:** reject a nil layer image explicitly ([483f82f](https://github.com/CWBudde/WaterColorMap/commit/483f82f60b764f9008edc6ef28470fcbc9c8a723))
+* **worker:** return one Result per task when a run is cancelled ([6f82f5a](https://github.com/CWBudde/WaterColorMap/commit/6f82f5ab1a60ada9011d3b7c4e9f96ff559cd73c))
+
+
+### Performance Improvements
+
+* **blurkernel:** memoize the blur plan ([dfb5838](https://github.com/CWBudde/WaterColorMap/commit/dfb5838d0466dc57b32402854d5d64ab086d7052))
+* **blur:** vectorise the box column pass ([8e65c79](https://github.com/CWBudde/WaterColorMap/commit/8e65c792223d1a149975e8b359d83a97426c7031))
+* **composite:** read layers and crops straight from Pix ([b8fddba](https://github.com/CWBudde/WaterColorMap/commit/b8fddbafcf7d16a29e6e33111e8b8667942db8a0))
+* **mask:** add destination-writing variants of the mask kernels ([d7685cd](https://github.com/CWBudde/WaterColorMap/commit/d7685cd0f8f7040b626b29847b3be6fd072609dc))
+* **mask:** index Pix directly in the distance transform ([ea28cb2](https://github.com/CWBudde/WaterColorMap/commit/ea28cb2b6f2c5b5967c43cbfd41605425cf19d42))
+* **mask:** index Pix directly in the mask kernels ([53de55d](https://github.com/CWBudde/WaterColorMap/commit/53de55d2a7d2bf13bcfe993760e14a6c677ae8c1))
+* **mask:** index Pix directly in the soft edge pass ([cb17e9e](https://github.com/CWBudde/WaterColorMap/commit/cb17e9e94e14fc11e3f50557d0e4da5811a08f67))
+* **mask:** rewrite the blur, 6-11x faster, and fix its width ([13c8f01](https://github.com/CWBudde/WaterColorMap/commit/13c8f01d9e9d2a3d2b9edb2703937ca269b6bfcf))
+* **mask:** vectorise the soft-edge pass with an AVX2 kernel ([830949d](https://github.com/CWBudde/WaterColorMap/commit/830949d010cbef62642b891d001777e13981214d))
+* **pipeline:** build the land debug composite only for debug runs ([5157a16](https://github.com/CWBudde/WaterColorMap/commit/5157a1607d29b82fded60e14bc9a8144ea42d125))
+* **pipeline:** paint independent layers concurrently ([4ed4069](https://github.com/CWBudde/WaterColorMap/commit/4ed4069bf174c10e7e3fb1bf564e87c1375687f9))
+* **pipeline:** stop allocating masks that buildMasks throws away ([f3e373a](https://github.com/CWBudde/WaterColorMap/commit/f3e373aae891ac08dd4012b27492d36761164a3c))
+* **server:** cache tile metadata in front of the tile directory ([1dd1c04](https://github.com/CWBudde/WaterColorMap/commit/1dd1c0416d2f478ad34b0bd42fc2d6773494e638))
+* **texture:** index Pix directly when tiling and masking ([f6abe97](https://github.com/CWBudde/WaterColorMap/commit/f6abe97116f8bacfde305c94a7fd66a2aeac284e))
+* **texture:** normalise decoded textures to NRGBA at load time ([47224ab](https://github.com/CWBudde/WaterColorMap/commit/47224abee9b6bb03495be45343cd473d59f9848c))
+* **texture:** tile and mask by row copy instead of per-texel sampling ([1a7d151](https://github.com/CWBudde/WaterColorMap/commit/1a7d15177b74acb3e266c1cf4687a3647cfdea24))
+* **watercolor:** pool paint and distance buffers ([894890f](https://github.com/CWBudde/WaterColorMap/commit/894890f7d11bed05f02a26afbcf1b75ef9d47932))
+* **watercolor:** run the mask pipeline over pooled scratch buffers ([07582d8](https://github.com/CWBudde/WaterColorMap/commit/07582d815a5b802fa1f9e28a6d6936cef94c2144))
+
 ## [0.3.0](https://github.com/CWBudde/WaterColorMap/compare/v0.2.0...v0.3.0) (2026-08-13)
 
 ### Features
