@@ -26,7 +26,9 @@ func LoadEmbeddedDefaultTextures() (map[geojson.LayerType]image.Image, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode embedded texture %s: %w", filename, err)
 		}
-		textures[layer] = img
+		// Normalise at load time so the sampling loops never meet a *image.RGBA or
+		// *image.Paletted; see ToNRGBA.
+		textures[layer] = ToNRGBA(img)
 	}
 	return textures, nil
 }
