@@ -204,7 +204,7 @@ All three budgets were measured on `main` at `636971a`, i7-1255U (12 threads),
 go1.26.5, linux/amd64, load average below 1.0:
 
 ```
-$ just bench-budget          # ten consecutive runs, package alone
+$ go test -count=10 -v -run TestTilePaintBudget ./internal/watercolor/
 per tile: 22 allocs, 3834560 B, 34.824ms (fastest of 10)
 per tile: 22 allocs, 3834560 B, 36.154ms (fastest of 10)
 per tile: 22 allocs, 3834560 B, 35.956ms (fastest of 10)
