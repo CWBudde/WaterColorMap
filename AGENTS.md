@@ -80,6 +80,11 @@ outstanding.
   the buffer-reuse work: the pooled-context idiom, the `*Into` conventions, and the
   four invariants that keep recycled buffers from leaking stale pixels. Read before
   adding a mask kernel or touching `maskScratch` / `ProcessorContext`.
+- [docs/performance/simd-optimization.md](docs/performance/simd-optimization.md) —
+  the AVX2 work: which profile entries were vectorised and which were rejected and
+  why, the dispatch/fallback pattern every kernel must follow, why both new kernels
+  hand their tail to Go, and the argument that makes them bit-identical. Read before
+  adding assembly or touching `internal/mask/asm` or `internal/mask/blurkernel/asm`.
 - [docs/performance/pixel-access-optimization.md](docs/performance/pixel-access-optimization.md) —
   the row-slice loop convention every pixel kernel now follows, and the two clipping
   behaviours (`writeRect`, `grayRow`) that replaced what `SetGray` and `GrayAt` used to
