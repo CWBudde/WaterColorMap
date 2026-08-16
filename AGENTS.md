@@ -85,6 +85,11 @@ outstanding.
   behaviours (`writeRect`, `grayRow`) that replaced what `SetGray` and `GrayAt` used to
   do implicitly. Read before writing a loop over `Pix`, and note that the `pixelaccess_test.go`
   reference implementations are frozen copies of the old loops on purpose.
+- [docs/performance/parallel-layers.md](docs/performance/parallel-layers.md) — which
+  layers are independent, why the paint concurrency defaults to 1, and what makes the
+  parallel path deterministic. Read before adding shared state to a paint job, before
+  replacing a `sync.Pool` in `internal/watercolor` with a cached instance, and before
+  raising `--paint-workers` anywhere.
 - [docs/performance/texture-optimization.md](docs/performance/texture-optimization.md) —
   the texture tiling rewrite: why tiling is a row `copy` rather than a per-texel sample,
   why textures are normalised to `*image.NRGBA` at load time, and **why no texture atlas

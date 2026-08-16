@@ -18,6 +18,9 @@ This document outlines the complete implementation plan for creating Stamen Wate
 >   [docs/performance/allocation-optimization.md](docs/performance/allocation-optimization.md)
 > - Phase 5.11.4 (pixel access: row-slice loops, clipping rules, measurements) →
 >   [docs/performance/pixel-access-optimization.md](docs/performance/pixel-access-optimization.md)
+> - Phase 5.11.5 (parallel layer painting: dependency graph, the worker budget,
+>   measurements) →
+>   [docs/performance/parallel-layers.md](docs/performance/parallel-layers.md)
 > - Phase 5.11.6 (texture tiling: row copies, load-time NRGBA, why no atlas) →
 >   [docs/performance/texture-optimization.md](docs/performance/texture-optimization.md)
 > - Phase 7.1/7.2/7.3/7.7 (build, tile-server hardening, code quality) →
@@ -400,8 +403,13 @@ correctly for tag-only edits still needs the node-location store.
 
 The "~86ms / 29MB / 1.3M allocations" that stood here came from the same stale profile
 as the findings below and had already been invalidated twice, by 5.11.2 and 5.11.3.
-Time per tile is not quoted because the development machine's run-to-run spread is
-wider than any change measured against it; use `benchstat` over interleaved runs.
+Time per tile went unquoted for a while because the development machine's run-to-run
+spread was wider than any change measured against it. 5.11.5 caught the machine idle
+and could quote it: `BenchmarkPaintAllLayers` at one worker is **78.9 ms ± 4%** for ten
+layers on a 384² metatile — the size production actually paints — and a whole synthetic
+tile through `Generate` is ~137 ms serial, ~84 ms with the paint stage parallel. Always
+check the load average before believing a wall-clock number here, and use `benchstat`
+over interleaved runs.
 
 **Key Findings** (historical, from the stale profile):
 
@@ -491,18 +499,37 @@ Measurements, the loop conventions, the clipping rules and why `benchstat` could
 used on this machine →
 [docs/performance/pixel-access-optimization.md](docs/performance/pixel-access-optimization.md)
 
-#### 5.11.5 Parallel Layer Processing 🟢 MEDIUM PRIORITY
+#### 5.11.5 Parallel Layer Processing ✅ COMPLETE
 
-**Target**: Utilize multi-core CPUs (Expected gain: 30-50% on multi-core systems)
+**Result**: painting a metatile's ten layers is 2.7x faster with nine paint workers than
+with one (78.9 ms → 29.5 ms, −62.6%, p=0.000 over 8 interleaved runs), and a whole
+synthetic tile goes from ~137 ms to ~84 ms (−39%). Output is bit-identical at every worker
+count; the goldens did not move.
 
-- [ ] Identify independent layers that can be processed in parallel
-- [ ] Implement goroutine-based parallel layer painting
-- [ ] Add synchronization for shared resources (noise texture, textures)
-- [ ] Benchmark single-core vs multi-core performance
-- [ ] Test correctness with parallel processing enabled
-- [ ] Document parallelization strategy and trade-offs
+**The default is 1**, deliberately, and that is the finding rather than the caveat. Layer
+parallelism and tile parallelism draw on the same cores, and both callers already saturate
+the machine at the tile level (`generate --workers` defaults to one worker per CPU, the
+server admits `MaxConcurrentGenerations` renders at once). `AutoPaintWorkers` therefore
+divides `GOMAXPROCS` by the tiles in flight, which comes out as 1 for a normal batch run
+and a normal server, and hands the whole budget to a single-tile `generate` or a server
+pinned to one generation. `--paint-workers` / `generate.paint_workers` /
+`serve.paint_workers` override it. So this bought **latency for one tile, not throughput
+for many**.
 
-**Context**: Water, land, parks, civic layers can be painted independently. Roads/highways depend on land mask but could still be parallelized after land completes.
+Three things a future reader can easily undo. The parallelism is only safe because 5.11.3
+put `maskScratch` and `ProcessorContext` behind a `sync.Pool` — replacing either with a
+single cached instance turns a correct pipeline into a data race. `SortedStages` breaks
+`ZOrder` ties by name because stages now arrive in scheduling order and three of them
+claim ZOrder 14. And the paint error is the earliest failing job _in list order_, not the
+first to arrive, so a broken layer reports itself identically at any concurrency.
+
+The old checklist expected roads and highways to have to wait for land. They do not: they
+are painted from their own alpha masks and only enter the land computation through the
+non-land union, which `buildMasks` finishes first. Parks is the one real dependency.
+
+Strategy, the synchronisation design, the memory trade-off and what was deliberately not
+done (intra-layer band splitting, overlapping the Mapnik render) →
+[docs/performance/parallel-layers.md](docs/performance/parallel-layers.md)
 
 #### 5.11.6 Texture Processing Optimization ✅ COMPLETE
 
