@@ -128,6 +128,37 @@ func filledNRGBA(bounds image.Rectangle, fill byte) *image.NRGBA {
 	return img
 }
 
+// randomRGBA builds a premultiplied texture - the concrete type every PNG in assets/
+// decodes to - with alpha values that make the un-premultiplication non-trivial.
+func randomRGBA(bounds image.Rectangle, seed uint64) *image.RGBA {
+	img := image.NewRGBA(bounds)
+	rng := rand.New(rand.NewPCG(seed, 0x7e47))
+	for i := 0; i < len(img.Pix); i += 4 {
+		a := uint8(rng.UintN(256))
+		img.Pix[i] = uint8(rng.UintN(uint(a) + 1))
+		img.Pix[i+1] = uint8(rng.UintN(uint(a) + 1))
+		img.Pix[i+2] = uint8(rng.UintN(uint(a) + 1))
+		img.Pix[i+3] = a
+	}
+
+	return img
+}
+
+// randomPaletted builds a paletted texture - white.png, the paper base, is one.
+func randomPaletted(bounds image.Rectangle, seed uint64) *image.Paletted {
+	pal := make(color.Palette, 0, 64)
+	for i := 0; i < 64; i++ {
+		pal = append(pal, color.NRGBA{R: uint8(4 * i), G: uint8(255 - 4*i), B: uint8(2 * i), A: uint8(128 + 2*i)})
+	}
+	img := image.NewPaletted(bounds, pal)
+	rng := rand.New(rand.NewPCG(seed, 0x7e47))
+	for i := range img.Pix {
+		img.Pix[i] = uint8(rng.UintN(64))
+	}
+
+	return img
+}
+
 // opaqueImage hides a texture's concrete type so the sampler falls through to getNRGBA.
 type opaqueImage struct{ img *image.NRGBA }
 
@@ -144,6 +175,12 @@ func TestTileTextureScaledIntoMatchesReference(t *testing.T) {
 		"NRGBA":   randomTexture(image.Rect(0, 0, 13, 7), 1),
 		"offset":  randomTexture(image.Rect(5, 9, 5+11, 9+6), 2),
 		"generic": opaqueImage{randomTexture(image.Rect(0, 0, 13, 7), 3)},
+		// Production textures are 1024px on a 384px metatile, so the texture is wider
+		// and taller than the destination and neither the row replication nor the row
+		// reuse ever repeats. The small textures above are the opposite case.
+		"larger than tile": randomTexture(image.Rect(0, 0, tileSize+9, tileSize+5), 9),
+		"RGBA":             randomRGBA(image.Rect(0, 0, 13, 7), 10),
+		"paletted":         randomPaletted(image.Rect(0, 0, 13, 7), 11),
 	}
 
 	// Negative offsets happen at the metatile's left and top pad.
@@ -172,8 +209,11 @@ func TestTileTextureScaledIntoMatchesReference(t *testing.T) {
 
 func TestApplyMaskToTextureIntoMatchesReference(t *testing.T) {
 	texs := map[string]image.Image{
-		"NRGBA":   randomTexture(image.Rect(0, 0, 9, 5), 4),
-		"generic": opaqueImage{randomTexture(image.Rect(0, 0, 9, 5), 5)},
+		"NRGBA":            randomTexture(image.Rect(0, 0, 9, 5), 4),
+		"generic":          opaqueImage{randomTexture(image.Rect(0, 0, 9, 5), 5)},
+		"larger than mask": randomTexture(image.Rect(0, 0, 40, 37), 12),
+		"RGBA":             randomRGBA(image.Rect(0, 0, 9, 5), 13),
+		"paletted":         randomPaletted(image.Rect(0, 0, 9, 5), 14),
 	}
 
 	maskBounds := []image.Rectangle{
@@ -235,5 +275,64 @@ func TestTextureLoopsDoNotAllocate(t *testing.T) {
 		ApplyMaskToTextureInto(tex, mask, dst)
 	}); n != 0 {
 		t.Errorf("ApplyMaskToTextureInto: got %v allocations per run, want 0", n)
+	}
+
+	// The magnified path resolves a per-column mapping; it comes out of a pool, so the
+	// hi-DPI path allocates nothing per call either.
+	if n := testing.AllocsPerRun(20, func() {
+		TileTextureScaledInto(tex, tileSize, 3, 5, 2, dst)
+	}); n != 0 {
+		t.Errorf("TileTextureScaledInto(scale=2): got %v allocations per run, want 0", n)
+	}
+}
+
+// TestToNRGBAIsBitIdentical pins the invariant the load-time normalisation rests on:
+// tiling a converted texture must produce exactly the bytes tiling the original did,
+// because that conversion is what keeps the rendered tiles unchanged.
+func TestToNRGBAIsBitIdentical(t *testing.T) {
+	const tileSize = 48
+
+	originals := map[string]image.Image{
+		"RGBA":     randomRGBA(image.Rect(0, 0, 13, 7), 20),
+		"paletted": randomPaletted(image.Rect(0, 0, 13, 7), 21),
+		"generic":  opaqueImage{randomTexture(image.Rect(0, 0, 13, 7), 22)},
+		"offset":   randomRGBA(image.Rect(5, 9, 5+11, 9+6), 23),
+	}
+
+	for name, orig := range originals {
+		converted := ToNRGBA(orig)
+		if converted.Bounds() != orig.Bounds() {
+			t.Errorf("%s: ToNRGBA changed the bounds: %v vs %v", name, converted.Bounds(), orig.Bounds())
+		}
+
+		for _, scale := range []float64{1, 2} {
+			got := image.NewNRGBA(image.Rect(0, 0, tileSize, tileSize))
+			want := image.NewNRGBA(image.Rect(0, 0, tileSize, tileSize))
+
+			TileTextureScaledInto(converted, tileSize, -5, 7, scale, got)
+			TileTextureScaledInto(orig, tileSize, -5, 7, scale, want)
+
+			if !bytes.Equal(got.Pix, want.Pix) {
+				t.Errorf("%s: tiling the converted texture differs at scale %v", name, scale)
+			}
+		}
+
+		mask := randomGray(image.Rect(0, 0, tileSize, tileSize), 24)
+		gotMasked := image.NewNRGBA(mask.Bounds())
+		wantMasked := image.NewNRGBA(mask.Bounds())
+		ApplyMaskToTextureInto(converted, mask, gotMasked)
+		ApplyMaskToTextureInto(orig, mask, wantMasked)
+
+		if !bytes.Equal(gotMasked.Pix, wantMasked.Pix) {
+			t.Errorf("%s: masking the converted texture differs", name)
+		}
+	}
+
+	if ToNRGBA(nil) != nil {
+		t.Error("ToNRGBA(nil): want nil")
+	}
+	src := randomTexture(image.Rect(0, 0, 4, 4), 25)
+	if ToNRGBA(src) != src {
+		t.Error("ToNRGBA: an *image.NRGBA should be returned as-is, not copied")
 	}
 }
