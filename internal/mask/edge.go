@@ -48,39 +48,57 @@ func ApplySoftEdgeMaskInto(base *image.NRGBA, mask *image.Gray, strength float64
 		// A mask narrower than the base read zero outside itself, which is what GrayAt
 		// returns and what a nil row falls back to.
 		maskRow := grayRow(mask, r.Min.X, y, w)
-
-		for i := 0; i < w; i++ {
-			maskVal := 0
-			if maskRow != nil {
-				maskVal = int(maskRow[i])
-			} else {
-				maskVal = int(mask.GrayAt(r.Min.X+i, y).Y)
-			}
-
-			// Quadratic falloff: creates softer, more natural transition
-			// Effect amount: 0 at white (center), strength at black (edges)
-			// maskVal^2 / 255^2 gives normalized squared value
-			maskSquared := maskVal * maskVal                     // max: 65025
-			invMaskSquared := 65025 - maskSquared                // 255*255 = 65025
-			effectInt := int(float64(invMaskSquared) * strength) // 0..65025
-
-			// Convert RGB to HSL (integer-only)
-			p := 4 * i
-			h, s, l := rgbToHSL(srcRow[p], srcRow[p+1], srcRow[p+2])
-
-			// Darken by reducing lightness
-			// l_new = l * (1 - effect) = l * (65025 - effectInt) / 65025
-			darkening := 65025 - effectInt
-			lNew := uint8((int(l) * darkening) / 65025)
-
-			// Convert back to RGB (integer-only)
-			// The HSL round trip is not lossless, so it runs even where the darkening
-			// factor is 1 - skipping it would change pixels.
-			red, green, blue := hslToRGB(h, s, lNew)
-
-			alpha := srcRow[p+3] // preserve original alpha
-			dstRow[p], dstRow[p+1], dstRow[p+2], dstRow[p+3] = red, green, blue, alpha
+		if maskRow != nil {
+			softEdgeRow(dstRow, srcRow, maskRow, strength, w)
+			continue
 		}
+
+		for i := range w {
+			maskVal := int(mask.GrayAt(r.Min.X+i, y).Y)
+			softEdgePixel(dstRow[4*i:], srcRow[4*i:], softEdgeDarkening(maskVal, strength))
+		}
+	}
+}
+
+// softEdgeDarkening turns one mask level into the fixed-point lightness factor the
+// pass multiplies by, in [0, 65025] where 65025 means "leave the lightness alone".
+//
+// The falloff is quadratic in the mask level, which is what makes the transition
+// look soft rather than linear. The float64 multiply is deliberate: the assembly
+// kernel reproduces it in double-precision lanes so that both paths truncate the
+// same product.
+func softEdgeDarkening(maskVal int, strength float64) int {
+	maskSquared := maskVal * maskVal                     // max: 65025
+	invMaskSquared := 65025 - maskSquared                // 255*255 = 65025
+	effectInt := int(float64(invMaskSquared) * strength) // 0..65025
+
+	return 65025 - effectInt
+}
+
+// softEdgePixel darkens one NRGBA pixel by the given fixed-point factor, preserving
+// alpha. src and dst may be the same slice.
+func softEdgePixel(dst, src []byte, darkening int) {
+	// Convert RGB to HSL (integer-only)
+	h, s, l := rgbToHSL(src[0], src[1], src[2])
+
+	// Darken by reducing lightness: l_new = l * (1 - effect)
+	lNew := uint8((int(l) * darkening) / 65025)
+
+	// Convert back to RGB (integer-only).
+	// The HSL round trip is not lossless, so it runs even where the darkening
+	// factor is 1 - skipping it would change pixels.
+	red, green, blue := hslToRGB(h, s, lNew)
+
+	alpha := src[3] // preserve original alpha
+	dst[0], dst[1], dst[2], dst[3] = red, green, blue, alpha
+}
+
+// softEdgeRowGo is the portable implementation of one row of the soft-edge pass, and
+// the reference the assembly kernel is tested against. dst and src hold w NRGBA
+// pixels; maskRow holds w mask levels.
+func softEdgeRowGo(dst, src, maskRow []byte, strength float64, w int) {
+	for i := range w {
+		softEdgePixel(dst[4*i:], src[4*i:], softEdgeDarkening(int(maskRow[i]), strength))
 	}
 }
 

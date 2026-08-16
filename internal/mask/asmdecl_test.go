@@ -1,6 +1,4 @@
-// Package asm holds no code of its own; this test walks the per-architecture
-// assembly packages beneath it.
-package asm
+package mask
 
 import (
 	"go/ast"
@@ -16,8 +14,12 @@ import (
 var textSymbolRe = regexp.MustCompile(`(?m)^TEXT\s+·([A-Za-z0-9_]+)\(SB\)`)
 
 // TestNoescapeDeclsHaveTextSymbols checks that every body-less Go function
-// declaration under asm/ has a matching TEXT symbol in a .s file in the same
-// directory.
+// declaration anywhere under internal/mask has a matching TEXT symbol in a .s file
+// in the same directory.
+//
+// It walks the whole package tree rather than one assembly directory so that a
+// second kernel package - blurkernel's and the mask package's own live side by
+// side - cannot be added without inheriting the check.
 //
 // Build tags are deliberately ignored: the point is to catch a declaration
 // whose implementation was renamed or deleted, which on the host architecture
