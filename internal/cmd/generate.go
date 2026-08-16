@@ -329,12 +329,12 @@ func singleGeneratorOptions(
 		// One tile at a time, even with --hidpi: the base tile and its @2x
 		// sibling are rendered one after the other.
 		PaintWorkers: resolvePaintWorkers("generate.paint_workers", 1),
-		Watercolor:      wcOverrides,
-		Ocean:           ocean,
-		NaturalEarth:    naturalEarth,
-		StampStore:      stampStoreOption(stamps),
-		Freshness:       freshness,
-		RendererRev:     rendererRev(),
+		Watercolor:   wcOverrides,
+		Ocean:        ocean,
+		NaturalEarth: naturalEarth,
+		StampStore:   stampStoreOption(stamps),
+		Freshness:    freshness,
+		RendererRev:  rendererRev(),
 	}, stamps, nil
 }
 
