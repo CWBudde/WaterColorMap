@@ -2,13 +2,18 @@ package pipeline
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/cwbudde/watercolormap/internal/safe"
 	"github.com/cwbudde/watercolormap/internal/tile"
 )
 
@@ -51,6 +56,75 @@ func TestPaintWorkersProduceIdenticalTiles(t *testing.T) {
 		require.Equal(t, serial, parallel,
 			"tile painted with %d workers differs from the serial tile", workers)
 	}
+}
+
+// TestRunPaintJobsRecoversPanics pins panic containment. A paint job runs under a bare
+// `go`, where nothing above it recovers, so a panic that escapes would take a whole tile
+// server down instead of failing one tile. The successful end-to-end tests never reach
+// this branch.
+func TestRunPaintJobsRecoversPanics(t *testing.T) {
+	var ran atomic.Int32
+
+	jobs := []paintJob{
+		{name: "ok-before", run: func() error { ran.Add(1); return nil }},
+		{name: "boom", run: func() error { panic("paint exploded") }},
+		{name: "ok-after", run: func() error { ran.Add(1); return nil }},
+	}
+
+	err := runPaintJobs(discardLogger(), jobs, len(jobs))
+
+	var panicErr *safe.PanicError
+	require.ErrorAs(t, err, &panicErr, "a recovered panic must surface as a *safe.PanicError")
+	require.Equal(t, "paint exploded", panicErr.Value)
+	require.EqualValues(t, 2, ran.Load(), "the jobs beside the panicking one must still run")
+}
+
+// TestRunPaintJobsReportsEarliestJobInListOrder pins the error selection: the reported
+// failure is the earliest failing job in list order, not the first one to finish, so a
+// broken layer names itself identically at any concurrency. The jobs here fail in
+// reverse completion order on purpose — the last job is done before the first one fails.
+func TestRunPaintJobsReportsEarliestJobInListOrder(t *testing.T) {
+	lateFailed := make(chan struct{})
+	firstErr := errors.New("first job in list order")
+	lastErr := errors.New("last job in list order")
+
+	jobs := []paintJob{
+		{name: "first", run: func() error {
+			<-lateFailed // only fail once the job after it already has
+			return firstErr
+		}},
+		{name: "middle", run: func() error { return nil }},
+		{name: "last", run: func() error {
+			close(lateFailed)
+			return lastErr
+		}},
+	}
+
+	err := runPaintJobs(discardLogger(), jobs, len(jobs))
+	require.ErrorIs(t, err, firstErr, "the earliest failing job in list order wins")
+	require.NotErrorIs(t, err, lastErr)
+}
+
+// TestRunPaintJobsSerialPathReportsFirstFailure covers the workers<=1 shortcut, which
+// stops at the first failure instead of running the whole list.
+func TestRunPaintJobsSerialPathReportsFirstFailure(t *testing.T) {
+	var ran atomic.Int32
+	boom := errors.New("boom")
+
+	jobs := []paintJob{
+		{name: "ok", run: func() error { ran.Add(1); return nil }},
+		{name: "bad", run: func() error { ran.Add(1); return boom }},
+		{name: "unreached", run: func() error { ran.Add(1); return nil }},
+	}
+
+	err := runPaintJobs(discardLogger(), jobs, 1)
+	require.ErrorIs(t, err, boom)
+	require.EqualValues(t, 2, ran.Load(), "the serial path must stop at the first failure")
+}
+
+// discardLogger keeps the recovered-panic stack traces out of the test output.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // TestAutoPaintWorkers pins the budget split. The exact numbers depend on GOMAXPROCS,
