@@ -62,8 +62,14 @@ true-Gaussian reference.
 | 7.48  | ~2150µs  | 8679µs | 1081µs | 2.0×   |
 
 Sigma 7.48 gains least: it is the only production sigma left on the box path,
-which has no assembly implementation. Vectorising `BoxCols` is the obvious
-follow-up if blur ever matters again.
+which had no assembly implementation. Vectorising `BoxCols` was the obvious
+follow-up if blur ever mattered again.
+
+**Done in 5.11.7.** `BoxCols` now dispatches its two inner loops to AVX2 kernels,
+which took the 7.48 blur from 987µs to 707µs (−28%) with bit-identical output.
+`BoxRows` stays scalar and always will: its window slides along x, so the running
+sum is a serial dependency across columns. See
+[simd-optimization.md](simd-optimization.md).
 
 Allocations per blur dropped from 12 to 1 (a pooled `BlurContext` holds the
 scratch buffers). At the pipeline level (`benchstat`, 8 runs each, vs `main`):

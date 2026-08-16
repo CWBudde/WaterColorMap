@@ -23,6 +23,9 @@ This document outlines the complete implementation plan for creating Stamen Wate
 >   [docs/performance/parallel-layers.md](docs/performance/parallel-layers.md)
 > - Phase 5.11.6 (texture tiling: row copies, load-time NRGBA, why no atlas) →
 >   [docs/performance/texture-optimization.md](docs/performance/texture-optimization.md)
+> - Phase 5.11.7 (SIMD: the soft-edge and box-column AVX2 kernels, rejections,
+>   accuracy argument) →
+>   [docs/performance/simd-optimization.md](docs/performance/simd-optimization.md)
 > - Phase 7.1/7.2/7.3/7.7 (build, tile-server hardening, code quality) →
 >   [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
 
@@ -562,17 +565,35 @@ any other conversion moves pixels.
 Profile, measurements, the row-copy convention and the full atlas argument →
 [docs/performance/texture-optimization.md](docs/performance/texture-optimization.md)
 
-#### 5.11.7 SIMD Optimization 🟢 FUTURE ENHANCEMENT
+#### 5.11.7 SIMD Optimization ✅ COMPLETE
 
-**Target**: Accelerate pixel-level operations (Expected gain: 10-20% for specific operations)
+**Result**: `BenchmarkFullPipeline` is 17% faster (18.90ms → 15.68ms, benchstat over
+12 interleaved runs, p=0.000). The soft-edge darkening pass — the largest single cost
+left after 5.11.4, at 22% of pipeline CPU — is 33% cheaper end to end and 5.3x cheaper
+at the kernel. The box-blur column pass that 5.11.2 left as a follow-up is 3x cheaper,
+taking the 7.48 land-shade blur down 28%. Both kernels are **bit-identical** to their
+scalar references; the pipeline goldens did not move.
 
-- [ ] Research Go SIMD libraries (avo, gonum)
-- [ ] Identify SIMD-friendly operations (pixel blending, noise application)
-- [ ] Implement SIMD versions of hot functions
-- [ ] Benchmark SIMD vs scalar performance
-- [ ] Ensure cross-platform compatibility
+Three things a future reader can easily undo, all explained in the archive. Neither
+new kernel may cover a ragged tail by **repeating the final block** the way
+`ConvColsRowAVX2` does — the soft-edge pass writes its output and may alias its
+input, and the box kernels carry an accumulator — so both hand their tail to the
+portable loop. The **float64 multiply** in the mask falloff is deliberate and runs in
+double-precision lanes; narrowing it breaks bit-identity on a handful of mask levels.
+And the kernel omits the scalar's `h %= 1536` because the hue provably never reaches
+it — a hue of 1536 would select a seventh sector and render black.
 
-**Context**: Bulk pixel operations (noise blending, edge darkening) could benefit from SIMD. Lower priority due to implementation complexity.
+The "expected gain: 10-20% for specific operations" was right by accident. The
+checklist that stood here named pixel blending and noise application as the targets;
+the profile named neither. It was written before 5.11.3/5.11.4/5.11.6 and the HSL
+round trip it did not mention had become the whole of the opportunity. `avo` was
+evaluated and rejected: both kernels are a single loop body, so a code-generation
+dependency buys nothing a reviewer of the generated `.s` would not still have to read.
+The distance transform, now 30% of the profile and the largest remaining entry, is
+Felzenszwalb's lower-envelope algorithm and is not vectorisable without replacing it.
+
+Profile, rejected candidates, the accuracy argument and the cross-platform story →
+[docs/performance/simd-optimization.md](docs/performance/simd-optimization.md)
 
 #### 5.11.8 Performance Monitoring & Regression Testing
 
