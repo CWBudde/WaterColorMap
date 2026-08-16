@@ -136,12 +136,21 @@ plus 8 efficiency cores), the nine jobs are very unequal — land is far the lar
 and the parks tail is serial. Six is the sweet spot on this machine; nine buys another
 6%.
 
-The memory column is the real trade-off: each concurrent worker holds its own
-`maskScratch` and `ProcessorContext` out of the pools, which on a 384² metatile is a
-few hundred KB each, plus the layer results that were always live. Roughly +50% peak
-bytes for 2.7x. On a server that number multiplies with the number of tiles in flight,
-which is the second reason the default divides the budget rather than stacking on top
-of it.
+The memory column is the real trade-off, and it has to be read for what it is: `B/op`
+is the number of bytes _allocated_ over one paint, summed, not the peak live heap.
+`benchstat` cannot report a peak, and no peak was measured here — so read the +49% as
+"nine workers allocate half as much again", not as "the process needs half as much
+memory again".
+
+The mechanism behind the rise does say something about the peak, though. Each
+concurrent worker checks its own `maskScratch` and `ProcessorContext` out of the pools
+instead of handing one set around, so the pools end up holding one set per worker
+rather than one in total, and each set is a few hundred KB on a 384² metatile. That is
+a few MB of extra live memory at nine workers, on top of the layer results that were
+always live. On a server it multiplies with the number of tiles in flight, which is
+the second reason the default divides the budget rather than stacking on top of it.
+Anyone sizing a server for a specific tile mix should measure RSS on that mix rather
+than extrapolate from this column.
 
 ## Also done here
 
