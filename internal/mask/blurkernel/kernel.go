@@ -194,6 +194,12 @@ func BoxRows(dst, src []byte, w, h, dstStride, srcStride, radius int, s *Scratch
 
 // BoxCols applies a single box-blur pass down each column, sweeping row by row
 // so that every memory access stays sequential.
+//
+// The two inner loops are the ones the row pass cannot have: a column window
+// slides over whole rows, so the add, the subtract and the divide are all
+// independent per column. Both are handed to kernels that use assembly when one
+// is available. The row pass stays scalar because its window slides along x,
+// which makes its running sum a serial dependency.
 func BoxCols(dst, src []byte, w, h, dstStride, srcStride, radius int, s *Scratch) {
 	n := 2*radius + 1
 	recip := BoxReciprocal(n)
@@ -204,24 +210,42 @@ func BoxCols(dst, src []byte, w, h, dstStride, srcStride, radius int, s *Scratch
 	// contributes radius+1 times.
 	clear(acc)
 	for k := -radius; k <= radius; k++ {
-		row := src[clampRow(k, h)*srcStride:][:w]
-		for x := range acc {
-			acc[x] += uint32(row[x])
-		}
+		boxAccum(acc, src[clampRow(k, h)*srcStride:][:w], w)
 	}
 
 	for y := range h {
+		var add, sub []byte
 		if y > 0 {
-			add := src[clampRow(y+radius, h)*srcStride:][:w]
-			sub := src[clampRow(y-radius-1, h)*srcStride:][:w]
-			for x := range acc {
-				acc[x] += uint32(add[x])
-				acc[x] -= uint32(sub[x])
-			}
+			add = src[clampRow(y+radius, h)*srcStride:][:w]
+			sub = src[clampRow(y-radius-1, h)*srcStride:][:w]
 		}
-		out := dst[y*dstStride:][:w]
-		for x := range acc {
-			out[x] = boxDiv(acc[x], half, recip)
+
+		boxColsRow(dst[y*dstStride:][:w], acc, add, sub, half, recip, w)
+	}
+}
+
+// boxAccumGo is the portable implementation of "add one source row into the
+// column accumulator", and the reference its assembly kernel is tested against.
+func boxAccumGo(acc []uint32, row []byte, w int) {
+	for x := range w {
+		acc[x] += uint32(row[x])
+	}
+}
+
+// boxColsRowGo is the portable implementation of one output row of the box column
+// pass, and the reference its assembly kernel is tested against.
+//
+// A nil add slides nothing, which is what the first output row needs: its window
+// was primed already. add and sub are either both set or both nil.
+func boxColsRowGo(out []byte, acc []uint32, add, sub []byte, half, recip uint32, w int) {
+	if add != nil {
+		for x := range w {
+			acc[x] += uint32(add[x])
+			acc[x] -= uint32(sub[x])
 		}
+	}
+
+	for x := range w {
+		out[x] = boxDiv(acc[x], half, recip)
 	}
 }
