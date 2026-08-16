@@ -89,6 +89,14 @@ type OnDemandTilesConfig struct {
 	// the server sheds load with 503 rather than queueing goroutines without
 	// bound. Default: max(32, MaxConcurrentGenerations*8).
 	MaxPendingGenerations int
+	// PaintWorkers is how many layers of one tile may be painted at the same
+	// time. Zero divides the CPU budget over MaxConcurrentGenerations, which is
+	// the serial pipeline as soon as the server renders more than a few tiles at
+	// once — the two kinds of parallelism draw on the same cores, and the tile
+	// level is where throughput comes from. Raising it trades throughput under
+	// load for single-tile latency, which is worth it only on a server
+	// deliberately configured to render one or two tiles at a time.
+	PaintWorkers int
 }
 
 // Field order is dictated by govet's fieldalignment: pointer-bearing fields
@@ -272,6 +280,9 @@ func NewOnDemandTiles(ds pipeline.DataSource, cfg OnDemandTilesConfig, logger *s
 	}
 	if cfg.TileMetaCacheTTL <= 0 {
 		cfg.TileMetaCacheTTL = DefaultTileMetaCacheTTL
+	}
+	if cfg.PaintWorkers <= 0 {
+		cfg.PaintWorkers = pipeline.AutoPaintWorkers(cfg.MaxConcurrentGenerations)
 	}
 	if cfg.MaxPendingGenerations <= 0 {
 		// Deep enough that a normal viewport load is never shed, shallow
@@ -1096,9 +1107,10 @@ func (t *OnDemandTiles) newPipelineGenerator(tileSize int) (tileGenerator, error
 			Ocean:          t.cfg.Ocean,
 			NaturalEarth:   t.cfg.NaturalEarth,
 			// One store, every tile size: see OnDemandTilesConfig.StampStore.
-			StampStore:  t.cfg.StampStore,
-			Freshness:   t.cfg.Freshness,
-			RendererRev: t.cfg.RendererRev,
+			StampStore:   t.cfg.StampStore,
+			Freshness:    t.cfg.Freshness,
+			RendererRev:  t.cfg.RendererRev,
+			PaintWorkers: t.cfg.PaintWorkers,
 		},
 	)
 	if err != nil {

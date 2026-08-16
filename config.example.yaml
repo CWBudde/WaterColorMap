@@ -127,6 +127,12 @@ overpass:
 #   zoom_min: -1
 #   zoom_max: -1
 #   workers: 0 # 0 = one worker per CPU
+#   # Layers painted at the same time within one tile. 0 divides the CPU budget
+#   # by `workers`, so the default batch run (one worker per CPU) paints
+#   # serially and spends its cores on whole tiles. Raise it only when `workers`
+#   # is small; painting a metatile with 9 workers is ~2.6x faster than with 1,
+#   # at ~1.5x the peak memory (docs/performance/parallel-layers.md).
+#   paint_workers: 0
 #   progress: true
 #   allow_failures: false # keep going when individual tiles fail
 #
@@ -263,6 +269,11 @@ overpass:
 #   # behaviour of refetching everything.
 #   cache_control: "no-cache"
 #   max_pending_generations: 0 # 0 = auto; excess requests get 503
+#   # Layers painted at the same time within one tile. 0 divides the CPU budget
+#   # by max_concurrent_generations, which on a busy server is 1: throughput
+#   # comes from rendering whole tiles in parallel, not layers. Raise it to trade
+#   # throughput for single-tile latency (docs/performance/parallel-layers.md).
+#   paint_workers: 0
 #   # In-memory cache of tile-file metadata, in front of the tile directory. A
 #   # hit there answers a request without an os.Stat and, with a stale_* policy
 #   # set, without a stamp lookup either. A negative entry count disables it.
