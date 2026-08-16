@@ -1,0 +1,123 @@
+name: bench
+
+# Benchmark tracking, not benchmark gating.
+#
+# Nothing in this workflow can fail a build for being slow. Wall clock on a
+# shared GitHub runner is noisier than the effects this project measures --
+# docs/performance/pixel-access-optimization.md records a fictitious +1900%
+# "regression" produced by an uninterleaved comparison on a machine far quieter
+# than a hosted runner -- so a percentage threshold here would produce flaky
+# red builds and be switched off within a month.
+#
+# The hard gate lives in the unit-test job instead: internal/watercolor's
+# TestTilePaintBudget pins allocations and allocated bytes per tile, both of
+# which are exactly reproducible. See
+# docs/performance/performance-monitoring.md.
+
+on:
+  workflow_call:
+    inputs:
+      rounds:
+        description: Interleaved measurement rounds per side.
+        required: false
+        type: string
+        default: "6"
+      benchtime:
+        description: -benchtime value for each round.
+        required: false
+        type: string
+        default: 200ms
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    # The comparison runs two revisions six times each. It is bounded well
+    # under this on a hosted runner; the timeout is here so a pathological
+    # benchmark cannot burn an hour of minutes unnoticed.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # bench-compare.sh resolves the base revision and adds a worktree for
+          # it, so the full history has to be present.
+          fetch-depth: 0
+
+      - name: Setup Go-Version
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "*/*.sum"
+
+      - name: Setup just
+        uses: extractions/setup-just@v2
+
+      - name: Resolve the revision to compare against
+        id: base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE_SHA"
+          else
+            base="$PUSH_BEFORE"
+          fi
+          # github.event.before is all-zeroes for a branch's first push, and a
+          # force-push can leave it unreachable. Fall back to the first parent.
+          if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          echo "sha=${base}" >>"$GITHUB_OUTPUT"
+          echo "Comparing HEAD against ${base}"
+
+      # No Mapnik install on purpose. `just bench-ci` covers only the packages
+      # that build without cgo, which is where every optimisation of 5.11.2 to
+      # 5.11.7 landed. Pulling in libmapnik-dev would add minutes to a job that
+      # runs on every push to main.
+      - name: Run interleaved benchmarks
+        env:
+          BENCH_ROUNDS: ${{ inputs.rounds }}
+          BENCH_TIME: ${{ inputs.benchtime }}
+          BENCH_OUT: ${{ github.workspace }}/bench-results
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$BENCH_OUT"
+          just bench-compare "$BASE_SHA" 2>&1 | tee "$BENCH_OUT/benchstat.txt"
+
+      - name: Publish the comparison to the job summary
+        if: always()
+        env:
+          BENCH_OUT: ${{ github.workspace }}/bench-results
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Benchmark comparison"
+            echo
+            echo "\`${BASE_SHA}\` (base) vs \`${GITHUB_SHA}\` (head), interleaved."
+            echo
+            echo "Wall-clock differences here are **reported, not enforced**."
+            echo "Treat a \`~\` verdict as no information and read \`allocs/op\`"
+            echo "and \`B/op\` first: those are reproducible, sec/op on a shared"
+            echo "runner is not. See \`docs/performance/performance-monitoring.md\`."
+            echo
+            echo '```'
+            cat "$BENCH_OUT/benchstat.txt" 2>/dev/null || echo "no benchstat output"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw benchmark output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks-${{ github.run_id }}
+          path: ${{ github.workspace }}/bench-results
+          retention-days: 90
+          if-no-files-found: warn
