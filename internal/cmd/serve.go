@@ -62,6 +62,10 @@ func init() {
 	serveCmd.Flags().Int64("data-size-warning-mb", 10, "Warn when tile data exceeds this size in MB")
 
 	serveCmd.Flags().Int("max-pending-generations", 0, "Max requests in the generation path before returning 503 (0 = auto)")
+	serveCmd.Flags().Int("paint-workers", 0,
+		"Layers painted at the same time within one tile "+
+			"(0 = auto: the CPU budget divided by --max-concurrent-generations, "+
+			"so a busy server paints serially and spends its cores on whole tiles)")
 	serveCmd.Flags().Int("tile-meta-cache-entries", server.DefaultTileMetaCacheEntries,
 		"Tiles whose on-disk metadata is cached in memory, skipping a stat (and a stamp lookup) per cache hit; negative disables it")
 	serveCmd.Flags().Duration("tile-meta-cache-ttl", server.DefaultTileMetaCacheTTL,
@@ -108,6 +112,7 @@ func init() {
 	mustBind("serve.data_size_warning_mb", "data-size-warning-mb")
 
 	mustBind("serve.max_pending_generations", "max-pending-generations")
+	mustBind("serve.paint_workers", "paint-workers")
 	mustBind("serve.tile_meta_cache_entries", "tile-meta-cache-entries")
 	mustBind("serve.tile_meta_cache_ttl", "tile-meta-cache-ttl")
 	mustBind("serve.tile_rate_limit", "tile-rate-limit")
@@ -149,6 +154,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	fetchWorkers := viper.GetInt("serve.fetch_workers")
 	dataSizeWarningMB := viper.GetInt64("serve.data_size_warning_mb")
 	maxPending := viper.GetInt("serve.max_pending_generations")
+	paintWorkers := viper.GetInt("serve.paint_workers")
 	metaCacheEntries := viper.GetInt("serve.tile_meta_cache_entries")
 	metaCacheTTL := viper.GetDuration("serve.tile_meta_cache_ttl")
 	shutdownTimeout := viper.GetDuration("serve.shutdown_timeout")
@@ -274,6 +280,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			FetchWorkers:             fetchWorkers,
 			DataSizeWarningMB:        dataSizeWarningMB,
 			MaxPendingGenerations:    maxPending,
+			PaintWorkers:             paintWorkers,
 			TileMetaCacheEntries:     metaCacheEntries,
 			TileMetaCacheTTL:         metaCacheTTL,
 		}, logger)

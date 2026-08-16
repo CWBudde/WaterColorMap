@@ -55,6 +55,9 @@ func init() {
 	generateCmd.Flags().Int("zoom-min", unsetZoom, "Minimum zoom level for batch generation")
 	generateCmd.Flags().Int("zoom-max", unsetZoom, "Maximum zoom level for batch generation")
 	generateCmd.Flags().IntP("workers", "w", 0, "Number of parallel workers (default: number of CPUs)")
+	generateCmd.Flags().Int("paint-workers", 0,
+		"Layers painted at the same time within one tile "+
+			"(0 = auto: the CPU budget divided by --workers, so a saturated batch run paints serially)")
 	generateCmd.Flags().Bool("progress", true, "Show progress bar during batch generation")
 	generateCmd.Flags().Bool("allow-failures", false, "Continue generation even if some tiles fail (useful for CI/CD with API rate limits)")
 
@@ -118,6 +121,7 @@ func init() {
 		{"generate.zoom_min", "zoom-min"},
 		{"generate.zoom_max", "zoom-max"},
 		{"generate.workers", "workers"},
+		{"generate.paint_workers", "paint-workers"},
 		{"generate.progress", "progress"},
 		{"generate.allow_failures", "allow-failures"},
 		{"generate.checkpoint", "checkpoint"},
@@ -322,6 +326,9 @@ func singleGeneratorOptions(
 		ImageFormat:     opts.imageFormat,
 		WebPEffort:      opts.webpEffort,
 		FolderStructure: opts.folderStructure,
+		// One tile at a time, even with --hidpi: the base tile and its @2x
+		// sibling are rendered one after the other.
+		PaintWorkers: resolvePaintWorkers("generate.paint_workers", 1),
 		Watercolor:      wcOverrides,
 		Ocean:           ocean,
 		NaturalEarth:    naturalEarth,
@@ -775,6 +782,9 @@ func newBatchGenerator(opts *batchOptions, ds pipeline.DataSource, tileSize int,
 			StampStore:      opts.stampStore,
 			Freshness:       opts.freshness,
 			RendererRev:     rendererRev(),
+			// opts.workers is already resolved to NumCPU by the time a generator
+			// is built, so the auto split sees the real tile-level parallelism.
+			PaintWorkers: resolvePaintWorkers("generate.paint_workers", opts.workers),
 		},
 	)
 }
