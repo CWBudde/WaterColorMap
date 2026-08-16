@@ -27,3 +27,27 @@ package amd64
 //
 //go:noescape
 func ConvColsRowAVX2(dst, src *byte, aboveOff, belowOff *int32, taps *uint32, radius, w int)
+
+// BoxAccumAVX2 adds n source bytes into a column accumulator:
+//
+//	acc[x] += uint32(row[x])
+//
+// n must be a positive multiple of 8. Requires AVX2.
+//
+//go:noescape
+func BoxAccumAVX2(acc *uint32, row *byte, n int)
+
+// BoxColsRowAVX2 slides a box window down by one row and emits the output row:
+//
+//	acc[x] += uint32(add[x]) - uint32(sub[x])   // skipped when add is nil
+//	out[x]  = uint8((uint64(acc[x]+half) * uint64(recip)) >> 32)
+//
+// A nil add leaves the accumulator alone, which is what the first output row of a
+// pass needs; add and sub are either both set or both nil. recip is the fixed-point
+// reciprocal of the window width from BoxReciprocal, so the shift reproduces the
+// division exactly.
+//
+// n must be a positive multiple of 8. Requires AVX2.
+//
+//go:noescape
+func BoxColsRowAVX2(out *byte, acc *uint32, add, sub *byte, half, recip uint32, n int)

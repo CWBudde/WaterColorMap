@@ -24,3 +24,49 @@ func convColsRow(out, src []byte, aboveOff, belowOff []int32, taps []uint32, acc
 	}
 	convColsRowGo(out, src, aboveOff, belowOff, taps, acc, w)
 }
+
+// The box column kernels cannot borrow the convolution kernel's trick of covering a
+// ragged tail by repeating the final block: they carry the accumulator forward, so a
+// repeated block would add a row into it twice. The tail goes to the portable loop.
+
+func boxAccum(acc []uint32, row []byte, w int) {
+	if useAVX2 && w >= minAVX2Width {
+		n := w &^ (minAVX2Width - 1)
+
+		blurasm.BoxAccumAVX2(&acc[0], &row[0], n)
+
+		if n < w {
+			boxAccumGo(acc[n:], row[n:], w-n)
+		}
+
+		return
+	}
+
+	boxAccumGo(acc, row, w)
+}
+
+func boxColsRow(out []byte, acc []uint32, add, sub []byte, half, recip uint32, w int) {
+	if useAVX2 && w >= minAVX2Width {
+		n := w &^ (minAVX2Width - 1)
+
+		var addPtr, subPtr *byte
+		if add != nil {
+			addPtr, subPtr = &add[0], &sub[0]
+		}
+
+		blurasm.BoxColsRowAVX2(&out[0], &acc[0], addPtr, subPtr, half, recip, n)
+
+		if n < w {
+			var addTail, subTail []byte
+			if add != nil {
+				addTail, subTail = add[n:], sub[n:]
+			}
+
+			boxColsRowGo(out[n:], acc[n:], addTail, subTail, half, recip, w-n)
+		}
+
+		return
+	}
+
+	boxColsRowGo(out, acc, add, sub, half, recip, w)
+}

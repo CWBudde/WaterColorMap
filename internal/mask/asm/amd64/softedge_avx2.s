@@ -68,6 +68,11 @@ TEXT ·SoftEdgeRowAVX2(SB), NOSPLIT|NOFRAME, $0-40
 
 	VBROADCASTSD strength+24(FP), Y15
 
+	// The loop below is a do-while, so an empty row would still write a block.
+	// The caller never asks for one, but the check is two instructions.
+	TESTQ R9, R9
+	JLE   done
+
 	XORQ BX, BX
 
 block:
@@ -101,9 +106,10 @@ block:
 	//
 	// The divisor varies per lane, so the quotient goes through single
 	// precision. Both operands are exact in float32 and the quotient is at most
-	// 256, which puts the rounding error three orders of magnitude below the
+	// 256, which puts the rounding error two orders of magnitude below the
 	// 1/255 gap that separates a non-integral quotient from an integer, so the
-	// truncation matches Go's integer division. Same argument for the hue
+	// truncation matches Go's integer division - and by that margin it holds
+	// under any rounding mode, not just the default. Same argument for the hue
 	// divide below.
 	VPMULLD    seC255<>(SB), Y6, Y8
 	VPSRLD     $1, Y11, Y14
@@ -119,6 +125,12 @@ block:
 
 	// Hue. The scalar switch prefers r over g over b on ties, which is what the
 	// masked-out eqG below reproduces.
+	//
+	// The scalar path ends on h %= 1536, which this kernel omits because h can
+	// never reach 1536. Only the r sector wraps, and there the quotient is at
+	// most -1, never 0: g != b makes |g-b|*256 at least 256, which already
+	// exceeds delta. A quotient of 0 would land on sector 6, where every
+	// selector bit has been shifted out and the pixel would come out black.
 	VPCMPEQD  Y1, Y4, Y12 // maxv == r
 	VPCMPEQD  Y2, Y4, Y13
 	VPANDN    Y13, Y12, Y13 // maxv == g, r not already chosen
@@ -167,8 +179,7 @@ block:
 	VCVTTPD2DQY  Y11, X11
 	VCVTTPD2DQY  Y13, X13
 	VINSERTI128  $1, X13, Y11, Y11
-	VMOVDQU      seC65025<>(SB), Y14
-	VPSUBD       Y11, Y14, Y10 // darkening
+	VPSUBD       Y11, Y14, Y10 // darkening; Y14 still holds 65025
 
 	// lNew = (l * darkening) / 65025, as (n/255)/255. The first divide needs
 	// the widening multiply; the second fits the (x + 1 + x>>8)>>8 identity,
@@ -278,5 +289,6 @@ block:
 	CMPQ BX, R9
 	JLT  block
 
+done:
 	VZEROUPPER
 	RET
