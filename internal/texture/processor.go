@@ -114,12 +114,27 @@ func TileTextureScaledInto(src image.Image, tileSize int, offsetX, offsetY int, 
 		return
 	}
 
+	// The type switch happens once per call rather than once per texel: a texture is
+	// decoded from PNG, so its concrete type varies between textures but never between
+	// two pixels of one.
+	sample := samplerFor(src)
+
+	// The tile is laid down at coordinates 0..tileSize whatever the destination's own
+	// origin is, and SetNRGBA used to drop whatever fell outside it. Clip once instead.
+	r := image.Rect(0, 0, tileSize, tileSize).Intersect(dst.Bounds())
+	if r.Empty() {
+		return
+	}
+	rowLen := 4 * r.Dx()
+
 	if scale == 1 || scale <= 0 {
-		for y := 0; y < tileSize; y++ {
+		for y := r.Min.Y; y < r.Max.Y; y++ {
 			sy := bounds.Min.Y + mod(offsetY+y, height)
-			for x := 0; x < tileSize; x++ {
-				sx := bounds.Min.X + mod(offsetX+x, width)
-				dst.SetNRGBA(x, y, getNRGBA(src, sx, sy))
+			dstRow := dst.Pix[dst.PixOffset(r.Min.X, y):][:rowLen]
+			for i := 0; i < rowLen; i += 4 {
+				sx := bounds.Min.X + mod(offsetX+r.Min.X+i/4, width)
+				c := sample.at(sx, sy)
+				dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = c.R, c.G, c.B, c.A
 			}
 		}
 		return
@@ -139,7 +154,7 @@ func TileTextureScaledInto(src image.Image, tileSize int, offsetX, offsetY int, 
 		fx[x] = u - fu
 	}
 
-	for y := 0; y < tileSize; y++ {
+	for y := r.Min.Y; y < r.Max.Y; y++ {
 		v := float64(offsetY+y) / scale
 		fv := math.Floor(v)
 		j := mod(int(fv), height)
@@ -147,14 +162,50 @@ func TileTextureScaledInto(src image.Image, tileSize int, offsetX, offsetY int, 
 		y1 := bounds.Min.Y + mod(j+1, height)
 		fy := v - fv
 
-		for x := 0; x < tileSize; x++ {
-			c00 := getNRGBA(src, x0[x], y0)
-			c10 := getNRGBA(src, x1[x], y0)
-			c01 := getNRGBA(src, x0[x], y1)
-			c11 := getNRGBA(src, x1[x], y1)
-			dst.SetNRGBA(x, y, bilerpNRGBA(c00, c10, c01, c11, fx[x], fy))
+		dstRow := dst.Pix[dst.PixOffset(r.Min.X, y):][:rowLen]
+		for i := 0; i < rowLen; i += 4 {
+			x := r.Min.X + i/4
+			c00 := sample.at(x0[x], y0)
+			c10 := sample.at(x1[x], y0)
+			c01 := sample.at(x0[x], y1)
+			c11 := sample.at(x1[x], y1)
+			c := bilerpNRGBA(c00, c10, c01, c11, fx[x], fy)
+			dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = c.R, c.G, c.B, c.A
 		}
 	}
+}
+
+// sampler resolves a texture's concrete type once so that reading a texel does not run
+// the type switch inside getNRGBA every time - the magnified path samples four texels
+// per destination pixel.
+//
+// It is a value, not a closure, so hoisting the switch costs no allocation. The
+// fallback is getNRGBA itself: textures come from image.Decode, so their concrete type
+// depends on how the PNG was written.
+type sampler struct {
+	nrgba *image.NRGBA
+	img   image.Image
+}
+
+func samplerFor(img image.Image) sampler {
+	if src, ok := img.(*image.NRGBA); ok {
+		return sampler{nrgba: src}
+	}
+
+	return sampler{img: img}
+}
+
+func (s sampler) at(x, y int) color.NRGBA {
+	if s.nrgba == nil {
+		return getNRGBA(s.img, x, y)
+	}
+
+	if !(image.Point{X: x, Y: y}).In(s.nrgba.Rect) {
+		return color.NRGBA{}
+	}
+	off := s.nrgba.PixOffset(x, y)
+
+	return color.NRGBA{R: s.nrgba.Pix[off], G: s.nrgba.Pix[off+1], B: s.nrgba.Pix[off+2], A: s.nrgba.Pix[off+3]}
 }
 
 // mod is a modulus that returns a non-negative result for negative operands,
@@ -211,23 +262,29 @@ func ApplyMaskToTextureInto(tex image.Image, mask *image.Gray, dst *image.NRGBA)
 		return
 	}
 
-	mod := func(a, b int) int {
-		r := a % b
-		if r < 0 {
-			r += b
-		}
-		return r
+	sample := samplerFor(tex)
+
+	// The loop is bounded by the mask, but dst is often the pooled tile-size buffer and
+	// may be smaller; SetNRGBA used to drop those writes.
+	r := mask.Bounds().Intersect(dst.Bounds())
+	if r.Empty() {
+		return
 	}
+	rowLen := 4 * r.Dx()
 
-	for y := mask.Bounds().Min.Y; y < mask.Bounds().Max.Y; y++ {
+	for y := r.Min.Y; y < r.Max.Y; y++ {
 		sy := texBounds.Min.Y + mod(y, texH)
-		for x := mask.Bounds().Min.X; x < mask.Bounds().Max.X; x++ {
-			sx := texBounds.Min.X + mod(x, texW)
 
-			c := getNRGBA(tex, sx, sy)
+		maskOff := mask.PixOffset(r.Min.X, y)
+		maskRow := mask.Pix[maskOff : maskOff+r.Dx()]
+		dstRow := dst.Pix[dst.PixOffset(r.Min.X, y):][:rowLen]
+
+		for i := 0; i < rowLen; i += 4 {
+			sx := texBounds.Min.X + mod(r.Min.X+i/4, texW)
+
+			c := sample.at(sx, sy)
 			// Mask controls the alpha channel; RGB comes from the texture
-			c.A = mask.GrayAt(x, y).Y
-			dst.SetNRGBA(x, y, c)
+			dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = c.R, c.G, c.B, maskRow[i/4]
 		}
 	}
 }
