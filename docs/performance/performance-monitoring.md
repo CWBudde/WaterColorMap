@@ -219,6 +219,12 @@ run of 33.9 to 38.0 ms. The allocation and byte columns have no in-suite
 variation at all once `GOMAXPROCS(1)` removes the pool-shard migration; the
 wall-clock column still spreads, which is why nothing tight is asserted on it.
 
+The 2-core GitHub runner reports **the same 22 allocations and 3 834 560 bytes**
+on the same commit, at 87 ms of wall clock. Two different machines, two
+different CPU models, identical to the byte -- which is what licenses a 2% byte
+budget rather than a defensive one, and it also puts the 3 s ceiling at 34x the
+slowest environment the project actually runs in.
+
 **`PLAN.md` said 38 allocations and 2.2 MiB, and both figures are superseded.**
 They came from `BenchmarkFullPipeline` before 5.11.4 and they included
 GC-cleared pool refills. That benchmark still measures an unpadded 256x256
