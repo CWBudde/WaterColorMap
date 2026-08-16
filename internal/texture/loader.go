@@ -31,7 +31,9 @@ func LoadDefaultTextures(dir string) (map[geojson.LayerType]image.Image, error) 
 			return nil, fmt.Errorf("failed to decode texture %s: %w", path, err)
 		}
 
-		textures[layer] = img
+		// Normalise at load time so the sampling loops never meet a *image.RGBA or
+		// *image.Paletted; see ToNRGBA.
+		textures[layer] = ToNRGBA(img)
 	}
 
 	return textures, nil
