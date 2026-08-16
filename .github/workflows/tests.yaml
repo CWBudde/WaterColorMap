@@ -23,3 +23,14 @@ jobs:
 
   test-can-build:
     uses: ./.github/workflows/test-can-build.yaml
+
+  # Benchmarks are tracked, never gated -- see the header of bench.yaml. They
+  # cost several minutes, so they run where the output is worth keeping: every
+  # push to main (the trend line) and only those pull requests explicitly
+  # labelled `benchmark`. The per-tile allocation budget that *is* enforced
+  # runs inside test-unit on every PR and costs a fifth of a second.
+  bench:
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark')
+    uses: ./.github/workflows/bench.yaml
