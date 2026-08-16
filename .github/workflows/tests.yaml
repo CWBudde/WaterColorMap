@@ -7,6 +7,13 @@ on:
   pull_request:
     branches:
       - main
+    # `labeled` is here so that adding the `benchmark` label to an open PR
+    # actually starts the bench job below. The default trigger set is
+    # opened/synchronize/reopened, under which a label added after the last
+    # push would do nothing and the documented way to request a comparison
+    # would silently not work. The cost is that the other four jobs re-run on
+    # any label change, which on this repository is a rare event.
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
@@ -28,7 +35,7 @@ jobs:
   # cost several minutes, so they run where the output is worth keeping: every
   # push to main (the trend line) and only those pull requests explicitly
   # labelled `benchmark`. The per-tile allocation budget that *is* enforced
-  # runs inside test-unit on every PR and costs a fifth of a second.
+  # runs inside test-unit on every PR and costs about half a second.
   bench:
     if: >-
       github.event_name == 'push' ||
