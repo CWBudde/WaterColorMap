@@ -16,6 +16,8 @@ This document outlines the complete implementation plan for creating Stamen Wate
 >   [docs/performance/blur-optimization.md](docs/performance/blur-optimization.md)
 > - Phase 5.11.3 (buffer reuse: measurements, invariants, `*Into` conventions) →
 >   [docs/performance/allocation-optimization.md](docs/performance/allocation-optimization.md)
+> - Phase 5.11.4 (pixel access: row-slice loops, clipping rules, measurements) →
+>   [docs/performance/pixel-access-optimization.md](docs/performance/pixel-access-optimization.md)
 > - Phase 7.1/7.2/7.3/7.7 (build, tile-server hardening, code quality) →
 >   [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
 
@@ -403,15 +405,19 @@ wider than any change measured against it; use `benchstat` over interleaved runs
 
 - Gaussian blur: 39.6% of CPU time
 - Image buffer allocations: 37.8% of memory (64-bit RGBA overhead)
-- Pixel access overhead: 17.7% of memory (color.NRGBA allocations per At() call)
+- Pixel access overhead: 17.7% of memory (color.NRGBA allocations per At() call) —
+  **wrong**, and 5.11.4 says why: the typed accessors allocate nothing, they cost a
+  bounds check and a multiply per pixel. It was a CPU cost, not a memory one
 - Perlin noise: ✅ Already optimized (40ms saved per tile)
 
-**Current profile** (after 5.11.2, `BenchmarkFullPipeline`, top flat entries):
+**Current profile** (after 5.11.3, `BenchmarkFullPipeline`, top flat entries):
 
 - Distance transform: ~25% (`distanceTransform1DWithBuffers`, `distanceTransformRows/Columns`)
 - Per-pixel accessors: ~25% (`NRGBAAt`, `SetNRGBA`, `GrayAt`, `SetGray`, `PixOffset`, `Point.In`) —
-  this is what 5.11.4 is about, and it is now the largest single theme
-- Noise and colour conversion: ~13% (`applyNoise`, `hslToRGB`, `rgbToHSL`)
+  ✅ addressed by 5.11.4
+- Noise and colour conversion: ~13% (`applyNoise`, `hslToRGB`, `rgbToHSL`) — the HSL round
+  trip is now the largest single remaining cost, and it is lossy, so removing it is a
+  look change rather than an optimisation
 - Blur: no longer in the top 14
 
 #### 5.11.2 Blur Optimization ✅ COMPLETE
@@ -458,17 +464,30 @@ rewrite loop bodies without touching a call site.
 Measurements, the four buffer-reuse invariants and the `*Into` conventions →
 [docs/performance/allocation-optimization.md](docs/performance/allocation-optimization.md)
 
-#### 5.11.4 Pixel Access Optimization 🟡 HIGH PRIORITY
+#### 5.11.4 Pixel Access Optimization ✅ COMPLETE
 
-**Target**: Eliminate 349MB of temporary color allocations (Expected gain: 5-10% speedup)
+**Result**: `BenchmarkFullPipeline` uses 28% less CPU; the individual kernels are 19-76%
+cheaper depending on how much of the loop was accessor overhead. Output is bit-identical —
+the pipeline goldens did not move.
 
-- [ ] Identify all hot paths using `image.At()` method
-- [ ] Replace with direct Pix slice access where possible
-- [ ] Implement batch pixel operations to amortize allocations
-- [ ] Profile allocation reduction
-- [ ] Verify correctness with visual regression tests
+The mask, distance, edge, texture and compositing loops now resolve one row slice per
+image per row and index it, instead of calling `GrayAt`/`SetGray`/`NRGBAAt`/`SetNRGBA`
+per pixel. The per-pixel type switches in `getAlpha` and `getNRGBA` were hoisted out of
+their loops, and `alphaOver`/`cropNRGBA` no longer box a `color.Color` per pixel.
 
-**Context**: Every `At()` call allocates a new color.NRGBA struct. Direct slice access via `img.Pix` is allocation-free.
+Two things a future reader can easily undo. `SetGray` **silently clipped**
+out-of-bounds writes and `GrayAt` **read zero** outside an image, and several callers
+depend on both — `writeRect` and `grayRow` preserve them once per call instead of once
+per pixel. And the `rgbToHSL`→`hslToRGB` round trip in the edge pass is lossy, so
+skipping it where the mask is white is a look change, not a free win.
+
+The old checklist here aimed at "349MB of temporary color allocations" and expected
+5-10%. Both came from reading the profile as an allocation problem; the typed accessors
+allocate nothing. The archive explains what the cost actually was.
+
+Measurements, the loop conventions, the clipping rules and why `benchstat` could not be
+used on this machine →
+[docs/performance/pixel-access-optimization.md](docs/performance/pixel-access-optimization.md)
 
 #### 5.11.5 Parallel Layer Processing 🟢 MEDIUM PRIORITY
 
@@ -514,7 +533,11 @@ Measurements, the four buffer-reuse invariants and the `*Into` conventions →
 - [ ] Document performance characteristics per zoom level
 - [ ] Add performance dashboard/reporting
 
-**Combined Expected Speedup**: 50-70% faster (86ms → 40-50ms per tile)
+**Combined Expected Speedup**: the "50-70% faster (86ms → 40-50ms per tile)" that stood
+here was arithmetic over the stale profile's per-item estimates, and every item that has
+actually been done came in somewhere else: the blur was far better than predicted, the
+allocation work moved wall time not at all, and pixel access beat its 5-10% estimate by
+several times over. Quote measurements from the archived documents instead of a forecast.
 
 ### 5.12 Documentation and Deployment
 

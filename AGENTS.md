@@ -80,6 +80,11 @@ outstanding.
   the buffer-reuse work: the pooled-context idiom, the `*Into` conventions, and the
   four invariants that keep recycled buffers from leaking stale pixels. Read before
   adding a mask kernel or touching `maskScratch` / `ProcessorContext`.
+- [docs/performance/pixel-access-optimization.md](docs/performance/pixel-access-optimization.md) —
+  the row-slice loop convention every pixel kernel now follows, and the two clipping
+  behaviours (`writeRect`, `grayRow`) that replaced what `SetGray` and `GrayAt` used to
+  do implicitly. Read before writing a loop over `Pix`, and note that the `pixelaccess_test.go`
+  reference implementations are frozen copies of the old loops on purpose.
 - [docs/watercolor-tuning.md](docs/watercolor-tuning.md) — the `watercolor:` config
   block: every knob, which of the five pipeline stages it belongs to, and the
   current defaults. Supersedes the stale parameter list in `3.6`.
