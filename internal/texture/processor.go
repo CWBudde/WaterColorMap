@@ -4,9 +4,43 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"sync"
 
 	"github.com/cwbudde/watercolormap/internal/geojson"
 )
+
+// ToNRGBA returns img as an *image.NRGBA, converting it if it is not one already.
+//
+// Textures are sampled millions of times per tile and only decoded once, so the
+// concrete type they happen to decode to should not reach the sampling loops: every
+// PNG in assets/ decodes to *image.RGBA, and white.png - the paper base - decodes to
+// *image.Paletted, whose only reader is image.Image.At. Converting at load time turns
+// both into the one type the tiling fast paths can move with copy().
+//
+// The conversion goes through getNRGBA, which is what the sampling loops would have
+// applied to each texel, so the pixels are bit-identical to sampling the original.
+// The bounds (origin included) are preserved because the tiling offsets are taken
+// relative to them.
+func ToNRGBA(img image.Image) *image.NRGBA {
+	if img == nil {
+		return nil
+	}
+	if src, ok := img.(*image.NRGBA); ok {
+		return src
+	}
+
+	b := img.Bounds()
+	dst := image.NewNRGBA(b)
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		row := dst.Pix[dst.PixOffset(b.Min.X, y):][:4*b.Dx()]
+		for i := 0; i < len(row); i += 4 {
+			c := getNRGBA(img, b.Min.X+i/4, y)
+			row[i], row[i+1], row[i+2], row[i+3] = c.R, c.G, c.B, c.A
+		}
+	}
+
+	return dst
+}
 
 // getNRGBA extracts an NRGBA color from an image at the given coordinates.
 // Uses type assertions to avoid interface boxing allocations when possible.
@@ -17,18 +51,7 @@ func getNRGBA(img image.Image, x, y int) color.NRGBA {
 	case *image.RGBA:
 		c := src.RGBAAt(x, y)
 		// Convert premultiplied alpha to non-premultiplied
-		if c.A == 0 {
-			return color.NRGBA{}
-		}
-		if c.A == 255 {
-			return color.NRGBA{R: c.R, G: c.G, B: c.B, A: 255}
-		}
-		return color.NRGBA{
-			R: uint8(uint16(c.R) * 255 / uint16(c.A)),
-			G: uint8(uint16(c.G) * 255 / uint16(c.A)),
-			B: uint8(uint16(c.B) * 255 / uint16(c.A)),
-			A: c.A,
-		}
+		return unpremultiply(c.R, c.G, c.B, c.A)
 	default:
 		// Fallback to interface method (causes allocation)
 		nrgba, ok := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
@@ -128,23 +151,16 @@ func TileTextureScaledInto(src image.Image, tileSize int, offsetX, offsetY int, 
 	rowLen := 4 * r.Dx()
 
 	if scale == 1 || scale <= 0 {
-		for y := r.Min.Y; y < r.Max.Y; y++ {
-			sy := bounds.Min.Y + mod(offsetY+y, height)
-			dstRow := dst.Pix[dst.PixOffset(r.Min.X, y):][:rowLen]
-			for i := 0; i < rowLen; i += 4 {
-				sx := bounds.Min.X + mod(offsetX+r.Min.X+i/4, width)
-				c := sample.at(sx, sy)
-				dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = c.R, c.G, c.B, c.A
-			}
-		}
+		tileUnscaledInto(sample, bounds, width, height, offsetX, offsetY, r, dst)
 		return
 	}
 
 	// The x mapping is the same for every row, so resolve it once. This keeps
-	// the inner loop to four texel fetches and the blend.
-	x0 := make([]int, tileSize)
-	x1 := make([]int, tileSize)
-	fx := make([]float64, tileSize)
+	// the inner loop to four texel fetches and the blend. The scratch is pooled:
+	// three per-call slices are exactly what the *Into convention exists to avoid.
+	sc := acquireScaleScratch(tileSize)
+	defer releaseScaleScratch(sc)
+	x0, x1, fx := sc.x0, sc.x1, sc.fx
 	for x := 0; x < tileSize; x++ {
 		u := float64(offsetX+x) / scale
 		fu := math.Floor(u)
@@ -175,6 +191,117 @@ func TileTextureScaledInto(src image.Image, tileSize int, offsetX, offsetY int, 
 	}
 }
 
+// tileUnscaledInto lays a texture down 1:1 over r.
+//
+// The unscaled tiling is doubly periodic: destination row y reads source row
+// (offsetY+y) mod height, and every row reads the same, rotated, source row. So the
+// work per destination pixel is a memory move, not a sample:
+//
+//   - one destination row is built by copying at most one texture period out of the
+//     source row (two copies when the rotation wraps) and then doubling that period
+//     across the rest of the row;
+//   - a row whose source row was already materialised `height` rows earlier is copied
+//     from that row instead of being built again.
+//
+// For the shipped 1024x1024 textures on a 384px metatile neither shortcut repeats
+// (one period is wider and taller than the whole destination), but the per-pixel
+// sampler call and its modulus still disappear.
+func tileUnscaledInto(
+	sample sampler, bounds image.Rectangle, width, height, offsetX, offsetY int,
+	r image.Rectangle, dst *image.NRGBA,
+) {
+	dx := r.Dx()
+	rowLen := 4 * dx
+
+	// seg is one destination-side period: a full texture width, or the whole row when
+	// the row is narrower than the texture.
+	seg := width
+	if seg > dx {
+		seg = dx
+	}
+
+	sx0 := mod(offsetX+r.Min.X, width)
+
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		dstRow := dst.Pix[dst.PixOffset(r.Min.X, y):][:rowLen]
+
+		// The source row for y and for y-height is the same row, and the x mapping does
+		// not depend on y, so the finished row can be copied wholesale.
+		if y-r.Min.Y >= height {
+			copy(dstRow, dst.Pix[dst.PixOffset(r.Min.X, y-height):][:rowLen])
+			continue
+		}
+
+		sy := bounds.Min.Y + mod(offsetY+y, height)
+		fillTexelRow(sample, bounds.Min.X, sy, width, sx0, seg, dstRow)
+	}
+}
+
+// fillTexelRow writes one destination row of tiled texels: the texture row sy read from
+// source column sx0, wrapping at width, and then that one period replicated across the
+// rest of the row. seg is the period in pixels, capped at the row length.
+//
+// The *image.NRGBA case is why textures are normalised at load time (see ToNRGBA): the
+// destination and the source have the same byte layout, so the row is memory moves
+// rather than one sampler call per pixel.
+func fillTexelRow(sample sampler, minX, sy, width, sx0, seg int, dstRow []uint8) {
+	segLen := 4 * seg
+
+	if src := sample.nrgba; src != nil {
+		srcRow := src.Pix[src.PixOffset(minX, sy):][:4*width]
+		n := width - sx0
+		if n > seg {
+			n = seg
+		}
+		copy(dstRow[:4*n], srcRow[4*sx0:4*(sx0+n)])
+		if n < seg {
+			copy(dstRow[4*n:segLen], srcRow[:4*(seg-n)])
+		}
+	} else {
+		sx := sx0
+		for i := 0; i < segLen; i += 4 {
+			c := sample.at(minX+sx, sy)
+			dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = c.R, c.G, c.B, c.A
+			sx++
+			if sx == width {
+				sx = 0
+			}
+		}
+	}
+
+	for filled := segLen; filled < len(dstRow); {
+		filled += copy(dstRow[filled:], dstRow[:filled])
+	}
+}
+
+// scaleScratch holds the per-column mapping the magnified path resolves once per call.
+type scaleScratch struct {
+	x0 []int
+	x1 []int
+	fx []float64
+}
+
+var scaleScratchPool = sync.Pool{New: func() any { return new(scaleScratch) }}
+
+func acquireScaleScratch(n int) *scaleScratch {
+	sc, ok := scaleScratchPool.Get().(*scaleScratch)
+	if !ok || sc == nil {
+		sc = new(scaleScratch)
+	}
+	if cap(sc.x0) < n {
+		sc.x0 = make([]int, n)
+		sc.x1 = make([]int, n)
+		sc.fx = make([]float64, n)
+	}
+	sc.x0, sc.x1, sc.fx = sc.x0[:n], sc.x1[:n], sc.fx[:n]
+
+	return sc
+}
+
+func releaseScaleScratch(sc *scaleScratch) {
+	scaleScratchPool.Put(sc)
+}
+
 // sampler resolves a texture's concrete type once so that reading a texel does not run
 // the type switch inside getNRGBA every time - the magnified path samples four texels
 // per destination pixel.
@@ -184,28 +311,60 @@ func TileTextureScaledInto(src image.Image, tileSize int, offsetX, offsetY int, 
 // depends on how the PNG was written.
 type sampler struct {
 	nrgba *image.NRGBA
+	rgba  *image.RGBA
 	img   image.Image
 }
 
 func samplerFor(img image.Image) sampler {
-	if src, ok := img.(*image.NRGBA); ok {
+	switch src := img.(type) {
+	case *image.NRGBA:
 		return sampler{nrgba: src}
+	case *image.RGBA:
+		// Every texture that ships in assets/ decodes to this: image/png returns
+		// *image.RGBA for a truecolor PNG without an alpha channel.
+		return sampler{rgba: src}
+	default:
+		return sampler{img: img}
 	}
-
-	return sampler{img: img}
 }
 
 func (s sampler) at(x, y int) color.NRGBA {
-	if s.nrgba == nil {
+	switch {
+	case s.nrgba != nil:
+		if !(image.Point{X: x, Y: y}).In(s.nrgba.Rect) {
+			return color.NRGBA{}
+		}
+		off := s.nrgba.PixOffset(x, y)
+
+		return color.NRGBA{R: s.nrgba.Pix[off], G: s.nrgba.Pix[off+1], B: s.nrgba.Pix[off+2], A: s.nrgba.Pix[off+3]}
+	case s.rgba != nil:
+		if !(image.Point{X: x, Y: y}).In(s.rgba.Rect) {
+			return color.NRGBA{}
+		}
+		off := s.rgba.PixOffset(x, y)
+
+		return unpremultiply(s.rgba.Pix[off], s.rgba.Pix[off+1], s.rgba.Pix[off+2], s.rgba.Pix[off+3])
+	default:
 		return getNRGBA(s.img, x, y)
 	}
+}
 
-	if !(image.Point{X: x, Y: y}).In(s.nrgba.Rect) {
+// unpremultiply converts a premultiplied RGBA texel to straight alpha exactly the way
+// getNRGBA's *image.RGBA case does; the two must agree bit for bit.
+func unpremultiply(rr, gg, bb, aa uint8) color.NRGBA {
+	if aa == 0 {
 		return color.NRGBA{}
 	}
-	off := s.nrgba.PixOffset(x, y)
+	if aa == 255 {
+		return color.NRGBA{R: rr, G: gg, B: bb, A: 255}
+	}
 
-	return color.NRGBA{R: s.nrgba.Pix[off], G: s.nrgba.Pix[off+1], B: s.nrgba.Pix[off+2], A: s.nrgba.Pix[off+3]}
+	return color.NRGBA{
+		R: uint8(uint16(rr) * 255 / uint16(aa)),
+		G: uint8(uint16(gg) * 255 / uint16(aa)),
+		B: uint8(uint16(bb) * 255 / uint16(aa)),
+		A: aa,
+	}
 }
 
 // mod is a modulus that returns a non-negative result for negative operands,
@@ -270,21 +429,36 @@ func ApplyMaskToTextureInto(tex image.Image, mask *image.Gray, dst *image.NRGBA)
 	if r.Empty() {
 		return
 	}
-	rowLen := 4 * r.Dx()
+	dx := r.Dx()
+	rowLen := 4 * dx
+
+	// Same periodicity as the tiling path (see tileUnscaledInto): the texture repeats
+	// every texW pixels across a row, so the RGB of a row is a rotation-free copy that
+	// only has to be materialised once per period. The alpha is not periodic - it comes
+	// from the mask - so it is written in a second, contiguous pass.
+	//
+	// In the pipeline this is called with the already-tiled texture, which is *image.NRGBA
+	// and exactly as wide as the destination, so the whole row is one copy plus one
+	// strided store.
+	seg := texW
+	if seg > dx {
+		seg = dx
+	}
+
+	sx0 := mod(r.Min.X, texW)
 
 	for y := r.Min.Y; y < r.Max.Y; y++ {
 		sy := texBounds.Min.Y + mod(y, texH)
 
 		maskOff := mask.PixOffset(r.Min.X, y)
-		maskRow := mask.Pix[maskOff : maskOff+r.Dx()]
+		maskRow := mask.Pix[maskOff : maskOff+dx]
 		dstRow := dst.Pix[dst.PixOffset(r.Min.X, y):][:rowLen]
 
-		for i := 0; i < rowLen; i += 4 {
-			sx := texBounds.Min.X + mod(r.Min.X+i/4, texW)
+		fillTexelRow(sample, texBounds.Min.X, sy, texW, sx0, seg, dstRow)
 
-			c := sample.at(sx, sy)
-			// Mask controls the alpha channel; RGB comes from the texture
-			dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = c.R, c.G, c.B, maskRow[i/4]
+		// Mask controls the alpha channel; RGB comes from the texture.
+		for i, m := range maskRow {
+			dstRow[4*i+3] = m
 		}
 	}
 }
