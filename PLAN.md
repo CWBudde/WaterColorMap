@@ -605,8 +605,12 @@ reported where it is not. `TestTilePaintBudget`
 tile — painted as the 384² padded metatile production actually works on — at
 **28 allocations** and **3 910 000 bytes**, measured at 22 and 3 834 560,
 identical to the byte across ten runs and across a run under full-suite load,
-plus a 3 s catastrophe ceiling that is ~40x the ~36 ms measured. It costs 0.5 s
-and rides along in the existing `test-unit` job. `.github/workflows/bench.yaml` runs the Mapnik-free benchmark
+plus a 3 s catastrophe ceiling that is ~110x the ~26 ms measured.
+`TestPaintLayerAllocationBudget` does the same for a single layer at **6
+allocations** and **21 000 bytes**, measured at 4 and 20 608 — it moved here from
+`scratch_test.go`, where it had been failing under `-race` four runs out of five;
+see below. Both cost 0.5 s together and ride along in the existing `test-unit`
+job. `.github/workflows/bench.yaml` runs the Mapnik-free benchmark
 set against a base revision **interleaved**, summarises it with `benchstat` into
 the job summary, and gates nothing; it runs on pushes to `main` and on PRs
 labelled `benchmark`, not on every PR.
@@ -620,7 +624,7 @@ quieter machine. The **performance dashboard was deliberately not built** — fo
 a single-maintainer repository it is a site to maintain in order to plot runner
 noise; the job summary plus a 90-day artifact of raw benchmark output answers
 the same question. And the per-zoom documentation had to report a negative:
-the paint stage is **flat** across zoom (33.5–38.3 ms at z6 through z17, one
+the paint stage is **flat** across zoom (27.3–29.6 ms at z6 through z17, one
 spread), because the zoom-scaled sigma stopped mattering when 5.11.2 removed
 blur from the profile and the metatile is 384² at every zoom. What varies is how
 many layers a zoom has features for — roughly 3 at z0–5 against 9 at z14+.
@@ -638,17 +642,22 @@ contact with measurement. What was actually measured, per phase:
 | 5.11.2 | blur 6–11x faster over the sigma range the masks use; `FullPipeline` −33% time, −38% bytes | [blur-optimization.md](docs/performance/blur-optimization.md)                 |
 | 5.11.3 | 2.19 MiB and 38 allocations per tile, from 5.85 MiB and 143; wall time unmoved             | [allocation-optimization.md](docs/performance/allocation-optimization.md)     |
 | 5.11.4 | `FullPipeline` −28% CPU; individual kernels −19% to −76%                                   | [pixel-access-optimization.md](docs/performance/pixel-access-optimization.md) |
-| 5.11.5 | paint stage −62.6% at 9 workers — opt-in, default 1 worker                                 | its own branch                                                                |
-| 5.11.6 | `FullPipeline` −13.9%                                                                      | its own branch                                                                |
-| 5.11.7 | `FullPipeline` −17.1%                                                                      | its own branch                                                                |
+| 5.11.5 | paint stage −62.6% at 9 workers — opt-in, default 1 worker                                 | [parallel-layers.md](docs/performance/parallel-layers.md)                     |
+| 5.11.6 | `FullPipeline` −13.9%                                                                      | [texture-optimization.md](docs/performance/texture-optimization.md)           |
+| 5.11.7 | `FullPipeline` −17.1%                                                                      | [simd-optimization.md](docs/performance/simd-optimization.md)                 |
 
 **These do not compose into a single figure and must not be quoted as one.**
-5.11.5, 5.11.6 and 5.11.7 were each measured on a separate unmerged branch
-against that branch's own baseline; they overlap, they were not measured
-together, and 5.11.5's gain needs an opt-in worker count that defaults to 1. The
-honest summary is per-branch, and 5.11.8's budget test is what will tell you the
-combined figure once they land — re-measure with `just bench-budget` and
-`just bench-compare` then.
+5.11.5, 5.11.6 and 5.11.7 were each measured on a separate branch against that
+branch's own baseline; they overlap, they were not measured together, and
+5.11.5's gain needs an opt-in worker count that defaults to 1.
+
+Now that all three have landed, the budget test answers the combined question
+directly, which is what it was built for. One padded 384² five-layer tile,
+single-goroutine, measured on `636971a` (before the three) and on `99be45d`
+(after): **22 allocations and 3 834 560 B in both cases, ~36 ms falling to
+~26 ms**. So the three merged phases are a −28% wall-clock change and a
+**zero-byte** change. That is the honest combined figure for the paint stage, and
+it is nothing like "50–70%".
 
 The one number worth carrying forward is a scale one, and it is in
 [performance-monitoring.md](docs/performance/performance-monitoring.md) §

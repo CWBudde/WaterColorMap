@@ -116,6 +116,67 @@ func TestTilePaintBudget(t *testing.T) {
 	}
 }
 
+// TestPaintLayerAllocationBudget is the single-layer gate 5.11.3 earned. It lived in
+// scratch_test.go until 5.11.8, measured with testing.AllocsPerRun and no build tag,
+// and it failed under -race four runs out of five (13, 14, 15 and 17 against a budget
+// of 12). Moving it here fixes that by putting it behind this file's `!race` tag, and
+// measuring it with measurePerRun rather than AllocsPerRun turns a soft ceiling into
+// an exact number: 4 allocations and 20 608 B, identical over twelve rounds of twenty
+// runs. The old budget of 12 was three times the real figure because AllocsPerRun let
+// pool-refill noise in.
+//
+// See docs/performance/performance-monitoring.md § "A -race flake, diagnosed and
+// fixed" for why -race is the only workable answer for this one and why switching the
+// collector off -- which is what makes the tile budget reproducible -- does not help
+// here at all.
+func TestPaintLayerAllocationBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocation budget is measured in the full run")
+	}
+
+	const (
+		tileSize = 64
+
+		// +2 over the measured 4, on the same reasoning as tileAllocBudget: a
+		// per-pixel or per-row allocation costs thousands, so two is room for a
+		// helper without room for the failure mode.
+		allocBudget = 6
+
+		// +2% over the measured 20 608 B.
+		bytesBudget = 21_000
+	)
+
+	params := scratchTestParams(tileSize)
+	layerImg := image.NewNRGBA(image.Rect(0, 0, tileSize, tileSize))
+	for y := 8; y < tileSize-8; y++ {
+		for x := 8; x < tileSize-8; x++ {
+			layerImg.SetNRGBA(x, y, color.NRGBA{R: 0, G: 0, B: 255, A: 255})
+		}
+	}
+
+	paint := func() {
+		if _, err := PaintLayer(layerImg, geojson.LayerWater, params); err != nil {
+			panic("PaintLayer: " + err.Error())
+		}
+	}
+
+	allocs, bytes, _ := measurePerRun(20, paint)
+
+	t.Logf("per layer: %.0f allocs, %.0f B", allocs, bytes)
+
+	if allocs > allocBudget {
+		t.Errorf("PaintLayer made %.0f allocations per run, budget is %d\n"+
+			"See docs/performance/performance-monitoring.md before raising this.",
+			allocs, allocBudget)
+	}
+
+	if bytes > bytesBudget {
+		t.Errorf("PaintLayer allocated %.0f B per run, budget is %d\n"+
+			"See docs/performance/performance-monitoring.md before raising this.",
+			bytes, bytesBudget)
+	}
+}
+
 // tileBudgetWorkload builds the five-layer workload of BenchmarkFullPipeline at
 // the size production actually paints, and returns a closure that paints one
 // tile.

@@ -217,42 +217,6 @@ func TestPaintFromFinalMaskReusesEdgeMaskBuffer(t *testing.T) {
 	}
 }
 
-// TestPaintLayerAllocationBudget is a ceiling, not an exact count: sync.Pool drops its
-// contents on every GC, so a run that loses the pooled buffers legitimately allocates
-// more. Lower the budget when the pipeline improves; never raise it silently.
-func TestPaintLayerAllocationBudget(t *testing.T) {
-	if testing.Short() {
-		t.Skip("allocation budget is measured in the full run")
-	}
-
-	const (
-		tileSize = 64
-		budget   = 12
-	)
-
-	params := scratchTestParams(tileSize)
-	layerImg := image.NewNRGBA(image.Rect(0, 0, tileSize, tileSize))
-	for y := 8; y < tileSize-8; y++ {
-		for x := 8; x < tileSize-8; x++ {
-			layerImg.SetNRGBA(x, y, color.NRGBA{R: 0, G: 0, B: 255, A: 255})
-		}
-	}
-
-	if _, err := PaintLayer(layerImg, geojson.LayerWater, params); err != nil {
-		t.Fatalf("warmup paint failed: %v", err)
-	}
-
-	allocs := testing.AllocsPerRun(20, func() {
-		if _, err := PaintLayer(layerImg, geojson.LayerWater, params); err != nil {
-			t.Fatalf("PaintLayer: %v", err)
-		}
-	})
-
-	if allocs > budget {
-		t.Errorf("PaintLayer made %v allocations per run, budget is %d", allocs, budget)
-	}
-}
-
 func TestPaintLayerNilImage(t *testing.T) {
 	if _, err := PaintLayer(nil, geojson.LayerWater, scratchTestParams(16)); err == nil {
 		t.Fatal("expected an error for a nil layer image")

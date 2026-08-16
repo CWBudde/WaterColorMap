@@ -82,11 +82,6 @@ outstanding.
   the buffer-reuse work: the pooled-context idiom, the `*Into` conventions, and the
   four invariants that keep recycled buffers from leaking stale pixels. Read before
   adding a mask kernel or touching `maskScratch` / `ProcessorContext`.
-- [docs/performance/simd-optimization.md](docs/performance/simd-optimization.md) —
-  the AVX2 work: which profile entries were vectorised and which were rejected and
-  why, the dispatch/fallback pattern every kernel must follow, why both new kernels
-  hand their tail to Go, and the argument that makes them bit-identical. Read before
-  adding assembly or touching `internal/mask/asm` or `internal/mask/blurkernel/asm`.
 - [docs/performance/pixel-access-optimization.md](docs/performance/pixel-access-optimization.md) —
   the row-slice loop convention every pixel kernel now follows, and the two clipping
   behaviours (`writeRect`, `grayRow`) that replaced what `SetGray` and `GrayAt` used to
@@ -101,11 +96,19 @@ outstanding.
   the texture tiling rewrite: why tiling is a row `copy` rather than a per-texel sample,
   why textures are normalised to `*image.NRGBA` at load time, and **why no texture atlas
   was built**. Read before touching `internal/texture` or adding a texture loader.
+- [docs/performance/simd-optimization.md](docs/performance/simd-optimization.md) —
+  the AVX2 work: which profile entries were vectorised and which were rejected and
+  why, the dispatch/fallback pattern every kernel must follow, why both new kernels
+  hand their tail to Go, and the argument that makes them bit-identical. Read before
+  adding assembly or touching `internal/mask/asm` or `internal/mask/blurkernel/asm`.
 - [docs/performance/performance-monitoring.md](docs/performance/performance-monitoring.md) —
-  what the project gates on performance (allocations and bytes per tile, in
-  `TestTilePaintBudget`) versus what it only tracks (everything wall-clock), why that
-  line is drawn there, and how to raise a budget deliberately. Also holds the measured
-  cost per zoom level. Read before changing a budget constant or adding a benchmark to CI.
+  what the project gates on performance (allocations and bytes, per tile in
+  `TestTilePaintBudget` and per layer in `TestPaintLayerAllocationBudget`) versus what
+  it only tracks (everything wall-clock), why that line is drawn there, and how to
+  raise a budget deliberately. Also holds the measured cost per zoom level, and the
+  worked example of an allocation measurement that `-race` makes meaningless. Read
+  before changing a budget constant, before measuring allocations in a test, and
+  before adding a benchmark to CI.
 - [docs/watercolor-tuning.md](docs/watercolor-tuning.md) — the `watercolor:` config
   block: every knob, which of the five pipeline stages it belongs to, and the
   current defaults. Supersedes the stale parameter list in `3.6`.
