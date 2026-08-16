@@ -77,6 +77,30 @@ bench *args:
 load-test *args:
     go test -ldflags "{{mapnik_ldflags}}" -run '^$' -bench 'BenchmarkTile|BenchmarkMBTiles' -benchmem -benchtime 2s -cpu 1,4,8 {{args}} ./internal/server/
 
+# Packages whose benchmarks build without cgo and Mapnik. The CI benchmark job
+# runs only these: everything else pulls in internal/renderer, and the Mapnik apt
+# install costs more than the measurement it would enable. `just load-test`
+# covers the server side locally.
+bench_pkgs := "./internal/watercolor ./internal/mask ./internal/texture ./internal/composite ./internal/tile ./internal/tileformat"
+
+# The benchmark set CI tracks (no Mapnik needed). Emits Go benchmark format.
+bench-ci *args:
+    go test -run '^$' -bench . -benchmem -benchtime 300ms -count 6 {{args}} {{bench_pkgs}}
+
+# Compare this working tree's benchmarks against another revision, interleaved,
+# and summarise with benchstat. See docs/performance/performance-monitoring.md.
+bench-compare base="main" *args:
+    BENCH_PKGS="{{bench_pkgs}}" bash scripts/bench-compare.sh {{base}} {{args}}
+
+# Paint-stage cost at each zoom tier (docs/performance/performance-monitoring.md)
+bench-zoom *args:
+    go test -run '^$' -bench 'BenchmarkTileByZoom' -benchmem -benchtime 2s -count 5 {{args}} ./internal/watercolor/
+
+# Re-measure the numbers the per-tile budgets in
+# internal/watercolor/perfbudget_test.go are set from.
+bench-budget:
+    go test -count=1 -v -run 'TestTilePaintBudget' ./internal/watercolor/
+
 # Run just the blur benchmarks
 bench-blur *args:
     go test -ldflags "{{mapnik_ldflags}}" -run '^$' -bench 'Blur|Antialias' -benchmem {{args}} ./internal/mask/ ./internal/watercolor/
