@@ -23,13 +23,17 @@ func randomRow(rng *rand.Rand, w int) (src, maskRow []byte) {
 // kernel - the AVX2 one where the CPU has it - and the portable reference.
 //
 // The widths deliberately straddle the eight-pixel block: everything below it goes
-// entirely through the tail path, and everything above it exercises a tail of every
-// possible length.
+// entirely through the portable path, and 8 through 15 walk the assembly/Go handoff
+// across every tail length from 0 to 7.
 func TestSoftEdgeRowMatchesReference(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 
 	strengths := []float64{0, 0.001, 0.25, 0.5, 0.7539, 1}
-	widths := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 33, 64, 127, 256, 384}
+	widths := []int{
+		0, 1, 2, 3, 4, 5, 6, 7,
+		8, 9, 10, 11, 12, 13, 14, 15,
+		16, 17, 31, 33, 64, 127, 256, 384,
+	}
 
 	for _, strength := range strengths {
 		for _, w := range widths {
