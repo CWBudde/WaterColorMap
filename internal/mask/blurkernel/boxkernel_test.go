@@ -6,8 +6,13 @@ import (
 )
 
 // boxKernelWidths straddle the eight-column block the assembly works in: below it
-// everything falls to the tail loop, above it every tail length occurs.
-var boxKernelWidths = []int{0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 33, 64, 384}
+// everything falls to the portable loop, and 8 through 15 walk the assembly/Go
+// handoff across every tail length from 0 to 7.
+var boxKernelWidths = []int{
+	0, 1, 2, 7,
+	8, 9, 10, 11, 12, 13, 14, 15,
+	16, 17, 31, 33, 64, 384,
+}
 
 // TestBoxAccumMatchesReference is the differential test for the priming kernel.
 func TestBoxAccumMatchesReference(t *testing.T) {
