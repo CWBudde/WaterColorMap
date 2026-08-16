@@ -267,6 +267,15 @@ Batch runs no longer pre-render `@2x`, so the base-only column is what a bulk
 job costs today; the right-hand column is what it used to cost, and still does
 if every coordinate is wanted at both scales.
 
+That is the _whole_ render. The watercolor **paint stage** inside it is measured
+separately in
+[performance/performance-monitoring.md](performance/performance-monitoring.md)
+§ "Performance per zoom level", and the headline there is that it is flat across
+zoom — the zoom-scaled sigma above does not move it, and the metatile is 384²
+everywhere. What varies is how many layers a zoom has features for, roughly 3 at
+z0–5 against 9 at z14+, for tens of milliseconds against the seconds a full
+render takes. Not duplicated here.
+
 ## 5. Zoom limits in the code
 
 | limit                                       | value | where                                                                         |
@@ -287,4 +296,6 @@ perfectly well-defined grid, but this renderer has no data at that detail.
   tileset sizes, and the three-tier recommendation. Read before any bulk run.
 - [performance/blur-optimization.md](performance/blur-optimization.md) — why the
   sigmas are what they are.
+- [performance/performance-monitoring.md](performance/performance-monitoring.md) —
+  measured paint-stage cost per zoom, and the per-tile budgets CI enforces.
 - [seam-inspection.md](seam-inspection.md) — checking a zoom boundary visually.

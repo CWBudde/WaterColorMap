@@ -47,6 +47,8 @@ just check          # fmt + lint + test
 just serve          # tile server + Leaflet demo, generates missing tiles
 just bench-blur     # blur kernel benchmarks
 just load-test      # tile-server benchmarks (hit path, dedup, admission)
+just bench-budget   # the per-tile allocation/byte budget, printed
+just bench-compare  # interleaved A/B of the working tree against another revision
 just update-goldens # regenerate golden images (TestPipelineStages)
 ```
 
@@ -99,6 +101,11 @@ outstanding.
   the texture tiling rewrite: why tiling is a row `copy` rather than a per-texel sample,
   why textures are normalised to `*image.NRGBA` at load time, and **why no texture atlas
   was built**. Read before touching `internal/texture` or adding a texture loader.
+- [docs/performance/performance-monitoring.md](docs/performance/performance-monitoring.md) —
+  what the project gates on performance (allocations and bytes per tile, in
+  `TestTilePaintBudget`) versus what it only tracks (everything wall-clock), why that
+  line is drawn there, and how to raise a budget deliberately. Also holds the measured
+  cost per zoom level. Read before changing a budget constant or adding a benchmark to CI.
 - [docs/watercolor-tuning.md](docs/watercolor-tuning.md) — the `watercolor:` config
   block: every knob, which of the five pipeline stages it belongs to, and the
   current defaults. Supersedes the stale parameter list in `3.6`.

@@ -26,6 +26,8 @@ This document outlines the complete implementation plan for creating Stamen Wate
 > - Phase 5.11.7 (SIMD: the soft-edge and box-column AVX2 kernels, rejections,
 >   accuracy argument) →
 >   [docs/performance/simd-optimization.md](docs/performance/simd-optimization.md)
+> - Phase 5.11.8 (performance budgets, benchmark tracking, cost per zoom) →
+>   [docs/performance/performance-monitoring.md](docs/performance/performance-monitoring.md)
 > - Phase 7.1/7.2/7.3/7.7 (build, tile-server hardening, code quality) →
 >   [docs/history/phase-7-hardening.md](docs/history/phase-7-hardening.md)
 
@@ -595,19 +597,64 @@ Felzenszwalb's lower-envelope algorithm and is not vectorisable without replacin
 Profile, rejected candidates, the accuracy argument and the cross-platform story →
 [docs/performance/simd-optimization.md](docs/performance/simd-optimization.md)
 
-#### 5.11.8 Performance Monitoring & Regression Testing
+#### 5.11.8 Performance Monitoring & Regression Testing ✅ COMPLETE
 
-- [ ] Add continuous benchmark tracking to CI
-- [ ] Set performance budgets (max time/memory per tile)
-- [ ] Create performance regression tests
-- [ ] Document performance characteristics per zoom level
-- [ ] Add performance dashboard/reporting
+**Result**: the per-tile cost is now gated where it is reproducible and merely
+reported where it is not. `TestTilePaintBudget`
+(`internal/watercolor/perfbudget_test.go`) pins one 256 px five-layer tile at
+**28 allocations** and **1 790 000 bytes** — measured at 22 and 1 704 640,
+identical to the byte across five runs — plus a 400 ms catastrophe ceiling that
+is ~20x the ~18 ms measured. It costs 0.2 s and rides along in the existing
+`test-unit` job. `.github/workflows/bench.yaml` runs the Mapnik-free benchmark
+set against a base revision **interleaved**, summarises it with `benchstat` into
+the job summary, and gates nothing; it runs on pushes to `main` and on PRs
+labelled `benchmark`, not on every PR.
 
-**Combined Expected Speedup**: the "50-70% faster (86ms → 40-50ms per tile)" that stood
-here was arithmetic over the stale profile's per-item estimates, and every item that has
-actually been done came in somewhere else: the blur was far better than predicted, the
-allocation work moved wall time not at all, and pixel access beat its 5-10% estimate by
-several times over. Quote measurements from the archived documents instead of a forecast.
+Three checklist items came out differently from how they were written. The
+"performance budgets (max time/memory per tile)" became an allocation and byte
+budget with only a catastrophe ceiling on time: wall clock on a shared runner
+cannot support a percentage gate, and 5.11.4's archive already records a
+fictitious +1900% "regression" produced by an uninterleaved comparison on a far
+quieter machine. The **performance dashboard was deliberately not built** — for
+a single-maintainer repository it is a site to maintain in order to plot runner
+noise; the job summary plus a 90-day artifact of raw benchmark output answers
+the same question. And the per-zoom documentation had to report a negative:
+the paint stage is **flat** across zoom (17.9–19.4 ms at z6 through z17, one
+spread), because the zoom-scaled sigma stopped mattering when 5.11.2 removed
+blur from the profile and the metatile is 384² at every zoom. What varies is how
+many layers a zoom has features for — roughly 3 at z0–5 against 9 at z14+.
+
+What is gated and what is only tracked, where every number came from, how to
+raise a budget deliberately, and the cost-per-zoom tables →
+[docs/performance/performance-monitoring.md](docs/performance/performance-monitoring.md)
+
+**Combined Measured Outcome**: the "50-70% faster (86ms → 40-50ms per tile)"
+that stood here was arithmetic over a stale profile, and none of it survived
+contact with measurement. What was actually measured, per phase:
+
+| phase  | measured                                                                                   | against                                                                       |
+| ------ | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| 5.11.2 | blur 6–11x faster over the sigma range the masks use; `FullPipeline` −33% time, −38% bytes | [blur-optimization.md](docs/performance/blur-optimization.md)                 |
+| 5.11.3 | 2.19 MiB and 38 allocations per tile, from 5.85 MiB and 143; wall time unmoved             | [allocation-optimization.md](docs/performance/allocation-optimization.md)     |
+| 5.11.4 | `FullPipeline` −28% CPU; individual kernels −19% to −76%                                   | [pixel-access-optimization.md](docs/performance/pixel-access-optimization.md) |
+| 5.11.5 | paint stage −62.6% at 9 workers — opt-in, default 1 worker                                 | its own branch                                                                |
+| 5.11.6 | `FullPipeline` −13.9%                                                                      | its own branch                                                                |
+| 5.11.7 | `FullPipeline` −17.1%                                                                      | its own branch                                                                |
+
+**These do not compose into a single figure and must not be quoted as one.**
+5.11.5, 5.11.6 and 5.11.7 were each measured on a separate unmerged branch
+against that branch's own baseline; they overlap, they were not measured
+together, and 5.11.5's gain needs an opt-in worker count that defaults to 1. The
+honest summary is per-branch, and 5.11.8's budget test is what will tell you the
+combined figure once they land — re-measure with `just bench-budget` and
+`just bench-compare` then.
+
+The one number worth carrying forward is a scale one, and it is in
+[performance-monitoring.md](docs/performance/performance-monitoring.md) §
+"Performance per zoom level": the paint stage costs **tens of milliseconds**
+while a full tile render costs **seconds** (`docs/zoom-levels.md` § 4, ~0.3
+renders/s). Everything 5.11.2–5.11.7 optimised is 1–2% of a batch run. The next
+performance phase belongs in the Overpass fetch or the Mapnik render, not here.
 
 ### 5.12 Documentation and Deployment
 
