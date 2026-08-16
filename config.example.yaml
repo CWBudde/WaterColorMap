@@ -130,8 +130,9 @@ overpass:
 #   # Layers painted at the same time within one tile. 0 divides the CPU budget
 #   # by `workers`, so the default batch run (one worker per CPU) paints
 #   # serially and spends its cores on whole tiles. Raise it only when `workers`
-#   # is small; painting a metatile with 9 workers is ~2.6x faster than with 1,
-#   # at ~1.5x the peak memory (docs/performance/parallel-layers.md).
+#   # is small; painting a metatile with 9 workers is ~2.6x faster than with 1
+#   # and allocates ~1.5x as much, because every worker takes its own scratch
+#   # buffers out of the pools (docs/performance/parallel-layers.md).
 #   paint_workers: 0
 #   progress: true
 #   allow_failures: false # keep going when individual tiles fail
