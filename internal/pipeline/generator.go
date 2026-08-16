@@ -1218,18 +1218,22 @@ func paintLandLayer(
 	painted.set(geojson.LayerLand, paintedLand)
 	dc.Capture("10_painted_land", "Watercolor-painted land layer", paintedLand, 10)
 
-	// Create composite of land on white canvas for debugging
-	whiteCanvas := texture.TileTextureScaled(textures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY, params.Scale)
-	landOnCanvas, err := composite.CompositeLayersOverBase(
-		whiteCanvas,
-		map[geojson.LayerType]image.Image{geojson.LayerLand: paintedLand},
-		[]geojson.LayerType{geojson.LayerLand},
-		params.TileSize,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to composite land on canvas: %w", err)
+	// Composite of land on a white canvas, for the stage capture only. Tiling the paper
+	// texture over the whole metatile and compositing land onto it costs about as much
+	// as painting a layer, and without a debug context nothing ever looks at the result.
+	if dc != nil {
+		whiteCanvas := texture.TileTextureScaled(textures[geojson.LayerPaper], params.TileSize, params.OffsetX, params.OffsetY, params.Scale)
+		landOnCanvas, err := composite.CompositeLayersOverBase(
+			whiteCanvas,
+			map[geojson.LayerType]image.Image{geojson.LayerLand: paintedLand},
+			[]geojson.LayerType{geojson.LayerLand},
+			params.TileSize,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to composite land on canvas: %w", err)
+		}
+		dc.Capture("11_painted_land_on_canvas", "Land layer composited on white canvas", landOnCanvas, 11)
 	}
-	dc.Capture("11_painted_land_on_canvas", "Land layer composited on white canvas", landOnCanvas, 11)
 
 	return landMask, nil
 }
