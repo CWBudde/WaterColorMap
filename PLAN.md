@@ -601,11 +601,12 @@ Profile, rejected candidates, the accuracy argument and the cross-platform story
 
 **Result**: the per-tile cost is now gated where it is reproducible and merely
 reported where it is not. `TestTilePaintBudget`
-(`internal/watercolor/perfbudget_test.go`) pins one 256 px five-layer tile at
-**28 allocations** and **1 790 000 bytes** — measured at 22 and 1 704 640,
-identical to the byte across five runs — plus a 400 ms catastrophe ceiling that
-is ~20x the ~18 ms measured. It costs 0.2 s and rides along in the existing
-`test-unit` job. `.github/workflows/bench.yaml` runs the Mapnik-free benchmark
+(`internal/watercolor/perfbudget_test.go`) pins one delivered 256 px five-layer
+tile — painted as the 384² padded metatile production actually works on — at
+**28 allocations** and **3 910 000 bytes**, measured at 22 and 3 834 560,
+identical to the byte across ten runs and across a run under full-suite load,
+plus a 3 s catastrophe ceiling that is ~40x the ~36 ms measured. It costs 0.5 s
+and rides along in the existing `test-unit` job. `.github/workflows/bench.yaml` runs the Mapnik-free benchmark
 set against a base revision **interleaved**, summarises it with `benchstat` into
 the job summary, and gates nothing; it runs on pushes to `main` and on PRs
 labelled `benchmark`, not on every PR.
@@ -619,7 +620,7 @@ quieter machine. The **performance dashboard was deliberately not built** — fo
 a single-maintainer repository it is a site to maintain in order to plot runner
 noise; the job summary plus a 90-day artifact of raw benchmark output answers
 the same question. And the per-zoom documentation had to report a negative:
-the paint stage is **flat** across zoom (17.9–19.4 ms at z6 through z17, one
+the paint stage is **flat** across zoom (33.5–38.3 ms at z6 through z17, one
 spread), because the zoom-scaled sigma stopped mattering when 5.11.2 removed
 blur from the profile and the metatile is 384² at every zoom. What varies is how
 many layers a zoom has features for — roughly 3 at z0–5 against 9 at z14+.

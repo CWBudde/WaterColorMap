@@ -10,7 +10,7 @@ The short version:
 | ------------------- | ----------------- | ----------------------------------------- |
 | `allocs` per tile   | exactly           | **hard gate** in the normal unit-test run |
 | bytes per tile      | exactly           | **hard gate** in the normal unit-test run |
-| wall clock per tile | no                | catastrophe ceiling only (~80x measured)  |
+| wall clock per tile | no                | catastrophe ceiling only (~40x measured)  |
 | benchmark sec/op    | no, on any runner | tracked and reported, never gated         |
 
 ## Why not "fail the build if it gets 10% slower"
@@ -37,14 +37,27 @@ So the gate is put where the signal actually is.
 ## What is gated
 
 `internal/watercolor/perfbudget_test.go`, `TestTilePaintBudget`. It paints one
-256 px tile through the five production layers -- the same workload
-`BenchmarkFullPipeline` runs -- and asserts three budgets:
+delivered 256 px tile through the five production layers and asserts three
+budgets:
 
 | budget          | value       | measured on main | headroom |
 | --------------- | ----------- | ---------------- | -------- |
 | allocations     | 28          | 22               | +6       |
-| allocated bytes | 1 790 000 B | 1 704 640 B      | +5%      |
-| wall clock      | 1500 ms     | ~19 ms           | ~80x     |
+| allocated bytes | 3 910 000 B | 3 834 560 B      | +2%      |
+| wall clock      | 3000 ms     | ~36 ms           | ~40x     |
+
+**It paints 384x384, not 256x256, and that is the whole point of the number.**
+`pipeline.Generator.renderLayers` sets `params.TileSize` to the padded metatile
+`tileSize + 2*RequiredPaddingPx(params)` before any layer is painted, and every
+buffer in the paint path is sized from `params.TileSize`. For the default 256 px
+tile that is 384x384 at every zoom (`RequiredPaddingPx` is pinned by
+`MinGeometryPaddingPx = 64`; see § "Performance per zoom level"), so a budget
+taken on a bare 256 px image would price 44% of the pixels production pays for --
+and, worse, would be unable to gate: a whole extra 256x256 gray plane is 65 536 B,
+which fits inside any workable percentage headroom on a 1.7 MB base.
+`tileBudgetWorkload` therefore repeats the generator's four steps in the
+generator's order -- `ApplyScale`, the zoom sigmas, `RequiredPaddingPx`,
+`params.TileSize` -- rather than approximating them.
 
 This is the class of regression 5.11.3 fixed. That phase took the tile from 143
 allocations to 38, and 5.11.4 took it further; nothing but a test stops the next
@@ -53,10 +66,10 @@ allocation costs **thousands** of allocations per tile, so a +6 budget is not a
 compromise between sensitivity and stability -- it catches the real failure mode
 with three orders of magnitude to spare.
 
-The test costs about 0.2 s and runs in `just test` and in the existing CI
+The test costs about 0.5 s and runs in `just test` and in the existing CI
 `test-unit` job. No new workflow, no Mapnik install, no extra minutes.
 
-### The three guards that keep it non-flaky
+### The four guards that keep it non-flaky
 
 1. **`//go:build !race`.** The race detector allocates on its own account and
    multiplies wall time. Under `-race` the file is not compiled at all, which is
@@ -71,15 +84,29 @@ The test costs about 0.2 s and runs in `just test` and in the existing CI
    so a collection landing mid-measurement reappears as several megabyte
    allocations that have nothing to do with the code under test. That is exactly
    why `BenchmarkFullPipeline` reports anywhere between 26 and 28 `allocs/op` on
-   one unchanged binary. With the collector off, five consecutive runs of the
-   budget test gave **22 allocations and 1 704 640 bytes every time**, to the
-   byte -- and 22-23 allocations with the whole test suite running alongside.
+   one unchanged binary.
+4. **`GOMAXPROCS(1)` for the duration of the measurement**, restored afterwards.
+   This one is a consequence of the third and was found by measuring the padded
+   metatile: `sync.Pool` shards per P, a goroutine that runs for tens of
+   milliseconds gets preempted by `sysmon` and can resume on a different P whose
+   shard is empty, and the next `Get` then misses and allocates a fresh
+   megabyte-sized buffer. With the default 12 Ps the test reported 22 allocs /
+   3 834 560 B on most runs and 29 allocs / 4 870 979 B whenever a migration
+   landed badly -- a 27% swing that no headroom could have absorbed honestly.
+   One P is one shard, so there is nothing to migrate away from. It costs
+   nothing in fidelity: the paint path is single-goroutine, so the scheduler
+   cannot change the work being measured, and no test in `internal/watercolor`
+   calls `t.Parallel()`.
 
-That last point is the reason a budget test is viable here at all. Had the
-number wobbled by ±2 the gate would have needed slack wide enough to be useless.
+With all four in place, ten consecutive runs of the budget test give **22
+allocations and 3 834 560 bytes every time**, bit-identical.
+
+That is the reason a budget test is viable here at all. Had the number wobbled
+by ±2 the gate would have needed slack wide enough to be useless -- and the 2%
+byte budget in particular only works because the measurement is exact.
 
 `measurePerRun` also restores the collector **and forces one collection** before
-returning, so it does not leave 20 MB of garbage and a shifted GC pace for
+returning, so it does not leave ~38 MB of garbage and a shifted GC pace for
 whatever test runs next.
 
 ### A known flake this work did not create
@@ -100,19 +127,19 @@ of the two.
 
 ### The wall-clock ceiling, and why it is set that loosely
 
-1.5 s against a measured 19 ms is roughly 80x, and it is checked against the
+3 s against a measured 36 ms is roughly 40x, and it is checked against the
 **fastest** of the ten runs rather than their mean.
 
 Both of those look like giving up, and both were arrived at by measurement.
 A mean is dragged upward by whatever else the machine is doing: the same tile
-measures ~18 ms with the package alone and 33-46 ms while `just test` has twelve
-package binaries in flight on this 12-thread laptop. Taking the minimum removes
-most of that -- a run can be delayed by contention but can never finish faster
-than the work takes -- yet even the minimum still reaches 37 ms under that load.
+measures ~36 ms with the package alone and roughly twice that while `just test`
+has twelve package binaries in flight on this 12-thread laptop. Taking the
+minimum removes most of that -- a run can be delayed by contention but can never
+finish faster than the work takes -- yet even the minimum rises under that load.
 A 2-core hosted runner running the same suite has less headroom again.
 
 So the choice is between a tight ceiling that fires on a busy runner and teaches
-everyone to ignore it, and a loose one that only ever fires for cause. At 80x it
+everyone to ignore it, and a loose one that only ever fires for cause. At 40x it
 still catches what it exists for: an inner loop that went quadratic, or
 `blurkernel.PlanFor` falling back to naive convolution. Those are 10x to 1000x
 events. Anything finer belongs to the benchmark workflow, which does not gate.
@@ -143,7 +170,10 @@ Three decisions in it are worth keeping:
 - **Not on every PR.** It runs on pushes to `main`, which is the trend line, and
   on pull requests carrying the `benchmark` label, which is how you ask for a
   comparison when you are actually optimising something. Everything else gets
-  the 0.2 s allocation gate and nothing more.
+  the 0.5 s allocation gate and nothing more. (`tests.yaml` lists `labeled` in
+  its `pull_request` `types` so that applying the label to an already-open PR
+  starts the job; without it the default trigger set would ignore a label added
+  after the last push.)
 
 Output goes to the job summary (rendered `benchstat` table) and to a 90-day
 artifact holding the raw `base.txt` / `head.txt` in Go benchmark format, so any
@@ -170,31 +200,32 @@ and `BENCH_OUT` from the environment; see the header of
 
 ## Where the numbers came from
 
-All three budgets were measured on `main` at `7ebf18b`, i7-1255U (12 threads),
+All three budgets were measured on `main` at `636971a`, i7-1255U (12 threads),
 go1.26.5, linux/amd64, load average below 1.0:
 
 ```
-$ just bench-budget          # five consecutive runs, package alone
-per tile: 22 allocs, 1704640 B, 17.222ms (fastest of 10)
-per tile: 22 allocs, 1704640 B, 18.975ms (fastest of 10)
-per tile: 22 allocs, 1704640 B, 17.405ms (fastest of 10)
-per tile: 22 allocs, 1704640 B, 17.249ms (fastest of 10)
-per tile: 22 allocs, 1704640 B, 18.039ms (fastest of 10)
+$ just bench-budget          # ten consecutive runs, package alone
+per tile: 22 allocs, 3834560 B, 34.824ms (fastest of 10)
+per tile: 22 allocs, 3834560 B, 36.154ms (fastest of 10)
+per tile: 22 allocs, 3834560 B, 35.956ms (fastest of 10)
+per tile: 22 allocs, 3834560 B, 36.254ms (fastest of 10)
+per tile: 22 allocs, 3834560 B, 36.375ms (fastest of 10)
+...                                        (all ten identical to the byte)
 ```
 
-Five uncached runs of the **whole** suite (`go test ./... -v`, twelve package
-binaries competing) gave 22-23 allocations, 1 704 640 to 1 711 390 bytes, and a
-fastest run of 21-37 ms. That +1 allocation and +6.8 KB is the whole in-suite
-variation, and it is what the +6 / +5% headroom is sized against; the wall-clock
-spread over the same runs is 1.8x, which is why nothing tight is asserted on it.
+Five runs taken **while the whole suite was running alongside** gave 22
+allocations and 3 834 560 bytes -- the same figures, unchanged -- with a fastest
+run of 33.9 to 38.0 ms. The allocation and byte columns have no in-suite
+variation at all once `GOMAXPROCS(1)` removes the pool-shard migration; the
+wall-clock column still spreads, which is why nothing tight is asserted on it.
 
 **`PLAN.md` said 38 allocations and 2.2 MiB, and both figures are superseded.**
 They came from `BenchmarkFullPipeline` before 5.11.4 and they included
-GC-cleared pool refills. The current benchmark reports 26-28 allocs/op and
-~1.77 MB/op for the same work; the budget test's 22 and 1 704 640 are the same
-quantity with the pool-refill noise removed. Do not reconcile the two by
-averaging -- they are different measurements of the same pipeline, and the
-budget test's is the reproducible one.
+GC-cleared pool refills. That benchmark still measures an unpadded 256x256
+buffer, so its 26-28 allocs/op and ~1.77 MB/op are a _smaller_ workload than the
+budget test's, not a contradictory measurement of the same one; the per-zoom
+benchmark below is the padded-metatile counterpart and reports ~3.88 MB/op. Do
+not reconcile any of the three by averaging.
 
 ## Updating a budget
 
@@ -209,8 +240,11 @@ the message. The procedure:
    is a reason. "It went up and I do not know why" is a bug report, not a budget
    change.
 3. Set the new budget to the new measurement plus the same headroom that is
-   there now: +6 allocations, +5% bytes. Do not add headroom on top of headroom;
+   there now: +6 allocations, +2% bytes. Do not add headroom on top of headroom;
    ratcheting a budget upward one crisis at a time is how a gate stops gating.
+   The byte headroom must stay below one gray metatile plane (147 456 B at
+   384x384, i.e. 3.8% of the current base) or the budget stops being able to
+   catch the cheapest real regression there is.
 4. Update the measured figures in the comment block at the top of
    `perfbudget_test.go` **and** the table in this document. A budget whose stated
    provenance is stale is worse than no budget.
@@ -235,7 +269,7 @@ sigma in `Params`, so raising a blur sigma past the 64 px geometry floor widens
 every buffer at once. That is a legitimate cost of a look change; note it in the
 commit and re-measure.
 
-**Wall clock over the ceiling.** Not a noise result at 80x. Profile it:
+**Wall clock over the ceiling.** Not a noise result at 40x. Profile it:
 
 ```bash
 go test -run '^$' -bench BenchmarkFullPipeline -cpuprofile cpu.out ./internal/watercolor/
@@ -259,13 +293,13 @@ five-layer tile:
 
 | zoom | sigma factor | sec/op         | B/op   | allocs/op |
 | ---- | ------------ | -------------- | ------ | --------- |
-| 6    | x1.4         | 17.9 - 18.4 ms | 1.73 M | 27-28     |
-| 11   | x1.4         | 18.3 - 18.9 ms | 1.73 M | 27-28     |
-| 13   | x1.0         | 18.4 - 18.9 ms | 1.73 M | 26-27     |
-| 14   | x0.7         | 18.7 - 19.4 ms | 1.73 M | 27        |
-| 17   | x0.7         | 18.1 - 18.4 ms | 1.73 M | 27        |
+| 6    | x1.4         | 33.8 - 37.2 ms | 3.88 M | 27-28     |
+| 11   | x1.4         | 34.3 - 38.3 ms | 3.88 M | 27-28     |
+| 13   | x1.0         | 34.2 - 37.2 ms | 3.88 M | 26-27     |
+| 14   | x0.7         | 34.6 - 35.3 ms | 3.89 M | 26-28     |
+| 17   | x0.7         | 33.5 - 35.0 ms | 3.89 M | 27-28     |
 
-The whole range is 17.9-19.4 ms, which is inside the run-to-run spread. Blur
+The whole range is 33.5-38.3 ms, which is inside the run-to-run spread. Blur
 stopped being a bottleneck in 5.11.2 (it left the top-14 profile entries
 entirely), so a ±40% swing in one sigma no longer moves the total. Memory does
 not move either, and cannot: the metatile is 384x384 at every zoom, because
@@ -279,7 +313,7 @@ would break the tie -- at which point low zoom would become the _expensive_ end,
 renders empty produces no output file, and the generator skips it
 (`internal/pipeline/generator.go:805`, `paintSimpleLayer`'s `img == nil` guard).
 So the paint stage costs the sum of the layers a zoom actually has features for.
-Measured per layer, one 256 px tile, same fixture:
+Measured per layer on an **unpadded 256x256** buffer, same fixture:
 
 | layer    | sec/op  | B/op    | allocs/op |
 | -------- | ------- | ------- | --------- |
@@ -292,8 +326,15 @@ Measured per layer, one 256 px tile, same fixture:
 Land is dearest because it is the only layer carrying a distance transform and a
 shade pass (`ShadeSigma: 7.48`); it is also the only one that is never absent.
 
+These are 256x256 figures and the production metatile is 384x384, i.e. 2.25x the
+pixels, so read the table below as the **shape** of the curve rather than as wall
+times to quote: multiply by roughly 2.25 for the delivered per-tile cost, which
+is how the five-layer row reaches the ~36 ms the budget test measures. What the
+per-layer split is actually for is the ratios, and those do not depend on the
+buffer size.
+
 Combining that with the query rule windows in `docs/zoom-levels.md` § 1 gives
-the shape of the curve. Layers with features, by zoom:
+the shape of the curve. Layers with features, by zoom (unpadded 256x256):
 
 | zoom  | layers painted                                              | n   | paint stage |
 | ----- | ----------------------------------------------------------- | --- | ----------- |
