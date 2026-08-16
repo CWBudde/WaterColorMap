@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/cwbudde/watercolormap/internal/geojson"
 	"github.com/cwbudde/watercolormap/internal/mask"
 	"github.com/cwbudde/watercolormap/internal/renderer"
+	"github.com/cwbudde/watercolormap/internal/safe"
 	"github.com/cwbudde/watercolormap/internal/texture"
 	"github.com/cwbudde/watercolormap/internal/tile"
 	"github.com/cwbudde/watercolormap/internal/tileformat"
@@ -66,8 +68,16 @@ func (dc *DebugContext) SortedStages() []StageCapture {
 
 	sorted := make([]StageCapture, len(dc.Stages))
 	copy(sorted, dc.Stages)
+	// Name breaks the ZOrder ties, and it has to: layers are painted concurrently,
+	// so the order stages arrive in is a scheduling artefact, and several stages
+	// share a ZOrder (14 is claimed three times, 15 and 18 twice each). Sorting on
+	// ZOrder alone would hand a different sequence back on different runs.
 	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].ZOrder < sorted[j].ZOrder
+		if sorted[i].ZOrder != sorted[j].ZOrder {
+			return sorted[i].ZOrder < sorted[j].ZOrder
+		}
+
+		return sorted[i].Name < sorted[j].Name
 	})
 	return sorted
 }
@@ -133,7 +143,44 @@ type GeneratorOptions struct {
 	// ImageFormat is WebP. The generate command defaults it to
 	// tileformat.DefaultWebPEffort.
 	WebPEffort int
+
+	// PaintWorkers is how many of a tile's ten layers may be painted at the same
+	// time. Anything below 1 means 1, which is the old behaviour and the right
+	// value whenever the caller already renders several tiles at once — see
+	// AutoPaintWorkers for the budget the callers divide up.
+	PaintWorkers int
 }
+
+// AutoPaintWorkers divides the process-wide CPU budget over the tiles a caller has in
+// flight, and is what every construction site passes when its configuration leaves
+// PaintWorkers at 0.
+//
+// Painting layers concurrently and rendering tiles concurrently draw on the same
+// cores, so multiplying them only adds scheduler pressure and per-worker scratch
+// buffers. `generate --workers` already defaults to one worker per CPU and the tile
+// server admits MaxConcurrentGenerations renders at once; in both cases the machine is
+// saturated at the tile level and this returns 1. It returns a real number of workers
+// exactly where the outer parallelism cannot fill the machine: a single-tile
+// `generate`, a `--workers 1` batch, or a server configured to render one tile at a
+// time.
+func AutoPaintWorkers(tilesInFlight int) int {
+	if tilesInFlight < 1 {
+		tilesInFlight = 1
+	}
+	workers := runtime.GOMAXPROCS(0) / tilesInFlight
+	// Nine of the ten layers are one wave; more workers than that only idle.
+	if workers > maxPaintWorkers {
+		workers = maxPaintWorkers
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	return workers
+}
+
+// maxPaintWorkers is the size of the independent wave in paintAllLayers.
+const maxPaintWorkers = 9
 
 // TileWriter writes tile data to a storage backend.
 type TileWriter interface {
@@ -255,6 +302,16 @@ func NewGenerator(ds DataSource, stylesDir, texturesDir, outputDir string, tileS
 		return nil, fmt.Errorf("invalid watercolor configuration: %w", err)
 	}
 
+	// Resolve here rather than per tile, and clamp rather than reject: an
+	// out-of-range worker count is a tuning mistake, not a reason to refuse to
+	// render. Every caller that has not thought about it gets the serial pipeline.
+	if opts.PaintWorkers < 1 {
+		opts.PaintWorkers = 1
+	}
+	if opts.PaintWorkers > maxPaintWorkers {
+		opts.PaintWorkers = maxPaintWorkers
+	}
+
 	return &Generator{
 		ds:         ds,
 		stylesDir:  stylesDir,
@@ -321,7 +378,8 @@ func (g *Generator) GenerateWithData(ctx context.Context, coords tile.Coords, fo
 	masks := buildMasks(renderResult.rawLayers, renderResult.params, dc)
 
 	// Phase 3: Paint all layers with watercolor effects
-	painted, err := paintAllLayers(renderResult.rawLayers, masks, renderResult.params, g.textures, dc)
+	painted, err := paintAllLayers(renderResult.rawLayers, masks, renderResult.params, g.textures, dc,
+		g.logger, g.options.PaintWorkers)
 	if err != nil {
 		return "", "", err
 	}
@@ -955,39 +1013,173 @@ func buildMasks(
 	}
 }
 
-// paintAllLayers applies watercolor effects to all layers.
+// paintedSet collects the painted layers. Paint jobs run concurrently, so the map
+// behind it needs a lock. Insertion order never reaches a tile: the compositor reads
+// the map back in composite.DefaultOrder.
+type paintedSet struct {
+	layers map[geojson.LayerType]image.Image
+	mu     sync.Mutex
+}
+
+func newPaintedSet() *paintedSet {
+	return &paintedSet{layers: make(map[geojson.LayerType]image.Image)}
+}
+
+func (p *paintedSet) set(layer geojson.LayerType, img image.Image) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.layers[layer] = img
+}
+
+// paintJob is one layer's paint. The name is only used to label a recovered panic.
+type paintJob struct {
+	run  func() error
+	name string
+}
+
+// runPaintJobs runs jobs with at most workers of them in flight, or straight through
+// when workers is 1.
+//
+// Nothing about the result depends on the schedule. The jobs write disjoint entries of
+// a paintedSet, they read rawLayers, the mask set and the watercolor params without
+// writing them, and every buffer they borrow comes from a sync.Pool, so each worker
+// gets its own. The error returned is the one from the earliest failing job in list
+// order rather than the first to arrive, so a broken layer reports itself identically
+// at any degree of concurrency.
+//
+// The serial path stops at the first failure and the parallel path finishes the jobs
+// already in flight. That is the one visible difference, and it is invisible in
+// practice: a paint failure aborts the tile either way.
+func runPaintJobs(logger *slog.Logger, jobs []paintJob, workers int) error {
+	if workers <= 1 || len(jobs) < 2 {
+		for _, job := range jobs {
+			if err := job.run(); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	errs := make([]error, len(jobs))
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+
+	for i, job := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			// Nothing above a bare `go` recovers, so an unhandled panic here would
+			// take a whole tile server down instead of failing this one tile.
+			if err := safe.Do(logger, "paint "+job.name, func() { errs[i] = job.run() }); err != nil {
+				errs[i] = err
+			}
+		}()
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// paintAllLayers applies watercolor effects to all layers, painting up to workers of
+// them at once.
+//
+// The dependency graph is shallow. Everything the layers need — the rendered layer
+// images and the alpha masks buildMasks derived from them — exists before the first
+// paint starts, and exactly one layer consumes another layer's output: parks is
+// clipped to the land mask, which the land paint produces. So the ten layers are one
+// wave of nine independent jobs followed by parks.
+//
+// Land goes first in the list because it gates that tail, and because it is the most
+// expensive single job: it is the only layer painted from the union of all the others.
 func paintAllLayers(
 	rawLayers map[geojson.LayerType]image.Image,
 	masks *maskSet,
 	params watercolor.Params,
 	textures map[geojson.LayerType]image.Image,
 	dc *DebugContext,
+	logger *slog.Logger,
+	workers int,
 ) (map[geojson.LayerType]image.Image, error) {
-	painted := make(map[geojson.LayerType]image.Image)
+	painted := newPaintedSet()
 
-	if err := paintWaterLayers(painted, rawLayers, params, dc); err != nil {
+	// Roads/railroads/highways are subtracted from urban and civic. Deriving the union
+	// here rather than inside the area paints keeps it out of the concurrent section:
+	// two jobs read it.
+	roadsUnion := mask.MaxMasks(masks.roadsMask, masks.railroadsMask, masks.highwaysAlpha)
+	dc.Capture("14a_roads_railroads_highways_union", "Union of roads + railroads + highways for area subtraction", roadsUnion, 14)
+
+	var landMask *image.Gray
+	jobs := []paintJob{
+		{name: "land", run: func() error {
+			var err error
+			landMask, err = paintLandLayer(painted, masks, params, textures, dc)
+
+			return err
+		}},
+		{name: "water", run: func() error {
+			return paintDirectLayer(painted, rawLayers, geojson.LayerWater, params, dc,
+				"12_painted_water", "Watercolor-painted water layer", 12)
+		}},
+		{name: "rivers", run: func() error {
+			return paintDirectLayer(painted, rawLayers, geojson.LayerRivers, params, dc,
+				"13_painted_rivers", "Watercolor-painted rivers layer", 18)
+		}},
+		// Roads are also part of the non-land union, so they carve holes into land.
+		// Painting them fills those holes with the intended style instead of leaving
+		// paper showing through.
+		{name: "roads", run: func() error {
+			return paintDirectLayer(painted, rawLayers, geojson.LayerRoads, params, dc,
+				"15_painted_roads", "Watercolor-painted roads layer", 15)
+		}},
+		{name: "railroads", run: func() error {
+			return paintDirectLayer(painted, rawLayers, geojson.LayerRailroads, params, dc,
+				"16_painted_railroads", "Watercolor-painted railroads layer", 16)
+		}},
+		{name: "highways", run: func() error {
+			return paintDirectLayer(painted, rawLayers, geojson.LayerHighways, params, dc,
+				"19_painted_highways", "Watercolor-painted highways layer", 19)
+		}},
+		{name: "urban", run: func() error {
+			return paintAreaMinusRoads(painted, rawLayers, geojson.LayerUrban, roadsUnion, params, dc,
+				"14b_urban_minus_roads", "Urban areas with roads/railroads/highways subtracted", 14,
+				"14_painted_urban", "Watercolor-painted urban layer", 14)
+		}},
+		{name: "civic", run: func() error {
+			return paintAreaMinusRoads(painted, rawLayers, geojson.LayerCivic, roadsUnion, params, dc,
+				"14c_civic_minus_roads", "Civic areas with roads/railroads/highways subtracted", 14,
+				"15_painted_civic", "Watercolor-painted civic layer", 15)
+		}},
+		// Buildings are subtracted from land and rendered on top.
+		{name: "buildings", run: func() error {
+			return paintDirectLayer(painted, rawLayers, geojson.LayerBuildings, params, dc,
+				"18_painted_buildings", "Watercolor-painted buildings layer", 18)
+		}},
+	}
+
+	if err := runPaintJobs(logger, jobs, workers); err != nil {
 		return nil, err
 	}
 
-	landMask, err := paintLandLayer(painted, masks, params, textures, dc)
-	if err != nil {
+	// The WaitGroup above is what publishes landMask to this goroutine.
+	if err := paintParksLayer(painted, rawLayers, landMask, params, dc); err != nil {
 		return nil, err
 	}
 
-	if err := paintLineLayers(painted, rawLayers, params, dc); err != nil {
-		return nil, err
-	}
-
-	if err := paintAreaLayers(painted, rawLayers, masks, landMask, params, dc); err != nil {
-		return nil, err
-	}
-
-	return painted, nil
+	return painted.layers, nil
 }
 
 // paintDirectLayer paints a layer straight from its own alpha, if it was rendered.
 func paintDirectLayer(
-	painted map[geojson.LayerType]image.Image,
+	painted *paintedSet,
 	rawLayers map[geojson.LayerType]image.Image,
 	layer geojson.LayerType,
 	params watercolor.Params,
@@ -1004,32 +1196,14 @@ func paintDirectLayer(
 	if err != nil {
 		return fmt.Errorf("failed to paint %s: %w", layer, err)
 	}
-	painted[layer] = result
+	painted.set(layer, result)
 	dc.Capture(stage, description, result, zorder)
 	return nil
 }
 
-// paintWaterLayers paints water and rivers from their own alpha masks.
-func paintWaterLayers(
-	painted map[geojson.LayerType]image.Image,
-	rawLayers map[geojson.LayerType]image.Image,
-	params watercolor.Params,
-	dc *DebugContext,
-) error {
-	// Paint water from its own alpha mask (not the combined non-land mask)
-	if err := paintDirectLayer(painted, rawLayers, geojson.LayerWater, params, dc,
-		"12_painted_water", "Watercolor-painted water layer", 12); err != nil {
-		return err
-	}
-
-	// Paint rivers from their own alpha mask
-	return paintDirectLayer(painted, rawLayers, geojson.LayerRivers, params, dc,
-		"13_painted_rivers", "Watercolor-painted rivers layer", 18)
-}
-
 // paintLandLayer paints land from the non-land union mask and returns the land mask.
 func paintLandLayer(
-	painted map[geojson.LayerType]image.Image,
+	painted *paintedSet,
 	masks *maskSet,
 	params watercolor.Params,
 	textures map[geojson.LayerType]image.Image,
@@ -1041,7 +1215,7 @@ func paintLandLayer(
 	if err != nil {
 		return nil, fmt.Errorf("failed to paint land: %w", err)
 	}
-	painted[geojson.LayerLand] = paintedLand
+	painted.set(geojson.LayerLand, paintedLand)
 	dc.Capture("10_painted_land", "Watercolor-painted land layer", paintedLand, 10)
 
 	// Create composite of land on white canvas for debugging
@@ -1060,73 +1234,9 @@ func paintLandLayer(
 	return landMask, nil
 }
 
-// paintLineLayers paints roads, railroads and highways from their own alpha masks.
-func paintLineLayers(
-	painted map[geojson.LayerType]image.Image,
-	rawLayers map[geojson.LayerType]image.Image,
-	params watercolor.Params,
-	dc *DebugContext,
-) error {
-	// Paint roads from their own alpha mask
-	// NOTE: Roads are also part of the derived non-land union mask, so they carve holes
-	// into land. Painting roads fills those holes with the intended style (instead of
-	// leaving paper showing through).
-	if err := paintDirectLayer(painted, rawLayers, geojson.LayerRoads, params, dc,
-		"15_painted_roads", "Watercolor-painted roads layer", 15); err != nil {
-		return err
-	}
-
-	// Paint railroads from their own alpha mask
-	if err := paintDirectLayer(painted, rawLayers, geojson.LayerRailroads, params, dc,
-		"16_painted_railroads", "Watercolor-painted railroads layer", 16); err != nil {
-		return err
-	}
-
-	// Paint highways/major roads on top
-	return paintDirectLayer(painted, rawLayers, geojson.LayerHighways, params, dc,
-		"19_painted_highways", "Watercolor-painted highways layer", 19)
-}
-
-// paintAreaLayers paints urban, civic, parks and buildings, subtracting line layers
-// from the developed areas.
-func paintAreaLayers(
-	painted map[geojson.LayerType]image.Image,
-	rawLayers map[geojson.LayerType]image.Image,
-	masks *maskSet,
-	landMask *image.Gray,
-	params watercolor.Params,
-	dc *DebugContext,
-) error {
-	// Create roads+railroads+highways union mask for subtracting from urban/civic areas
-	roadsRailroadsHighwaysUnion := mask.MaxMasks(masks.roadsMask, masks.railroadsMask, masks.highwaysAlpha)
-	dc.Capture("14a_roads_railroads_highways_union", "Union of roads + railroads + highways for area subtraction", roadsRailroadsHighwaysUnion, 14)
-
-	// Paint urban with roads/railroads/highways subtracted (similar to land subtraction)
-	if err := paintAreaMinusRoads(painted, rawLayers, geojson.LayerUrban, roadsRailroadsHighwaysUnion, params, dc,
-		"14b_urban_minus_roads", "Urban areas with roads/railroads/highways subtracted", 14,
-		"14_painted_urban", "Watercolor-painted urban layer", 14); err != nil {
-		return err
-	}
-
-	// Paint civic with roads/railroads/highways subtracted (similar to land subtraction)
-	if err := paintAreaMinusRoads(painted, rawLayers, geojson.LayerCivic, roadsRailroadsHighwaysUnion, params, dc,
-		"14c_civic_minus_roads", "Civic areas with roads/railroads/highways subtracted", 14,
-		"15_painted_civic", "Watercolor-painted civic layer", 15); err != nil {
-		return err
-	}
-
-	if err := paintParksLayer(painted, rawLayers, landMask, params, dc); err != nil {
-		return err
-	}
-
-	// Buildings painted directly (they are subtracted from land, rendered on top)
-	return paintDirectLayer(painted, rawLayers, geojson.LayerBuildings, params, dc,
-		"18_painted_buildings", "Watercolor-painted buildings layer", 18)
-}
-
 // paintAreaMinusRoads paints an area layer with the road union subtracted from it.
 func paintAreaMinusRoads(
-	painted map[geojson.LayerType]image.Image,
+	painted *paintedSet,
 	rawLayers map[geojson.LayerType]image.Image,
 	layer geojson.LayerType,
 	roadsUnion *image.Gray,
@@ -1151,14 +1261,14 @@ func paintAreaMinusRoads(
 	if err != nil {
 		return fmt.Errorf("failed to paint %s: %w", layer, err)
 	}
-	painted[layer] = result
+	painted.set(layer, result)
 	dc.Capture(paintedStage, paintedDescription, result, paintedZOrder)
 	return nil
 }
 
 // paintParksLayer constrains parks to land+urban+civic and paints them.
 func paintParksLayer(
-	painted map[geojson.LayerType]image.Image,
+	painted *paintedSet,
 	rawLayers map[geojson.LayerType]image.Image,
 	landMask *image.Gray,
 	params watercolor.Params,
@@ -1188,7 +1298,7 @@ func paintParksLayer(
 	if err != nil {
 		return fmt.Errorf("failed to paint parks: %w", err)
 	}
-	painted[geojson.LayerParks] = parksPainted
+	painted.set(geojson.LayerParks, parksPainted)
 	dc.Capture("17_painted_parks", "Watercolor-painted parks layer", parksPainted, 17)
 	return nil
 }
